@@ -50,18 +50,19 @@ def sheaf_laplacian(sheaves, edges, lengths):
     sheaf_laplacian = torch.zeros((B, T, T, D, D), device=sheaves.device, dtype=sheaves.dtype)
     # print("L shape: ", sheaf_laplacian.shape)
     edges_t = torch.transpose(edges,1,2)
-    non_diag = torch.einsum("...xy,...zy->...xz", -1*sheaves, sheaves.roll(2,1)) # -F^T(u <= (u,z))* F(z <= (u,z)), roll the pair dimension
     #sum_{u~z} F^T(u <= (u,z)) F(u <= (u,z)) 
-
-    diag = torch.einsum("...xy,...zy->...xz", sheaves, sheaves)  # B, E, 2, D, D
 
     # Handle [-1,-1] padding by zero-masking padded edge features and redirecting to [0,0]
 
     # create boolean mask of valid edges
     valid_edge_mask = (edges[...,0] != -1) & (edges[...,1] != -1)
 
+    print(sheaves)
+    print(sheaves.roll(1,2))
     # compute non-diagonal elements
-    non_diag = torch.einsum("...xy,...zy->...xz", -1 * sheaves, sheaves.roll(2,1))
+    non_diag = torch.einsum("...xy,...zy->...xz", -1 * sheaves, sheaves.roll(1,2)) # use .roll(1,2) for sheaf shape B, E, 2, D, D 
+    # Shifts=1, dim=2
+    # Just shifts [u,v] -> [v,u]
 
     # zero out non-diagonal features for fake edges 
     non_diag = torch.where(valid_edge_mask[:, :, None, None, None], non_diag, 0.0)
@@ -92,7 +93,7 @@ def sheaf_laplacian(sheaves, edges, lengths):
 
     return sheaf_laplacian, laplacian_lengths
 
-def sheaf_laplacian_adjacency(sheaves, lengths):
+def sheaf_laplacian_adjacency(sheaves, padding):
     # sheaves: B,T, T, D,D sheaves as an adjacency matrix of restriction maps d x d
     #   pairs should be flattened into batch dim
     #   if [:, t1, t2] does not represent an edge it should be 0
@@ -104,28 +105,64 @@ def sheaf_laplacian_adjacency(sheaves, lengths):
     #       padding lengths for the square laplacian matrices
     # TODO clear out padded parts
     B,T,_,D,_ = sheaves.shape
-    print("sheaves.shape: ", sheaves.shape)
     sheaf_laplacian = torch.eye(T, device = sheaves.device, dtype=sheaves.dtype)[None,:,:,None,None].repeat(B, 1,1, D,D)
     diagonal = torch.einsum("buvxy,buvzy->buxz", sheaves, sheaves) # B, T, D, D 
     sheaf_laplacian = diagonal[:,:,None,:,:] * sheaf_laplacian
     non_diagonal = torch.einsum("buvxy,bvuzy->buvxz", -1*sheaves, sheaves)
     sheaf_laplacian += non_diagonal
-    laplacian_lengths = lengths * D # 
+    laplacian_padding = padding * D 
     sheaf_laplacian = sheaf_laplacian.permute(0,1,3,2,4).reshape(B, T*D, T*D)
-    return sheaf_laplacian, laplacian_lengths
+    return sheaf_laplacian, laplacian_padding
 
 if __name__ == "__main__": 
      
     T = 3
-    D = 3
-
-    edges = torch.tensor([[0,1], [1,2], [-1,-1]], dtype=torch.int) # 1, 2
+    D = 2  # Set to 2 to test matrix operations properly
+    
+    # Use torch.long for indices to prevent scattering/indexing errors
+    edges = torch.tensor([[0, 1], [1, 2], [-1, -1]], dtype=torch.long) 
     E = edges.shape[0]
     paddings = torch.tensor([True, True, True])
-    sheaves = torch.rand(E,2,D,D)
-
-    print(sheaf_laplacian(sheaves.unsqueeze(0), edges.unsqueeze(0), paddings.unsqueeze(0))[0])
     
+    # Initialize deterministic sheaves
+    sheaves = torch.zeros((E, 2, D, D), dtype=torch.float32)
+    
+    # Edge 1: (0, 1)
+    sheaves[0, 0] = torch.eye(2)               # F_{0 -> e1}
+    sheaves[0, 1] = 2 * torch.eye(2)           # F_{1 -> e1}
+    
+    # Edge 2: (1, 2)
+    sheaves[1, 0] = torch.tensor([[0., 1.],    # F_{1 -> e2}
+                                  [1., 0.]])
+    sheaves[1, 1] = -1 * torch.eye(2)          # F_{2 -> e2}
+    
+    # Edge 3 is padding, remains zeros.
+
+    # Add batch dimensions
+    sheaves_b = sheaves.unsqueeze(0)
+    edges_b = edges.unsqueeze(0)
+    paddings_b = paddings.unsqueeze(0)
+
+    # Run the batched Laplacian function
+    L_out, lengths_out = sheaf_laplacian(sheaves_b, edges_b, paddings_b)
+    
+    # Display results
+    torch.set_printoptions(linewidth=120)
+    print("Computed Sheaf Laplacian (6x6):")
+    print(L_out[0].int())
+    
+    # Verify
+    expected_L = torch.tensor([
+        [ 1,  0, -2,  0,  0,  0],
+        [ 0,  1,  0, -2,  0,  0],
+        [-2,  0,  5,  0,  0,  1],
+        [ 0, -2,  0,  5,  1,  0],
+        [ 0,  0,  0,  1,  1,  0],
+        [ 0,  0,  1,  0,  0,  1]
+    ], dtype=torch.int32)
+    
+    assert torch.allclose(L_out[0].int(), expected_L), "Laplacian does not match expected matrix."
+    print("\nSuccess: Output matches expected block matrix perfectly.")       
         
     
     
