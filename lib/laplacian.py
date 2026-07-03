@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch.autograd.gradcheck import gradcheck
+
 def unbatched_sheaf(sheaf, edges, T):
     E,_ , D, _ = sheaf.shape # E, 2, D, D: the two here is for both restriction maps; the first is for the map from node x_1 to e = (x_1, x_2), the other for x_2 to e = (x_1, x_2)
 
@@ -47,6 +48,7 @@ def sheaf_laplacian(sheaves, edges, lengths):
     B,E,_ , D, _ = sheaves.shape #B, E, 2, D, D: the two here is for both restriction maps; the first is for the map from node x_1 to e = (x_1, x_2), the other for x_2 to e = (x_1, x_2)
     # B,E,2 = edges.shape
 
+    # TODO: We lose the advantage of the adjacency list by building this big matrix. If using list, should refactor 
     sheaf_laplacian = torch.zeros((B, T, T, D, D), device=sheaves.device, dtype=sheaves.dtype)
     # print("L shape: ", sheaf_laplacian.shape)
     edges_t = torch.transpose(edges,1,2)
@@ -103,8 +105,12 @@ def sheaf_laplacian_adjacency(sheaves, padding):
     #   sheaf_laplacian: B,  T*D, T*D
     #   padding: shape = B, type=int, 0<= min, max < T * D
     #       padding lengths for the square laplacian matrices
+
     # TODO clear out padded parts
+    #    - It seems we already accomplish this when we calculate the diagonal.
+    #    - Works as long as padded edges are strictly zero. Can we guarantee this?
     B,T,_,D,_ = sheaves.shape
+
     sheaf_laplacian = torch.eye(T, device = sheaves.device, dtype=sheaves.dtype)[None,:,:,None,None].repeat(B, 1,1, D,D)
     diagonal = torch.einsum("buvxy,buvzy->buxz", sheaves, sheaves) # B, T, D, D 
     sheaf_laplacian = diagonal[:,:,None,:,:] * sheaf_laplacian
@@ -112,44 +118,67 @@ def sheaf_laplacian_adjacency(sheaves, padding):
     sheaf_laplacian += non_diagonal
     laplacian_padding = padding * D 
     sheaf_laplacian = sheaf_laplacian.permute(0,1,3,2,4).reshape(B, T*D, T*D)
+
     return sheaf_laplacian, laplacian_padding
 
 if __name__ == "__main__": 
      
-    T = 3
-    D = 2  # Set to 2 to test matrix operations properly
+    T = 4 # 4 nodes rather than 3 to simulate batch dim difference
+    D = 2
+    B = 1 # batch size
     
+    # Commented out adjacency list test.
+
     # Use torch.long for indices to prevent scattering/indexing errors
-    edges = torch.tensor([[0, 1], [1, 2], [-1, -1]], dtype=torch.long) 
-    E = edges.shape[0]
-    paddings = torch.tensor([True, True, True])
-    
-    # Initialize deterministic sheaves
-    sheaves = torch.zeros((E, 2, D, D), dtype=torch.float32)
-    
-    # Edge 1: (0, 1)
-    sheaves[0, 0] = torch.eye(2)               # F_{0 -> e1}
-    sheaves[0, 1] = 2 * torch.eye(2)           # F_{1 -> e1}
-    
-    # Edge 2: (1, 2)
-    sheaves[1, 0] = torch.tensor([[0., 1.],    # F_{1 -> e2}
-                                  [1., 0.]])
-    sheaves[1, 1] = -1 * torch.eye(2)          # F_{2 -> e2}
-    
+    # edges = torch.tensor([[0, 1], [1, 2], [-1, -1]], dtype=torch.long) 
+    # E = edges.shape[0]
+    # paddings = torch.tensor([True, True, True])
+    #
+    # # Initialize deterministic sheaves
+    # sheaves = torch.zeros((E, 2, D, D), dtype=torch.float32)
+    #
+    # # Edge 1: (0, 1)
+    # sheaves[0, 0] = torch.eye(2)               # F_{0 -> e1}
+    # sheaves[0, 1] = 2 * torch.eye(2)           # F_{1 -> e1}
+    #
+    # # Edge 2: (1, 2)
+    # sheaves[1, 0] = torch.tensor([[0., 1.],    # F_{1 -> e2}
+    #                               [1., 0.]])
+    # sheaves[1, 1] = -1 * torch.eye(2)          # F_{2 -> e2}
+    #
     # Edge 3 is padding, remains zeros.
 
     # Add batch dimensions
-    sheaves_b = sheaves.unsqueeze(0)
-    edges_b = edges.unsqueeze(0)
-    paddings_b = paddings.unsqueeze(0)
+    # sheaves_b = sheaves.unsqueeze(0)
+    # edges_b = edges.unsqueeze(0)
+    # paddings_b = paddings.unsqueeze(0)
+    #
+    # # Run the batched Laplacian function
+    # L_out, lengths_out = sheaf_laplacian(sheaves_b, edges_b, paddings_b)
 
-    # Run the batched Laplacian function
-    L_out, lengths_out = sheaf_laplacian(sheaves_b, edges_b, paddings_b)
-    
+    # Initialize sheaves
+    sheaves_b = torch.zeros((B, T, T, D, D), dtype=torch.float32)
+
+    # Edge 1: (0,1)
+    sheaves_b[0,0,1] = torch.eye(2)     #F_{0->e1}^T
+    sheaves_b[0,1,0] = 2 * torch.eye(2) #F_{1->e1}^T
+
+    # Edge 2: (1,2)
+    sheaves_b[0,1,2] = torch.tensor([[0.,1.], #F_{1->e2}^T
+                                    [1.,0.]])
+    sheaves_b[0,2,1] = -1 * torch.eye(2)      #F_{2->e2}^T
+
+    # Edge 3 non-existent. Keep 0
+
+    # Padding
+    paddings_b = torch.tensor([3], dtype=torch.int32)
+
+    L, paddings_out = sheaf_laplacian_adjacency(sheaves_b, paddings_b)
+
     # Display results
     torch.set_printoptions(linewidth=120)
     print("Computed Sheaf Laplacian (6x6):")
-    print(L_out[0].int())
+    print(L[0].int())
     
     # Verify
     expected_L = torch.tensor([
@@ -161,7 +190,7 @@ if __name__ == "__main__":
         [ 0,  0,  1,  0,  0,  1]
     ], dtype=torch.int32)
     
-    assert torch.allclose(L_out[0].int(), expected_L), "Laplacian does not match expected matrix."
+    assert torch.allclose(L[0].int(), expected_L), "Laplacian does not match expected matrix."
     print("\nSuccess: Output matches expected block matrix perfectly.")       
         
     

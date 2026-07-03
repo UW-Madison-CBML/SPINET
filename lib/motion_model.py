@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
-from sheaf_laplacian import sheaf_laplacian, sheaf_laplacian_adjacency
+from laplacian import sheaf_laplacian, sheaf_laplacian_adjacency
 from sheaf_utils import eigenspectrum
 from torch.autograd.gradcheck import gradcheck
 # TODO add hugging face pytorchmixin
@@ -66,7 +66,9 @@ class SheafMotionClassifier(torch.nn.Module):
 
             # now mask the sheaves
             node_pairs = matrix[:,:,:,:,None] * node_pairs
-            flat_sheaves = F.relu(self.lin3(node_pairs)) # B, 2, T, T, D**2
+
+            flat_sheaves = self.lin3(node_pairs) # B, 2, T, T, D**2
+
             sheaves = flat_sheaves.reshape(B,2,T,T,self.stalk_dimensions,self.stalk_dimensions)
             # flatten out pair dim
             sheaves = sheaves.reshape(B*2,T,T,self.stalk_dimensions,self.stalk_dimensions)
