@@ -15,7 +15,7 @@ from tqdm import tqdm
 import os
 import math
 
-def precision_recall_f1(gt_indices, pred_indices, num_classes):
+def prfcm(gt_indices, pred_indices, num_classes):
     # gt_indicies1: shape = (B), 0 <= min(), max() < num_classes
     # pred_indicies2: shape = (B), 0 <= min(), max() < num_classes
     # 0 <= i < num_classes
@@ -127,7 +127,7 @@ def train_motion_classifier():
         
         # validation
         model.eval()
-        precision_recall_f1 = [] 
+        prfcm = [] 
         # confusion mat for summing
         confusion_mat = np.zeros((len(MotionClassifierDataset.MOTION_CLASSES), len(MotionClassifierDataset.MOTION_CLASSES)), dtype=int)
         with torch.no_grad():
@@ -159,19 +159,19 @@ def train_motion_classifier():
                 gt = motion_classes.cpu()
                 # get metrics and confusion mat 
                 # metrics = prec, rec, f1, confusion
-                metrics = precision_recall_f1(gt, preds, len(MotionClassifierDataset.MOTION_CLASSES))
+                metrics = prfcm(gt, preds, len(MotionClassifierDataset.MOTION_CLASSES))
                 # sum confusion mat
                 confusion_mat += metrics[3].numpy().astype(int)
                 # add rpf metrics 
-                precision_recall_f1.append(torch.stack(metrics[:3], dim=0))
+                prf.append(torch.stack(metrics[:3], dim=0))
         # do a bunch of logging 
-        precision_recall_f1 = torch.stack(precision_recall_f1, dim=0) # len(val_loader), 3, num_classes
-        precision_recall_f1 = torch.stack([precision_recall_f1.mean(dim=0), precision_recall_f1.std(dim=0)],dim=0)
+        prf = torch.stack(prf, dim=0) # len(val_loader), 3, num_classes
+        prf = torch.stack([prf.mean(dim=0), prf.std(dim=0)],dim=0)
         prf_dict = {}
         for i,agg in enumerate(["", "_std"]):
             for j, metric in enumerate(["precision","recall","f1"]):
                 for k, motion_class in enumerate(MotionClassifierDataset.MOTION_CLASSES):
-                    prf_dict[f"{motion_class}_{metric}{agg}"] = precision_recall_f1(i,j,k)
+                    prf_dict[f"{motion_class}_{metric}{agg}"] = prfcm[i,j,k]
         run.log(prf_dict)   
 
         # do display for the confusion matrix 

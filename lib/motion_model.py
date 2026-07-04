@@ -21,8 +21,8 @@ class SheafMotionClassifier(torch.nn.Module):
         self.lin2 = torch.nn.Linear(self.hidden_dim, self.hidden_dim)
         # apply to the ordered pairs of node hidden features
         self.lin3 = torch.nn.Linear(self.hidden_dim*2, self.stalk_dimensions**2)
-        # each lstm looks at 4 features: the complex and real parts of the two eigvals from the two proteins
-        self.lstm = torch.nn.LSTM(4,self.lstm_hidden_dim, batch_first=True, bidirectional=True)
+        # each lstm looks at 4 features: real parts of the two eigvals from the two proteins
+        self.lstm = torch.nn.LSTM(2,self.lstm_hidden_dim, batch_first=True, bidirectional=True)
         self.lin4 = torch.nn.Linear(self.lstm_hidden_dim*2, self.lstm_hidden_dim*2)
         self.lin5 = torch.nn.Linear(self.lstm_hidden_dim*2, self.num_classes)
         
@@ -80,11 +80,11 @@ class SheafMotionClassifier(torch.nn.Module):
             print(laps)
             eigenspectra = eigenspectrum(laps, lap_lens) # complex
             print("eig:", eigenspectra)
-            eigenspectra = torch.view_as_real(eigenspectra.reshape(B,2,T*self.stalk_dimensions)) # B,2,T*D, 2
+            eigenspectra = torch.real(eigenspectra.reshape(B,2,T*self.stalk_dimensions)) # B,2,T*D
 
             
-        eigenspectra = eigenspectra.permute(0,2,1,3) # B, T*D, 2
-        eigenspectra = eigenspectra.reshape(B,T*self.stalk_dimensions, 4)
+        eigenspectra = eigenspectra.permute(0,2,1) # B, T*D, 2
+        eigenspectra = eigenspectra.reshape(B,T*self.stalk_dimensions, 2)
         # pack padded seqs wants the lengths on the CPU
         node_lengths = node_lengths.cpu()
         seqs = pack_padded_sequence(eigenspectra, node_lengths, enforce_sorted=False, batch_first=True)
