@@ -15,6 +15,8 @@ from tqdm import tqdm
 import os
 import math
 
+#TODO: Fix confusion matrix
+# should be ground truth determines row, pred determines column
 def precision_recall_f1(gt_indices, pred_indices, num_classes):
     # gt_indicies1: shape = (B), 0 <= min(), max() < num_classes
     # pred_indicies2: shape = (B), 0 <= min(), max() < num_classes
@@ -22,10 +24,21 @@ def precision_recall_f1(gt_indices, pred_indices, num_classes):
     # returns: precision, recall, f1. shape = num_classes
     #          confusion_mat. shape = num_classes, num_classes
 
-    confusion_mat = torch.einsum("bi, bj->ij", F.one_hot(pred_indices, num_classes=num_classes), F.one_hot(gt_indices, num_classes=num_classes))
+    # Convert pred indices and gt indices into one-hot encoded vectors
+    # einsum "bi, bj->ij" does batched matrix multiplication. Compares pred for batch elt. b (i) against gt for b (j).
+    # Produces i,j matrix where i (rows) are predicted classes and j (cols) are gt classes. Should be other way around.
+    confusion_mat = torch.einsum("bi, bj->ij", F.one_hot(gt_indices, num_classes=num_classes), F.one_hot(pred_indices, num_classes=num_classes))
+
+    # Extracts main diagonal (true positives)
     diag = confusion_mat[torch.arange(num_classes),torch.arange(num_classes)]
-    recall = torch.nan_to_num(diag/confusion_mat.sum(dim=0), 0.0)
-    precision = torch.nan_to_num(diag/confusion_mat.sum(dim=1), 0.0)
+
+    # Sum down rows gives total occurrences of each class in dataset. Recall is TP / TotalActual
+    recall = torch.nan_to_num(diag/confusion_mat.sum(dim=1), 0.0)
+
+    # Sum down columns to get total predicted. Precision is TP / TotalPred
+    precision = torch.nan_to_num(diag/confusion_mat.sum(dim=0), 0.0)
+
+
     f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
     return recall, precision, f1, confusion_mat
 
@@ -80,7 +93,7 @@ def train_motion_classifier():
     
     # model.__init__(self, node_features, stalk_dimensions,lstm_hidden_dim=8, num_classes=5, hidden_dim=64, adjacency_matrix=True):
     #set up model
-    model = SheafMotionClassifier(len(MotionClassifierDataset.AMINO_ACIDS)+3, 2, lstm_hidden_dim=2, hidden_dim=8, num_classes=len(MotionClassifierDataset.MOTION_CLASSES), adjacency_matrix=use_adjacency_mat)
+    model = SheafMotionClassifier(len(MotionClassifierDataset.AMINO_ACIDS)+3, 2, lstm_hidden_dim=2, hidden_dim=8, num_classes=len(MotionClassifierDataset.MOTION_CLASSES), adjacency_matrix=use_adjacency_mat).double()
     model = model.to(DEVICE)
     
     # set up other training stuff
@@ -90,6 +103,7 @@ def train_motion_classifier():
     # training  
     for epoch in range(epochs):
         pbar = tqdm(loader)
+        model = model.train()
         for conformations1, conformations2, residues, motion_classes, lengths in pbar:
 
             conformations1 = conformations1.to(DEVICE) # B, T, 3  
@@ -107,7 +121,7 @@ def train_motion_classifier():
             node_features2 = torch.cat([conformations2, residues_one_hot],dim=2) 
             
             node_features = torch.stack([node_features1, node_features2], dim=1)
-            node_features = node_features.to(torch.float)
+            node_features = node_features.to(torch.double)
             # just in case any previous operations have been accumulating gradients
             optimizer.zero_grad()
 
