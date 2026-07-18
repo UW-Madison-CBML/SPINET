@@ -2,11 +2,11 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
 from laplacian import sheaf_laplacian, sheaf_laplacian_adjacency
-from sheaf_utils import eigenspectrum
+from sheaf_utils import eigenspectrum, eigenvectors
 from torch.autograd.gradcheck import gradcheck
 # TODO add hugging face pytorchmixin
 class SheafMotionClassifier(torch.nn.Module):  
-    def __init__(self, node_features, stalk_dimensions,lstm_hidden_dim=8, num_classes=5, hidden_dim=64, adjacency_matrix=True):
+    def __init__(self, node_features, stalk_dimensions, K=8, lstm_hidden_dim=8, num_classes=5, hidden_dim=64, adjacency_matrix=True):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.node_features = node_features
@@ -22,7 +22,11 @@ class SheafMotionClassifier(torch.nn.Module):
         # apply to the ordered pairs of node hidden features
         self.lin3 = torch.nn.Linear(self.hidden_dim*2, self.stalk_dimensions**2)
         # each lstm looks at 4 features: the complex and real parts of the two eigvals from the two proteins
-        self.lstm = torch.nn.LSTM(4,self.lstm_hidden_dim, batch_first=True, bidirectional=True)
+
+        # First K eigenvectors extracted for constant input dimension for LSTM
+        self.K = K
+        self.lstm = torch.nn.LSTM(self.K, self.lstm_hidden_dim, batch_first=True, bidirectional=True)
+
         self.lin4 = torch.nn.Linear(self.lstm_hidden_dim*2, self.lstm_hidden_dim*2)
         self.lin5 = torch.nn.Linear(self.lstm_hidden_dim*2, self.num_classes)
         
@@ -59,7 +63,7 @@ class SheafMotionClassifier(torch.nn.Module):
             # reshape the batches of two sheaves for each conformation into the batches dimension
             sheaves = sheaves.reshape(B*2,E,2,self.stalk_dimensions, self.stalk_dimensions)
             edges = edges.reshape(B*2, E, 2)
-            eigenspectra = eigenspectrum(*sheaf_laplacian(sheaves,edges,node_lengths)).reshape(B,2,T) # B,2,T
+            _, eigvects = eigenvectors(*sheaf_laplacian(sheaves,edges,node_lengths)).reshape(B,2,T,T) # B,2,T,T
         else:
             node_pairs = torch.cat(torch.broadcast_tensors(nodes[:,:,:,None,:],nodes[:,:,None,:,:]), dim=4) # B,2,T,T,2*hidden_dim
             
@@ -78,17 +82,26 @@ class SheafMotionClassifier(torch.nn.Module):
             # D = self.stalk_dimensions
             laps, lap_lens = sheaf_laplacian_adjacency(sheaves,node_lengths[:,None].repeat(1,2).flatten())
             print(laps)
-            eigenspectra = eigenspectrum(laps, lap_lens) # complex
-            print("eig:", eigenspectra)
-            eigenspectra = torch.view_as_real(eigenspectra.reshape(B,2,T*self.stalk_dimensions)) # B,2,T*D, 2
+            _, eigvects = eigenvectors(laps, lap_lens) # complex
+            print("eig:", eigvects)
+            eigvects = eigvects.reshape(B,2,T,T*self.stalk_dimensions)
 
-            
-        eigenspectra = eigenspectra.permute(0,2,1,3) # B, T*D, 2
-        eigenspectra = eigenspectra.reshape(B,T*self.stalk_dimensions, 4)
-        # pack padded seqs wants the lengths on the CPU
-        node_lengths = node_lengths.cpu()
-        seqs = pack_padded_sequence(eigenspectra, node_lengths, enforce_sorted=False, batch_first=True)
-        _, (h, _) = self.lstm(seqs) # h.shape = 2, B, lstm_hidden_dim
+        # Truncate to 1st K eigenvectors
+        U1_k = eigvects[:, 0, :, :self.K] #(B, T*D, K)
+        U2_k = eigvects[:, 1, :, :self.K] #(B, T*D, K)
+
+        # Pad with zeros if the graph has fewer than K eigenvectors
+        actual_k = U1_k.shape[-1]
+        if actual_k < self.K:
+            padding = torch.zeros(B, U1_k.shape[1], self.K - actual_k, device=U1_k.device, dtype=U1_k.dtype)
+            U1_k = torch.cat([U1_k, padding], dim=-1)
+            U2_k = torch.cat([U2_k, padding], dim=-1)
+
+        # Compute K x K cross-covariance matrix
+        C_k = torch.bmm(U1_k.transpose(1,2), U2_k) #(B, K, K)
+
+        # No packing needed since K is constant
+        _, (h, _) = self.lstm(C_k)
         h = h.permute(1, 2, 0).reshape(B, 2 * self.lstm_hidden_dim)
         pair_features = F.relu(self.lin4(h))
         out = self.lin5(pair_features)

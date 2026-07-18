@@ -112,38 +112,56 @@ def eigenspectrum(laplacians, lengths):
     print(masked_laplacians.shape)
     eigenspectra = torch.linalg.eigvals(masked_laplacians)
     return eigenspectra
+
+def eigenvectors(laplacians, lengths):
+    """Outputs eigenvectors for laplacians as n x k matrix M."""
+    # view the two laplacians together
+    B, TD, _ = laplacians.shape
+    assert lengths.shape == (B,), f"WRONG SHAPE: {lengths.shape}"
+    assert lengths.max() <= TD and lengths.min() >= 1, f"BAD RANGE FOR LENGTHS: expected: [{lengths.min()},{lengths.max()}] is not a subset of [1, {TD}]"
+
+    padding = (torch.arange(TD, device=laplacians.device)[None,:] < lengths[:, None])
+    identity_mask = padding[:,None,:] & padding[:,:,None]
     
+    # need to pad the laplacians with identity columns giving us extra -1 eigvals = T - padding
+    identity = -1 * torch.eye(TD, dtype=laplacians.dtype, device = laplacians.device) 
+    identity = identity.reshape((1, TD, TD))
+    identity = identity.repeat(B, 1, 1)
+
+    masked_laplacians = torch.where(identity_mask, laplacians, identity) # sheaf laplacians always has positive eigenvalues, if we pad with negative identity, we know the -1 eignvalues cannot belong to the sheaf laplacian
+    
+    eigvals, eigvecs = torch.linalg.eigh(masked_laplacians)
+
+    return eigvals, eigvecs
     
 if __name__ == "__main__":
-    torch.manual_seed(42)
-    torch.use_deterministic_algorithms(False)
-
-    B = 3
-    TD = 3
-
-    conformations1 = torch.randn((B,TD,3))
-    conformations2 = torch.randn((B, TD, 3))
-    padding_lengths = torch.randint(1, TD + 1, (B,))
-    padding = torch.arange(TD)[None, :] < padding_lengths[:, None] 
-    out_edges = build_graph(conformations1, conformations2, padding, 1.0)[0]
-    out_padding = build_graph(conformations1, conformations2, padding, 1.0)[1]
-    edge_counts = (out_edges[..., 0] != -1).sum(dim=2)
-
-    print("Test 1 sparse")
-    print("Padding out:", out_padding)
-    print("Conformations1:", conformations1)
-    print("Edges out:", out_edges)
-    print("Num valid edges per graph:", edge_counts)
+    B = 2      # Batch size
+    TD = 5     # Maximum sequence length (Target Dimension)
     
-    print("")
-
-    out_edges = build_graph(conformations1, conformations2, padding, 10.0)[0]
-    out_padding = build_graph(conformations1, conformations2, padding, 10.0)[1]
-    edge_counts = (out_edges[..., 0] != -1).sum(dim=2)
-
-    print("Test 2 fully connected")
-    print("Padding out:", out_padding)
-    print("Conformations1:", conformations1)
-    print("Edges out:", out_edges)
-    print("Num valid edges per graph:", edge_counts)
+    # Create dummy laplacians (symmetric positive semi-definite)
+    # Shape: (B, TD, TD)
+    random_matrices = torch.randn(B, TD, TD)
+    laplacians = torch.bmm(random_matrices, random_matrices.transpose(1, 2)) 
     
+    # Create variable lengths for the batch
+    lengths = torch.tensor([3, 5]) 
+    
+    # 3. Run the function
+    eigvals, eigvecs = eigenvectors(laplacians, lengths)
+    
+    # 4. Assertions and Checks
+    print(f"Eigenvalues shape: {eigvals.shape} (Expected: {B}, {TD})")
+    print(f"Eigenvectors shape: {eigvecs.shape} (Expected: {B}, {TD}, {TD})\n")
+    
+    # Let's check the first item in the batch (length 3, padded to 5)
+    # Because it was padded with -1s, the smallest eigenvalues should be exactly -1
+    full_eigvals, _ = torch.linalg.eigh(laplacians[0])
+    
+    # Manually masking the first matrix to show the -1 padding worked
+    padding_mask = (torch.arange(TD) < lengths[0]).unsqueeze(1) & (torch.arange(TD) < lengths[0]).unsqueeze(0)
+    identity = -1 * torch.eye(TD)
+    masked_matrix = torch.where(padding_mask, laplacians[0], identity)
+    test_vals, _ = torch.linalg.eigh(masked_matrix)
+    
+    print("First item in batch (True Length = 3, Padded to = 5):")
+    print(f"Eigenvalues after padding mask: {test_vals.round(decimals=3).tolist()}")
