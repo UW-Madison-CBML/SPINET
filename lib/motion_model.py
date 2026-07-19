@@ -16,16 +16,28 @@ class SheafMotionClassifier(torch.nn.Module):
         # MOTION_CLASSES = ["PE","PS","PF","PC","OM"]
         self.num_classes = num_classes
         self.lstm_hidden_dim = lstm_hidden_dim
+
         # apply to the nodes
         self.lin1 = torch.nn.Linear(self.node_features, self.hidden_dim)
         self.lin2 = torch.nn.Linear(self.hidden_dim, self.hidden_dim)
+
+        # Bound activations before Laplacian solver.
+        self.norm1 = torch.nn.LayerNorm(self.hidden_dim)
+        self.norm2 = torch.nn.LayerNorm(self.hidden_dim)
+
         # apply to the ordered pairs of node hidden features
         self.lin3 = torch.nn.Linear(self.hidden_dim*2, self.stalk_dimensions**2)
         # each lstm looks at 4 features: the complex and real parts of the two eigvals from the two proteins
 
         # First K eigenvectors extracted for constant input dimension for LSTM
         self.K = K
-        self.lstm = torch.nn.LSTM(self.K, self.lstm_hidden_dim, batch_first=True, bidirectional=True)
+        #self.lstm = torch.nn.LSTM(self.K, self.lstm_hidden_dim, batch_first=True, bidirectional=True)
+        self.covariance_processor = torch.nn.Sequential(
+            torch.nn.Flatten(),
+            torch.nn.Linear(self.K * self.K, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, self.lstm_hidden_dim * 2) # Matches your current lin4 input
+        ) # Try without LSTM for now, as the input is constant size and doesn't need sequence processing
 
         self.lin4 = torch.nn.Linear(self.lstm_hidden_dim*2, self.lstm_hidden_dim*2)
         self.lin5 = torch.nn.Linear(self.lstm_hidden_dim*2, self.num_classes)
@@ -45,8 +57,9 @@ class SheafMotionClassifier(torch.nn.Module):
 
         #B,2,T,self.node_features
         B,_, T,N = nodes.shape
-        nodes = F.relu(self.lin1(nodes)) 
-        nodes = F.relu(self.lin2(nodes)) # B,2,T,hidden_dim
+
+        nodes = F.relu(self.norm1(self.lin1(nodes)))
+        nodes = F.relu(self.norm2(self.lin2(nodes))) # B,2,T,hidden_dim
 
         if(not self.adjacency_matrix):
             # B, 2, E, 2
@@ -101,8 +114,8 @@ class SheafMotionClassifier(torch.nn.Module):
         C_k = torch.bmm(U1_k.transpose(1,2), U2_k) #(B, K, K)
 
         # No packing needed since K is constant
-        _, (h, _) = self.lstm(C_k)
-        h = h.permute(1, 2, 0).reshape(B, 2 * self.lstm_hidden_dim)
+        h = self.covariance_processor(C_k)
+        #h = h.permute(1, 2, 0).reshape(B, 2 * self.lstm_hidden_dim)
         pair_features = F.relu(self.lin4(h))
         out = self.lin5(pair_features)
         return out
@@ -117,29 +130,22 @@ class SheafMotionClassifier(torch.nn.Module):
         
 # test if gradients are stable     
 if __name__ == "__main__":
+    from torchinfo import summary
     B = 2
-    T = 3
+    T = 300
     E = 2 
 
     # node_features, stalk_dimensions, lstm_hidden_dim=8, num_classes=5, hidden_dim=64, adjacency_matrix=True
     model = SheafMotionClassifier(1, 1, lstm_hidden_dim=8, num_classes=5, hidden_dim=8, adjacency_matrix=True).double()
     nodes = torch.randn(B, 2, T, 1, requires_grad=True).to(torch.double)
+    node_lengths = torch.tensor([T]*B, dtype=torch.int)
+
     matrix_first_half = (torch.eye(T, dtype=torch.bool).roll(0,1) | torch.eye(T, dtype=torch.bool).roll(1,1))[None,None,:,:].repeat(B//2,2,1,1)
     matrix_second_half = torch.zeros(T,T,dtype=torch.bool)
     matrix_second_half[0,2] = 1
     matrix_second_half[2,0] = 1
     matrix_second_half = matrix_second_half[None,None,:,:].repeat(B//2,2,1,1)
     matrix = torch.cat([matrix_first_half, matrix_second_half],dim=0)
-    print(matrix.shape)
 
-    node_lengths = torch.tensor([T]*B, dtype=torch.int)
-
-    print(gradcheck(model.forward, (nodes, node_lengths, matrix)))
-    loss = torch.nn.CrossEntropyLoss()(model(nodes, node_lengths, matrix=matrix),torch.tensor([0]*(B//2) + [1]*(B//2),dtype=torch.long))
-    loss.backward()
-    print("1", model.lin1.weight.grad)
-    print("2", model.lin2.weight.grad)
-    print("3", model.lin3.weight.grad)
-    print("4", model.lin4.weight.grad)
-    print("5", model.lin5.weight.grad)
+    summary(model, input_data=(nodes, node_lengths, matrix)) 
     

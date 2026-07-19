@@ -53,7 +53,7 @@ def train_motion_classifier():
     epochs = 8
     val_ratio = 0.3 
     use_adjacency_mat = True
-    batch_size = 4
+    batch_size = 32 # may need 
     
     # set up device 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
@@ -81,6 +81,25 @@ def train_motion_classifier():
         },
 
     )
+
+    # WANDB artifact logging
+    artifact = wandb.Artifact(name="scripts", type="model_file")
+    
+    # Use __file__ to dynamically get the path of this current training script
+    artifact.add_file(os.path.abspath(__file__))
+    
+    # Add your other dependencies based on your imports
+    dependencies = [
+        "motion_model.py", 
+        "motion_classifier_dataset.py", 
+        "sheaf_utils.py"
+    ]
+    for file in dependencies:
+        if os.path.exists(file):
+            artifact.add_file(os.path.abspath(file))
+            
+    run.log_artifact(artifact)
+
     # set up validation split
     val_df = df[df_mask]
     df = df[~ df_mask]
@@ -93,7 +112,7 @@ def train_motion_classifier():
     
     # model.__init__(self, node_features, stalk_dimensions,lstm_hidden_dim=8, num_classes=5, hidden_dim=64, adjacency_matrix=True):
     #set up model
-    model = SheafMotionClassifier(len(MotionClassifierDataset.AMINO_ACIDS)+3, 2, lstm_hidden_dim=2, hidden_dim=8, num_classes=len(MotionClassifierDataset.MOTION_CLASSES), adjacency_matrix=use_adjacency_mat).double()
+    model = SheafMotionClassifier(len(MotionClassifierDataset.AMINO_ACIDS)+3, 2, lstm_hidden_dim=2, hidden_dim=8, num_classes=len(MotionClassifierDataset.MOTION_CLASSES), adjacency_matrix=use_adjacency_mat).float32()
     model = model.to(DEVICE)
     
     # set up other training stuff
@@ -108,6 +127,7 @@ def train_motion_classifier():
 
             conformations1 = conformations1.to(DEVICE) # B, T, 3  
             conformations2 = conformations2.to(DEVICE) # B, T, 3 
+
             residues = residues.to(DEVICE) # B, T
             motion_classes = motion_classes.to(DEVICE) # B
             if(use_adjacency_mat):
@@ -117,11 +137,19 @@ def train_motion_classifier():
             else:
                 edges, edge_lengths = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) # B, 2, E, 2,type= unsigned int
             residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS)) # B, T, amino_acids
+
+            # center the conformations to origin
+            center1 = conformations1.mean(dim=1, keepdim=True) # B, 1, 3
+            center2 = conformations2.mean(dim=1, keepdim=True) # B, 1, 3
+
+            conformations1 = conformations1 - center1 # B, T, 3
+            conformations2 = conformations2 - center2 # B, T, 3
+
             node_features1 = torch.cat([conformations1, residues_one_hot],dim=2) # B, T, 3 + amino_acids 
             node_features2 = torch.cat([conformations2, residues_one_hot],dim=2) 
             
             node_features = torch.stack([node_features1, node_features2], dim=1)
-            node_features = node_features.to(torch.double)
+            node_features = node_features.to(torch.float32)
             # just in case any previous operations have been accumulating gradients
             optimizer.zero_grad()
 
@@ -141,7 +169,7 @@ def train_motion_classifier():
         
         # validation
         model.eval()
-        precision_recall_f1 = [] 
+        prf = [] 
         # confusion mat for summing
         confusion_mat = np.zeros((len(MotionClassifierDataset.MOTION_CLASSES), len(MotionClassifierDataset.MOTION_CLASSES)), dtype=int)
         with torch.no_grad():
@@ -177,23 +205,29 @@ def train_motion_classifier():
                 # sum confusion mat
                 confusion_mat += metrics[3].numpy().astype(int)
                 # add rpf metrics 
-                precision_recall_f1.append(torch.stack(metrics[:3], dim=0))
+                prf.append(torch.stack(metrics[:3], dim=0))
         # do a bunch of logging 
-        precision_recall_f1 = torch.stack(precision_recall_f1, dim=0) # len(val_loader), 3, num_classes
-        precision_recall_f1 = torch.stack([precision_recall_f1.mean(dim=0), precision_recall_f1.std(dim=0)],dim=0)
+        prf = torch.stack(prf, dim=0) # len(val_loader), 3, num_classes
+        prf = torch.stack([prf.mean(dim=0), prf.std(dim=0)],dim=0)
         prf_dict = {}
         for i,agg in enumerate(["", "_std"]):
             for j, metric in enumerate(["precision","recall","f1"]):
                 for k, motion_class in enumerate(MotionClassifierDataset.MOTION_CLASSES):
-                    prf_dict[f"{motion_class}_{metric}{agg}"] = precision_recall_f1(i,j,k)
-        run.log(prf_dict)   
+                    prf_dict[f"{motion_class}_{metric}{agg}"] = prf[i,j,k].item()
 
         # do display for the confusion matrix 
         fig, ax = plt.subplots(figsize=(10, 10))
         disp = ConfusionMatrixDisplay(confusion_matrix = confusion_mat, display_labels = MotionClassifierDataset.MOTION_CLASSES)
         disp.plot(cmap='Blues', ax=ax, values_format='d')
         plt.setp(ax.get_xticklabels(), rotation=45, ha='right') 
-        run.log({"confusion_matrix": wandb.Image(fig)}) 
+
+        prf_dict["confusion_matrix"] = wandb.Image(fig)
+        prf_dict["epoch"] = epoch
+        run.log(prf_dict) 
+        
+        plt.close(fig)
+
+
         plt.close(fig)
  
 

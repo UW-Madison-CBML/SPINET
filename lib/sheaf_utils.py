@@ -84,7 +84,7 @@ def build_graph(conformations1, conformations2, lengths, epsilon, adjacency_matr
     out_list = edges[b_idx, c_idx, indices] # [B,2, E, 2]
     # out list should be equal along the pair dims
     out_lengths = ((out_list[:,0,:,0] == -1) | (out_list[:,0,:,1] == -1)).sum(dim=-1) # B, max < E
-    return out_list, out_padding
+    return out_list, out_lengths
    
      
     
@@ -122,18 +122,32 @@ def eigenvectors(laplacians, lengths):
 
     padding = (torch.arange(TD, device=laplacians.device)[None,:] < lengths[:, None])
     identity_mask = padding[:,None,:] & padding[:,:,None]
-    
+
     # need to pad the laplacians with identity columns giving us extra -1 eigvals = T - padding
     identity = -1 * torch.eye(TD, dtype=laplacians.dtype, device = laplacians.device) 
     identity = identity.reshape((1, TD, TD))
     identity = identity.repeat(B, 1, 1)
 
+
     masked_laplacians = torch.where(identity_mask, laplacians, identity) # sheaf laplacians always has positive eigenvalues, if we pad with negative identity, we know the -1 eignvalues cannot belong to the sheaf laplacian
-    
+
+    # Tikhonov regularization to avoid degeneracy
+    eps = 1e-5
+
+    N = masked_laplacians.size(-1)
+
+    noise = torch.rand(N, device=masked_laplacians.device, dtype=masked_laplacians.dtype) * eps
+    jitter = torch.diag_embed(noise) #create diag matrix from noise vector
+
+    masked_laplacians = masked_laplacians + jitter
+
+    # Enforce symmetry to correct floating-point drift
+    masked_laplacians = (masked_laplacians + masked_laplacians.transpose(-1, -2)) / 2.0
+
     eigvals, eigvecs = torch.linalg.eigh(masked_laplacians)
 
     return eigvals, eigvecs
-    
+
 if __name__ == "__main__":
     B = 2      # Batch size
     TD = 5     # Maximum sequence length (Target Dimension)
