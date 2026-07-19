@@ -97,7 +97,7 @@ class SheafMotionClassifier(torch.nn.Module):
             print(laps)
             _, eigvects = eigenvectors(laps, lap_lens) # complex
             print("eig:", eigvects)
-            eigvects = eigvects.reshape(B,2,T,T*self.stalk_dimensions)
+            eigvects = eigvects.reshape(B,2,T*self.stalk_dimensions,T*self.stalk_dimensions)
 
         # Truncate to 1st K eigenvectors
         U1_k = eigvects[:, 0, :, :self.K] #(B, T*D, K)
