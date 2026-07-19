@@ -136,7 +136,8 @@ def eigenvectors(laplacians, lengths):
 
     N = masked_laplacians.size(-1)
 
-    noise = torch.rand(N, device=masked_laplacians.device, dtype=masked_laplacians.dtype) * eps
+    # Force noise to float64 for numerical stability
+    noise = torch.rand(N, device=masked_laplacians.device, dtype=torch.float64) * eps
     jitter = torch.diag_embed(noise) #create diag matrix from noise vector
 
     masked_laplacians = masked_laplacians + jitter
@@ -146,7 +147,7 @@ def eigenvectors(laplacians, lengths):
 
     eigvals, eigvecs = torch.linalg.eigh(masked_laplacians)
 
-    return eigvals, eigvecs
+    return eigvals.to(laplacians.dtype), eigvecs.to(laplacians.dtype)
 
 if __name__ == "__main__":
     B = 2      # Batch size
