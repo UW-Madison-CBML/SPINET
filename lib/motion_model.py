@@ -1,126 +1,229 @@
 import torch
 import torch.nn.functional as F
+import torch_sparse
 from torch.nn.utils.rnn import pack_padded_sequence
-from laplacian import sheaf_laplacian, sheaf_laplacian_adjacency
-from sheaf_utils import eigenspectrum, eigenvectors
 from torch.autograd.gradcheck import gradcheck
-# TODO add hugging face pytorchmixin
-class SheafMotionClassifier(torch.nn.Module):  
-    def __init__(self, node_features, stalk_dimensions, K=8, lstm_hidden_dim=8, num_classes=5, hidden_dim=64, adjacency_matrix=True):
+from typing import Tuple
+
+import diffusion_laplace_test as lap
+
+
+class SheafLearner(torch.nn.Module):
+    """Learns a sheaf from local features and stalk dimensions."""
+    def __init__(self, in_channels: int, out_shape: Tuple[int, int]):
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.node_features = node_features
-        self.stalk_dimensions = stalk_dimensions 
-        # bool: True if using adj mat, False if using edge list
-        self.adjacency_matrix = adjacency_matrix
-        # MOTION_CLASSES = ["PE","PS","PF","PC","OM"]
-        self.num_classes = num_classes
-        self.lstm_hidden_dim = lstm_hidden_dim
+        self.out_shape = out_shape
+        # The output needs to form two d x d matrices per edge (source and target)
+        self.linear1 = torch.nn.Linear(in_channels, 2 * out_shape[0] * out_shape[1])
+        self.act = torch.tanh 
 
-        # apply to the nodes
-        self.lin1 = torch.nn.Linear(self.node_features, self.hidden_dim)
-        self.lin2 = torch.nn.Linear(self.hidden_dim, self.hidden_dim)
+    def forward(self, X, edge_index):
+        # X: shape = (num_total_nodes, num_features)
+        # edge_index: shape = (2, num_edges)
+        row, col = edge_index
 
-        # Bound activations before Laplacian solver.
-        self.norm1 = torch.nn.LayerNorm(self.hidden_dim)
-        self.norm2 = torch.nn.LayerNorm(self.hidden_dim)
+        x_row = X[row]
+        x_col = X[col]
 
-        # apply to the ordered pairs of node hidden features
-        self.lin3 = torch.nn.Linear(self.hidden_dim*2, self.stalk_dimensions**2)
-        # each lstm looks at 4 features: the complex and real parts of the two eigvals from the two proteins
-
-        # First K eigenvectors extracted for constant input dimension for LSTM
-        self.K = K
-        #self.lstm = torch.nn.LSTM(self.K, self.lstm_hidden_dim, batch_first=True, bidirectional=True)
-        self.covariance_processor = torch.nn.Sequential(
-            torch.nn.Flatten(),
-            torch.nn.Linear(self.K * self.K, 64),
-            torch.nn.ReLU(),
-            torch.nn.Linear(64, self.lstm_hidden_dim * 2) # Matches your current lin4 input
-        ) # Try without LSTM for now, as the input is constant size and doesn't need sequence processing
-
-        self.lin4 = torch.nn.Linear(self.lstm_hidden_dim*2, self.lstm_hidden_dim*2)
-        self.lin5 = torch.nn.Linear(self.lstm_hidden_dim*2, self.num_classes)
+        # Concatenate local features and pass through linear layer + activation
+        maps = self.linear1(torch.cat([x_row, x_col], dim=-1))
+        maps = self.act(maps)
         
-    def forward(self, nodes,  node_lengths, matrix=None, edges=None, edge_lengths=None):
-        # T = num_nodes
-        # E = num_edges
-        # nodes: shape = (B, 2, T, N)
-        # node_lengths: shape = (B), type = int, 0 <= min, max < T
-        # matrix: shape = B, 2, T, T, type = bool
-        # edges: shape = B, 2, E, 2
-        # edge_lengths = (B), type = int, 0 <= min, max < E
-        if(not self.adjacency_matrix and (edges is None or edge_lengths is None)):
-            raise ValueError("must provide edges and edge padding if not using adjacency matrices")
-        if(self.adjacency_matrix and matrix is None):
-            raise ValueError("must provide matrix if using adjacency matrices")
+        # Reshape to (num_edges, 2, d, d)
+        maps = maps.view(-1, 2, self.out_shape[0], self.out_shape[1])
 
-        #B,2,T,self.node_features
-        B,_, T,N = nodes.shape
+        return maps
 
-        nodes = F.relu(self.norm1(self.lin1(nodes)))
-        nodes = F.relu(self.norm2(self.lin2(nodes))) # B,2,T,hidden_dim
 
-        if(not self.adjacency_matrix):
-            # B, 2, E, 2
-            _,_,E,_ = edges.shape
-            # get the actual graphs 
-            #TODO implement differentiable indexing here 
-            left_graphs = nodes[torch.arange(B), torch.arange(2)[None,:].repeat(B,1), edges[:,:,:,0]]
-            right_graphs = nodes[torch.arange(B), torch.arange(2)[None,:].repeat(B,1), edges[:,:,:,1]]
-            graphs = torch.stack([left_graphs,right_graphs], dim=3) # B,2,E,2,hidden_dim
-            graphs = torch.cat([graphs, graphs.roll(3,1)], dim=2) # B,2,2*E,2,hidden_dim
+class LaplacianODEFunc(torch.nn.Module):
+    """Implements Laplacian-based diffusion."""
+
+    def __init__(self, d, hidden_channels, 
+                 left_weights=False, right_weights=False, 
+                 use_act=False, nonlinear=False):
+        super(LaplacianODEFunc, self).__init__()
+        self.d = d
+        self.hidden_channels = hidden_channels
         
-            graphs = graphs.reshape(B,2,2*E,2*self.hidden_dim)
-            sheaves = F.relu(self.lin3(graphs)) #B,2,2*E,stalk_dim^2
-            # reshape the batches of two sheaves for each conformation into the batches dimension
-            sheaves = sheaves.reshape(B*2,E,2,self.stalk_dimensions, self.stalk_dimensions)
-            edges = edges.reshape(B*2, E, 2)
-            _, eigvects = eigenvectors(*sheaf_laplacian(sheaves,edges,node_lengths)).reshape(B,2,T,T) # B,2,T,T
+        # hidden_channels * d is the total node feature size
+        self.sheaf_learner = SheafLearner((hidden_channels * d) * 2, (d, d))
+        self.nonlinear = nonlinear
+        self.left_weights = left_weights
+        self.right_weights = right_weights
+        self.use_act = use_act
+        self.L = None
+        
+        if self.left_weights:
+            self.lin_left_weights = torch.nn.Linear(self.d, self.d, bias=False)
+        if self.right_weights:
+            self.lin_right_weights = torch.nn.Linear(self.hidden_channels, self.hidden_channels, bias=False)
+
+    def forward(self, t, X, edge_index):
+        # X shape: (num_total_nodes * d, hidden_channels)
+        num_total_nodes = X.shape[0] // self.d
+        
+        if self.nonlinear or self.L is None:
+            # Reshape back to (num_total_nodes, hidden_channels * d) for sheaf learning
+            X_maps = X.view(num_total_nodes, -1)
+            maps = self.sheaf_learner(X_maps, edge_index)
+            # Assuming lap.build_norm_sheaf_laplacian returns a tuple of (edge_index, edge_weights)
+            self.L = lap.build_norm_sheaf_laplacian(num_total_nodes, self.d, edge_index, maps)
+            L = self.L
         else:
-            node_pairs = torch.cat(torch.broadcast_tensors(nodes[:,:,:,None,:],nodes[:,:,None,:,:]), dim=4) # B,2,T,T,2*hidden_dim
+            L = self.L
+        
+        if self.left_weights:
+            X = X.t().reshape(-1, self.d)
+            X = self.lin_left_weights(X)
+            X = X.reshape(-1, num_total_nodes * self.d).t()
+
+        if self.right_weights:
+            X = self.lin_right_weights(X)
+        
+        # Apply sparse matrix multiplication: -L * X
+        X = torch_sparse.spmm(L[0], L[1], X.size(0), X.size(0), -X)
+
+
+        dX = torch_sparse.spmm(L[0], L[1], X.size(0), X.size(0), -X)
+
+        X = X + (t * dX)
+
+        if self.use_act:
+            X = F.elu(X)
+
+        return X
+
+
+class SheafDiffusion(torch.nn.Module):
+    """Performs diffusion on the sheaf laplacian until global section is reached."""
+    def __init__(self, args):
+        super().__init__()
+
+        assert args['d'] > 1
+        self.d = args['d'] 
+        
+        self.hidden_dim = args['hidden_channels'] * self.d
+        self.device = args.get('device', 'cpu')
+        
+        self.nonlinear = not args['linear']
+        self.input_dropout = args['input_dropout']
+        self.dropout = args['dropout']
+        self.use_act = args['use_act']
+        
+        self.input_dim = args['input_dim'] 
+        self.hidden_channels = args['hidden_channels'] 
+        self.output_dim = args['output_dim']
+        self.t = args['max_t']
+        
+        self.lin1 = torch.nn.Linear(self.input_dim, self.hidden_dim)
+        
+        self.odefunc = LaplacianODEFunc(
+            d=self.d,
+            hidden_channels=self.hidden_channels,
+            left_weights=args['left_weights'],
+            right_weights=args['right_weights'],
+            use_act=self.use_act,
+            nonlinear=self.nonlinear
+        )
+
+    def forward(self, X, edge_index):
+        # X: flat batched shape = (B * 2 * num_nodes, num_features)
+        
+        X = F.dropout(X, p=self.input_dropout, training=self.training) 
+        X = self.lin1(X)  # Output shape: (..., hidden_dim)
+        
+        if self.use_act:
+            X = F.elu(X)
             
+        X = F.dropout(X, p=self.dropout, training=self.training)
 
-            # now mask the sheaves
-            node_pairs = matrix[:,:,:,:,None] * node_pairs
+        # Perform diffusion
+        if self.t > 0:
+            num_total_nodes = X.shape[0]
+            X = X.view(num_total_nodes * self.d, self.hidden_channels)
 
-            flat_sheaves = self.lin3(node_pairs) # B, 2, T, T, D**2
+            self.odefunc.edge_index = edge_index
+            self.odefunc.L = None  # Reset Laplacian to ensure it's recomputed if needed
 
-            sheaves = flat_sheaves.reshape(B,2,T,T,self.stalk_dimensions,self.stalk_dimensions)
-            # flatten out pair dim
-            sheaves = sheaves.reshape(B*2,T,T,self.stalk_dimensions,self.stalk_dimensions)
-            print(sheaves)
-            # node lengths needs to be doubled for the flattened pair dim
-            node_lengths = node_lengths.to(sheaves.device)
-            # D = self.stalk_dimensions
-            laps, lap_lens = sheaf_laplacian_adjacency(sheaves,node_lengths[:,None].repeat(1,2).flatten())
-            print(laps)
-            _, eigvects = eigenvectors(laps, lap_lens) # complex
-            print("eig:", eigvects)
-            eigvects = eigvects.reshape(B,2,T*self.stalk_dimensions,T*self.stalk_dimensions)
-
-        # Truncate to 1st K eigenvectors
-        U1_k = eigvects[:, 0, :, :self.K] #(B, T*D, K)
-        U2_k = eigvects[:, 1, :, :self.K] #(B, T*D, K)
-
-        # Pad with zeros if the graph has fewer than K eigenvectors
-        actual_k = U1_k.shape[-1]
-        if actual_k < self.K:
-            padding = torch.zeros(B, U1_k.shape[1], self.K - actual_k, device=U1_k.device, dtype=U1_k.dtype)
-            U1_k = torch.cat([U1_k, padding], dim=-1)
-            U2_k = torch.cat([U2_k, padding], dim=-1)
-
-        # Compute K x K cross-covariance matrix
-        C_k = torch.bmm(U1_k.transpose(1,2), U2_k) #(B, K, K)
-
-        # No packing needed since K is constant
-        h = self.covariance_processor(C_k)
-        #h = h.permute(1, 2, 0).reshape(B, 2 * self.lstm_hidden_dim)
-        pair_features = F.relu(self.lin4(h))
-        out = self.lin5(pair_features)
-        return out
+            X = self.odefunc(self.t, X, edge_index)
+            X = X.view(num_total_nodes, -1)
         
+        assert torch.all(torch.isfinite(X))
+
+        return X
+
+
+class MotionClassifier(torch.nn.Module):  
+    def __init__(self, X, edge_index, K=8, num_classes=5, hidden_dim=64):
+        super().__init__()
+
+        self.input_dim = X.shape[-1]
+        self.num_nodes = X.shape[-2]
+        self.stalk_dimensions = 3 
+        self.hidden_dim = hidden_dim
+        self.K = K
+
+        self.sheaf_diffusion = SheafDiffusion(args={
+            'd': self.stalk_dimensions,
+            'hidden_channels': self.hidden_dim,
+            'layers': 1,
+            'linear': False,
+            'input_dropout': 0.1,
+            'dropout': 0.1,
+            'left_weights': False,
+            'right_weights': False,
+            'use_act': True,
+            'input_dim': self.input_dim,
+            'output_dim': self.hidden_dim,
+            'max_t': 1.0,
+            'device': X.device if isinstance(X, torch.Tensor) else 'cpu'
+        })
         
+        self.classifier = torch.nn.Sequential(
+            torch.nn.Linear(self.hidden_dim * self.stalk_dimensions * 2, self.hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(p=0.2),
+            torch.nn.Linear(self.hidden_dim, num_classes)
+        )
+        
+    def forward(self, X, edge_index):
+        # X: shape = (B, 2, num_nodes, num_features)
+        # edge_index: shape = (B, 2, 2, num_edges)
+        B, num_confs, N, F_dim = X.shape 
+        _, _, _, E = edge_index.shape
+        
+        num_graphs = B * num_confs
+        
+        # 1. Vectorized edge offsetting
+        # Reshape to (B*2, 2, E)
+        edge_index_reshaped = edge_index.view(num_graphs, 2, E)
+        
+        # Create offsets for each graph: [0, N, 2N, 3N, ...] 
+        # Shape: (B*2, 1, 1) to broadcast across the 2 node-lists and E edges
+        offsets = torch.arange(num_graphs, device=X.device).view(-1, 1, 1) * N
+        
+        # Apply the offsets so the graphs remain disconnected
+        batched_edge_index = edge_index_reshaped + offsets
+        
+        # Reshape to standard PyG sparse format: (2, B * 2 * E)
+        # We transpose to (2, B*2, E) then flatten the last two dims
+        batched_edge_index = batched_edge_index.transpose(0, 1).reshape(2, -1)
+
+        # 2. Flatten X
+        X_flat = X.view(num_graphs * N, F_dim)
+
+        # 3. Pass both X and the flattened edge_index into diffusion
+        X_diffused = self.sheaf_diffusion(X_flat, batched_edge_index)
+        
+        # 4. Restore original structure (B, 2, N, hidden_dim * d)
+        X_diffused = X_diffused.view(B, num_confs, N, -1)
+
+        # 5. Graph Pooling & Classification
+        graph_emb = X_diffused.mean(dim=2) 
+        combined_emb = torch.cat([graph_emb[:, 0, :], graph_emb[:, 1, :]], dim=-1)
+        logits = self.classifier(combined_emb)
+        
+        return logits
         
         
 
@@ -130,22 +233,162 @@ class SheafMotionClassifier(torch.nn.Module):
         
 # test if gradients are stable     
 if __name__ == "__main__":
-    from torchinfo import summary
-    B = 2
-    T = 300
-    E = 2 
+   # ==========================================
+    # 1. Define Dummy Dimensions
+    # ==========================================
+    B = 4            # Batch size
+    num_confs = 2    # Number of conformations
+    N = 15           # Number of nodes per graph
+    F_dim = 8        # Number of node features
+    E = 20           # Number of edges per graph
+    num_classes = 5  # Motion classes
+    hidden_dim = 16  # Internal representation size
 
-    # node_features, stalk_dimensions, lstm_hidden_dim=8, num_classes=5, hidden_dim=64, adjacency_matrix=True
-    model = SheafMotionClassifier(1, 1, lstm_hidden_dim=8, num_classes=5, hidden_dim=8, adjacency_matrix=True).double()
-    nodes = torch.randn(B, 2, T, 1, requires_grad=True).to(torch.double)
-    node_lengths = torch.tensor([T]*B, dtype=torch.int)
-
-    matrix_first_half = (torch.eye(T, dtype=torch.bool).roll(0,1) | torch.eye(T, dtype=torch.bool).roll(1,1))[None,None,:,:].repeat(B//2,2,1,1)
-    matrix_second_half = torch.zeros(T,T,dtype=torch.bool)
-    matrix_second_half[0,2] = 1
-    matrix_second_half[2,0] = 1
-    matrix_second_half = matrix_second_half[None,None,:,:].repeat(B//2,2,1,1)
-    matrix = torch.cat([matrix_first_half, matrix_second_half],dim=0)
-
-    summary(model, input_data=(nodes, node_lengths, matrix)) 
+    print("--- Initializing Dummy Data ---")
+    # X: (B, 2, N, F)
+    X_dummy = torch.randn(B, num_confs, N, F_dim, requires_grad=True)
     
+    # edge_index: (B, 2, 2, E)
+    # Node indices must be valid integers between 0 and N-1
+    edge_index_dummy = torch.randint(0, N, (B, num_confs, 2, E))
+    
+    print(f"X shape: {X_dummy.shape}")
+    print(f"edge_index shape: {edge_index_dummy.shape}\n")
+
+    # ==========================================
+    # 2. Instantiate the Model
+    # ==========================================
+    print("--- Initializing Model ---")
+    model = MotionClassifier(
+        X=X_dummy, 
+        edge_index=edge_index_dummy, 
+        num_classes=num_classes, 
+        hidden_dim=hidden_dim
+    )
+    print("Model initialized successfully.\n")
+
+    # ==========================================
+    # 3. Test Forward Pass
+    # ==========================================
+    print("--- Testing Forward Pass ---")
+    logits = model(X_dummy, edge_index_dummy)
+    print(f"Logits shape: {logits.shape} | Expected: ({B}, {num_classes})")
+    assert logits.shape == (B, num_classes), "Output shape mismatch!"
+    print("Forward pass successful.\n")
+
+    # ==========================================
+    # 4. Test Differentiability (Backward Pass)
+    # ==========================================
+    print("--- Testing Differentiability ---")
+    # Create dummy target labels
+    targets = torch.randint(0, num_classes, (B,))
+    
+    # Calculate loss
+    criterion = torch.nn.CrossEntropyLoss()
+    loss = criterion(logits, targets)
+    print(f"Initial Loss: {loss.item():.4f}")
+    
+    # Backpropagate
+    loss.backward()
+    
+    # Check if gradients reached the final classifier
+    grad_classifier = model.classifier[0].weight.grad is not None
+    
+    # Check if gradients reached the diffusion ODE func's sheaf learner
+    grad_sheaf = model.sheaf_diffusion.odefunc.sheaf_learner.linear1.weight.grad is not None
+    
+    # Check if gradients reached the very first linear layer
+    grad_lin1 = model.sheaf_diffusion.lin1.weight.grad is not None
+
+    print(f"Gradients at Classifier: {'[OK]' if grad_classifier else '[FAILED]'}")
+    print(f"Gradients at Sheaf Learner: {'[OK]' if grad_sheaf else '[FAILED]'}")
+    print(f"Gradients at First Layer: {'[OK]' if grad_lin1 else '[FAILED]'}")
+    
+    assert grad_classifier and grad_sheaf and grad_lin1, "Gradients are broken and did not flow back"
+    print("\nSUCCESS: Model is fully differentiable end-to-end")
+
+    # ==========================================
+    # 5. Test Diffusion Dynamics
+    # ==========================================
+    print("--- Testing Diffusion Dynamics ---")
+    
+    # We will use PyTorch hooks to capture the features right before and after the ODE block
+    diffusion_states = {}
+
+    def get_ode_io(name):
+        def hook(model, input, output):
+            # input is a tuple: (t, X)
+            diffusion_states[f"{name}_in"] = input[1].detach().clone()
+            diffusion_states[f"{name}_out"] = output.detach().clone()
+        return hook
+
+    # Register the hook on the odefunc
+    hook_handle = model.sheaf_diffusion.odefunc.register_forward_hook(get_ode_io("ode_block"))
+
+    # Run a fresh forward pass (no gradients needed for this test)
+    with torch.no_grad():
+        _ = model(X_dummy, edge_index_dummy)
+
+    # Remove the hook so it doesn't slow down future training
+    hook_handle.remove()
+
+    X_before = diffusion_states["ode_block_in"]
+    X_after = diffusion_states["ode_block_out"]
+
+    print(f"Features before diffusion: {X_before.shape}")
+    print(f"Features after diffusion:  {X_after.shape}")
+
+    # 1. Check if features actually changed
+    feature_diff = torch.norm(X_before - X_after)
+    print(f"Total magnitude of feature change: {feature_diff.item():.4f}")
+    assert feature_diff > 1e-6, "Features did not change! Diffusion is not doing anything."
+
+    # 2. Check if a completely disconnected graph diffuses differently
+    # Let's create an edge_index with NO edges (empty graph)
+    empty_edge_index = torch.empty((B, num_confs, 2, 0), dtype=torch.long)
+    
+    hook_handle = model.sheaf_diffusion.odefunc.register_forward_hook(get_ode_io("empty_graph"))
+    with torch.no_grad():
+        _ = model(X_dummy, empty_edge_index)
+    hook_handle.remove()
+    
+    X_after_empty = diffusion_states["empty_graph_out"]
+    
+    # If the graph has no edges, the Laplacian should just be block diagonal (self-loops).
+    # The diffused features SHOULD be different from the fully connected graph.
+    graph_impact = torch.norm(X_after - X_after_empty)
+    print(f"Impact of graph structure (Edges vs No Edges): {graph_impact.item():.4f}")
+    assert graph_impact > 1e-6, "Graph structure is being ignored! Edges are not routing information."
+
+    print("SUCCESS: Diffusion is actively mixing features based on graph topology!\n")
+
+    # ==========================================
+    # 6. Test Global Section Convergence
+    # ==========================================
+    print("--- Testing Global Section Convergence (Dirichlet Energy) ---")
+    
+    # 1. RUN A FRESH PASS WITH VALID EDGES to overwrite the empty Laplacian
+    with torch.no_grad():
+        _ = model(X_dummy, edge_index_dummy)
+    
+    # 2. Now extract the valid Laplacian
+    L_idx, L_val = model.sheaf_diffusion.odefunc.L
+    N_total = X_before.size(0)
+
+    def compute_disagreement(X_state):
+        # The disagreement is L * X. If X is a perfect global section, L * X = 0.
+        LX = torch_sparse.spmm(L_idx, L_val, N_total, N_total, X_state)
+        # Return the Frobenius norm (total magnitude) of the disagreement
+        return torch.norm(LX).item()
+
+    disagreement_before = compute_disagreement(X_before)
+    disagreement_after = compute_disagreement(X_after)
+
+    print(f"Disagreement (||LX||) BEFORE diffusion: {disagreement_before:.4f}")
+    print(f"Disagreement (||LX||) AFTER diffusion:  {disagreement_after:.4f}")
+
+    assert disagreement_after < disagreement_before, \
+        "Disagreement increased! Diffusion is diverging, likely because `t` is too large."
+        
+    print("SUCCESS: Features are actively converging toward a global section!\n")
+        
