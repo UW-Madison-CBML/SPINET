@@ -5,7 +5,7 @@ from torch.nn.utils.rnn import pack_padded_sequence
 from torch.autograd.gradcheck import gradcheck
 from typing import Tuple
 
-import diffusion_laplace_test as lap
+import diffusion_laplace as lap
 
 
 class SheafLearner(torch.nn.Module):
@@ -35,13 +35,13 @@ class SheafLearner(torch.nn.Module):
         return maps
 
 
-class LaplacianODEFunc(torch.nn.Module):
-    """Implements Laplacian-based diffusion."""
+class DiscreteDiffusionStep(torch.nn.Module):
+    """Implements discrete Laplacian-based diffusion step."""
 
     def __init__(self, d, hidden_channels, 
                  left_weights=False, right_weights=False, 
                  use_act=False, nonlinear=False):
-        super(LaplacianODEFunc, self).__init__()
+        super(DiscreteDiffusionStep, self).__init__()
         self.d = d
         self.hidden_channels = hidden_channels
         
@@ -58,7 +58,7 @@ class LaplacianODEFunc(torch.nn.Module):
         if self.right_weights:
             self.lin_right_weights = torch.nn.Linear(self.hidden_channels, self.hidden_channels, bias=False)
 
-    def forward(self, t, X, edge_index):
+    def forward(self, dt, X, edge_index):
         # X shape: (num_total_nodes * d, hidden_channels)
         num_total_nodes = X.shape[0] // self.d
         
@@ -86,7 +86,7 @@ class LaplacianODEFunc(torch.nn.Module):
 
         dX = torch_sparse.spmm(L[0], L[1], X.size(0), X.size(0), -X)
 
-        X = X + (t * dX)
+        X = X + (dt * dX)
 
         if self.use_act:
             X = F.elu(X)
@@ -113,11 +113,12 @@ class SheafDiffusion(torch.nn.Module):
         self.input_dim = args['input_dim'] 
         self.hidden_channels = args['hidden_channels'] 
         self.output_dim = args['output_dim']
-        self.t = args['max_t']
+        self.dt = args['step_size']
+        self.steps = args['steps']
         
         self.lin1 = torch.nn.Linear(self.input_dim, self.hidden_dim)
         
-        self.odefunc = LaplacianODEFunc(
+        self.diffuse = DiscreteDiffusionStep(
             d=self.d,
             hidden_channels=self.hidden_channels,
             left_weights=args['left_weights'],
@@ -138,16 +139,21 @@ class SheafDiffusion(torch.nn.Module):
         X = F.dropout(X, p=self.dropout, training=self.training)
 
         # Perform diffusion
-        if self.t > 0:
+        if self.dt > 0:
             num_total_nodes = X.shape[0]
             X = X.view(num_total_nodes * self.d, self.hidden_channels)
 
-            self.odefunc.edge_index = edge_index
-            self.odefunc.L = None  # Reset Laplacian to ensure it's recomputed if needed
+            self.diffuse.edge_index = edge_index
+            self.diffuse.L = None  # Reset Laplacian to ensure it's recomputed if needed
 
-            X = self.odefunc(self.t, X, edge_index)
-            X = X.view(num_total_nodes, -1)
+            for _ in range(self.steps):
+
+                X = self.diffuse(self.dt, X, edge_index)
+
+                self.diffuse.L = self.diffuse.L # Prevent from rebuilding laplacian on each step.
         
+            X = X.view(num_total_nodes, -1)
+
         assert torch.all(torch.isfinite(X))
 
         return X
@@ -166,7 +172,8 @@ class MotionClassifier(torch.nn.Module):
         self.sheaf_diffusion = SheafDiffusion(args={
             'd': self.stalk_dimensions,
             'hidden_channels': self.hidden_dim,
-            'layers': 1,
+            'steps': 5, # number of diffusion steps
+            'step_size': 0.2,
             'linear': False,
             'input_dropout': 0.1,
             'dropout': 0.1,
@@ -175,7 +182,6 @@ class MotionClassifier(torch.nn.Module):
             'use_act': True,
             'input_dim': self.input_dim,
             'output_dim': self.hidden_dim,
-            'max_t': 1.0,
             'device': X.device if isinstance(X, torch.Tensor) else 'cpu'
         })
         
@@ -295,7 +301,7 @@ if __name__ == "__main__":
     grad_classifier = model.classifier[0].weight.grad is not None
     
     # Check if gradients reached the diffusion ODE func's sheaf learner
-    grad_sheaf = model.sheaf_diffusion.odefunc.sheaf_learner.linear1.weight.grad is not None
+    grad_sheaf = model.sheaf_diffusion.diffuse.sheaf_learner.linear1.weight.grad is not None
     
     # Check if gradients reached the very first linear layer
     grad_lin1 = model.sheaf_diffusion.lin1.weight.grad is not None
@@ -315,15 +321,15 @@ if __name__ == "__main__":
     # We will use PyTorch hooks to capture the features right before and after the ODE block
     diffusion_states = {}
 
-    def get_ode_io(name):
+    def get_step_io(name):
         def hook(model, input, output):
             # input is a tuple: (t, X)
             diffusion_states[f"{name}_in"] = input[1].detach().clone()
             diffusion_states[f"{name}_out"] = output.detach().clone()
         return hook
 
-    # Register the hook on the odefunc
-    hook_handle = model.sheaf_diffusion.odefunc.register_forward_hook(get_ode_io("ode_block"))
+    # Register the hook on the discrete diffusion step
+    hook_handle = model.sheaf_diffusion.diffuse.register_forward_hook(get_step_io("diffusion_block"))
 
     # Run a fresh forward pass (no gradients needed for this test)
     with torch.no_grad():
@@ -332,8 +338,8 @@ if __name__ == "__main__":
     # Remove the hook so it doesn't slow down future training
     hook_handle.remove()
 
-    X_before = diffusion_states["ode_block_in"]
-    X_after = diffusion_states["ode_block_out"]
+    X_before = diffusion_states["diffusion_block_in"]
+    X_after = diffusion_states["diffusion_block_out"]
 
     print(f"Features before diffusion: {X_before.shape}")
     print(f"Features after diffusion:  {X_after.shape}")
@@ -347,7 +353,7 @@ if __name__ == "__main__":
     # Let's create an edge_index with NO edges (empty graph)
     empty_edge_index = torch.empty((B, num_confs, 2, 0), dtype=torch.long)
     
-    hook_handle = model.sheaf_diffusion.odefunc.register_forward_hook(get_ode_io("empty_graph"))
+    hook_handle = model.sheaf_diffusion.diffuse.register_forward_hook(get_step_io("empty_graph"))
     with torch.no_grad():
         _ = model(X_dummy, empty_edge_index)
     hook_handle.remove()
@@ -372,7 +378,7 @@ if __name__ == "__main__":
         _ = model(X_dummy, edge_index_dummy)
     
     # 2. Now extract the valid Laplacian
-    L_idx, L_val = model.sheaf_diffusion.odefunc.L
+    L_idx, L_val = model.sheaf_diffusion.diffuse.L
     N_total = X_before.size(0)
 
     def compute_disagreement(X_state):

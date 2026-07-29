@@ -1,6 +1,6 @@
 # for use them directly
 from motion_classifier_dataset import MotionClassifierDataset
-from motion_model import SheafMotionClassifier
+from motion_model import MotionClassifier
 from sheaf_utils import build_graph
 import pandas as pd
 import numpy as np
@@ -37,8 +37,11 @@ def train_motion_classifier():
     learning_rate = 1e-4
     epochs = 8
     val_ratio = 0.3 
-    use_adjacency_mat = True
     batch_size = 32 
+    hidden_dim = 64
+    diffusion_steps = 5
+    step_size = 0.2 # diffusion step size
+
     
     # set up device 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
@@ -46,7 +49,6 @@ def train_motion_classifier():
     # load in data
     df = pd.read_csv(os.path.abspath("motions.csv"))
     motion_ids = df["motion_id"].unique()
-    #np.random.shuffle(motion_ids) # optionally shuffle the motion ids
     val_motions = motion_ids[:int(val_ratio * len(motion_ids))]
     df_mask = df["motion_id"].isin(val_motions)
 
@@ -55,15 +57,16 @@ def train_motion_classifier():
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
         project="SheafProtein",
-        name="sheaf_training",
+        name="sheaf_diffusion_training",
         config={
-            "epsilon":epsilon,
-            "lr":learning_rate,
-            "epochs":epochs,
-            "val_motions": val_motions,
-            "val_ratio":val_ratio,
-            "use_adjacency_mat":use_adjacency_mat,
-            "batch_size":batch_size
+            "epsilon": epsilon,
+            "lr": learning_rate,
+            "epochs": epochs,
+            "val_ratio": val_ratio,
+            "batch_size": batch_size,
+            "hidden_dim": hidden_dim,
+            "steps": diffusion_steps,
+            "step_size": step_size
         },
     )
 
@@ -95,17 +98,28 @@ def train_motion_classifier():
     loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
     
-    # set up model
-    model = SheafMotionClassifier(len(MotionClassifierDataset.AMINO_ACIDS)+3, 2, lstm_hidden_dim=2, hidden_dim=8, num_classes=len(MotionClassifierDataset.MOTION_CLASSES), adjacency_matrix=use_adjacency_mat).to(torch.float32)
+    num_classes = len(MotionClassifierDataset.MOTION_CLASSES)
+    
+    # set up new diffusion model
+    # Generate dummy data to initialize the model's dynamically tracked dimensions
+    F_dim = len(MotionClassifierDataset.AMINO_ACIDS) + 3
+    dummy_X = torch.zeros((1, 2, 10, F_dim), device=DEVICE)
+    dummy_edges = torch.zeros((1, 2, 2, 2), dtype=torch.long, device=DEVICE)
+
+    model = MotionClassifier(
+        X=dummy_X, 
+        edge_index=dummy_edges, 
+        num_classes=num_classes, 
+        hidden_dim=hidden_dim
+    ).to(torch.float32)
     model = model.to(DEVICE)
     
     # set up other training stuff
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5) 
     crit = torch.nn.CrossEntropyLoss()
-    
-    num_classes = len(MotionClassifierDataset.MOTION_CLASSES)
 
     # training  
+    #TODO: Adapt build_graph for COO format. Edge_lengths unnecessary, and should output PyG's expected 2,E format directly.
     for epoch in range(epochs):
         pbar = tqdm(loader)
         model = model.train()
@@ -117,14 +131,16 @@ def train_motion_classifier():
             residues = residues.to(DEVICE) # B, T
             motion_classes = motion_classes.to(DEVICE) # B
             
-            if use_adjacency_mat:
-                mats = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=True) # B, 2, T, T, type=bool
-            else:
-                edges, edge_lengths = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) # B, 2, E, 2, type=unsigned int
+            # Extract edges without adjacency matrix (B, 2, E, 2)
+            edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
+            
+            # Reshape edges from (B, 2, E, 2) to PyG's expected (B, 2, 2, E) format
+            edge_index = edges.permute(0, 1, 3, 2).long()
             
             residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS)) # B, T, amino_acids
 
             # center the conformations to origin
+            #TODO: is this necessary?
             center1 = conformations1.mean(dim=1, keepdim=True) # B, 1, 3
             center2 = conformations2.mean(dim=1, keepdim=True) # B, 1, 3
 
@@ -137,17 +153,14 @@ def train_motion_classifier():
             node_features = torch.stack([node_features1, node_features2], dim=1)
             node_features = node_features.to(torch.float32)
             
-            # just in case any previous operations have been accumulating gradients
             optimizer.zero_grad()
 
-            if use_adjacency_mat:
-                logits = model(node_features, lengths, matrix=mats) # B 
-            else:
-                logits = model(node_features, lengths, edges=edges, edge_lengths=edge_lengths) # B 
+            # Forward pass through the sheaf diffusion model
+            logits = model(node_features, edge_index) 
 
             # compare prediction to ground truth classes
             loss = crit(logits, motion_classes)
-            run.log({"loss":loss.detach().cpu().item()})
+            run.log({"loss": loss.detach().cpu().item()})
            
             # back propagate and reset
             loss.backward() 
@@ -167,21 +180,17 @@ def train_motion_classifier():
                 residues = residues.to(DEVICE) # B, T
                 motion_classes = motion_classes.to(DEVICE) # B
                 
-                if use_adjacency_mat:
-                    mats = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=True) # B, 2, E, 2
-                else:
-                    edges, edge_lengths = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) # B, 2, E, 2
+                edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
+                edge_index = edges.permute(0, 1, 3, 2).long()
                 
                 residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS)) # B, T, amino_acids
                 node_features1 = torch.cat([conformations1, residues_one_hot], dim=2) # B, T, 3 + amino_acids 
                 node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
                 
                 node_features = torch.stack([node_features1, node_features2], dim=1)
+                node_features = node_features.to(torch.float32)
 
-                if use_adjacency_mat:
-                    logits = model(node_features, lengths, matrix=mats) # B 
-                else:
-                    logits = model(node_features, lengths, edges=edges, edge_lengths=edge_lengths) # B 
+                logits = model(node_features, edge_index)
 
                 # compare prediction to ground truth classes
                 loss = crit(logits, motion_classes)

@@ -7,85 +7,78 @@ def build_graph(conformations1, conformations2, lengths, epsilon, adjacency_matr
     """
     Creates edges between nodes (atoms/residues) epsilon distance from one another.
     Processes two conformations at once so they are transformed in same way for valid comparison.
-    Outputs adjacency list. 
+    Outputs either an adjacency matrix or a dense batched edge list.
 
     Args:
-        conformations1: Batched 3-D tensor of residue positions for conf 1.
-        conformations2: Batched 3-D tensor of residue positions for conf 2.
-        padding: Dynamic padding mask.
-        epsilon: Learned max distance for edge between residues.
+        conformations1: Batched 3-D tensor of residue positions for conf 1 (B, T, 3).
+        conformations2: Batched 3-D tensor of residue positions for conf 2 (B, T, 3).
+        lengths: Number of valid residues per batch (B,).
+        epsilon: Max distance for edge between residues.
+        adjacency_matrix: If True, returns bool matrix. If False, returns batched edge lists.
     Return:
-        out_list: Stacked adjacency lists.
-        out_padding: Nested lists False if node is padded, True otherwise.
-
+        If adjacency_matrix=True:
+            adjacency: (B, 2, T, T) boolean tensor
+        If adjacency_matrix=False:
+            out_list: (B, 2, E_max, 2) tensor of edges, padded with (0,0)
+            out_lengths: (B, 2) tensor of valid edge counts
     """
-    # B, T, 3 = conformations1.shape = conformations2.shape
-    B,T, _ = conformations1.shape
-    assert lengths.shape == (B,), f"WRONG SHAPE: {lengths.shape}"
-    assert lengths.max() <= T and lengths.min() >= 1, f"BAD RANGE FOR LENGTHS: expected: [{lengths.min()},{lengths.max()}] is not a subset of [1, {T}]"
-    # lengths = (B), max < T
-    # padding needs to be on CUDA because of (1)
-    # padding = (B,T)
-    padding = (torch.arange(T)[None,:] < lengths[:, None]).to(conformations1.device)
+    B, T, _ = conformations1.shape
+    
+    # padding needs to be on CUDA
+    padding = (torch.arange(T, device=conformations1.device)[None, :] < lengths[:, None])
 
     dist_mat1 = torch.cdist(conformations1, conformations1, p=2) # B, T, T
     dist_mat2 = torch.cdist(conformations2, conformations2, p=2) # B, T, T
-    dist_mat = torch.stack([dist_mat1, dist_mat2], dim=1)
-    # TODO implement some other form of predicate to determine existence of edges
-    print("dist_mat.shape", dist_mat.shape)
-    matrix_padding = padding[:,None, None, :] & padding[:,None, :, None] # B, 1, T, T
-    assert matrix_padding.shape == (B, 1, T, T), f"WRONG SHAPE: {matrix_padding.shape}" 
-    print("matrix_padding.shape: ", matrix_padding.shape)
-    print("epsilon.shape: ", epsilon.shape)
-    adjacency = (dist_mat < epsilon) & matrix_padding # (1)
-    print("adj.shape:", adjacency.shape)
+    dist_mat = torch.stack([dist_mat1, dist_mat2], dim=1)        # B, 2, T, T
 
-    # Remove self-loops and symmetric duplicates by keeping only upper triangle
-    # The data structure I'm using in the sheaf laplacian is edges = (B,E,2) a set 
-    # of unique edges whose indices are < T, and >= 0. Padding is done with the pairs (-1, -1). 
-    # The sheaves or sets of restriction maps are of shape (B,E,2,D,D) where at index [:,i] we have 
-    # the 2 restriction maps from node edges[:,i,0] to edge edges[:,i] and from node edges[:,i,1] to edges[:,i]
-    # clear out redundant edges 
-    if not adjacency_matrix:
-        triu_mask = torch.triu(torch.ones((T,T), dtype=torch.bool, device=adjacency.device), diagonal=0)
-        adjacency = adjacency & triu_mask[None, None, :, :]
-
-    #if we index restriction maps via adjacency mats 
-    # remove the diagonal, no self edges
-    else:
-        return adjacency & (~torch.eye(T, dtype=torch.bool, device=adjacency.device)[None,None,:,:])
-
-    #alternatively if we want to do the edges list 
-    rows = torch.arange(T)[None,None,:,None].repeat(B,2, 1, 1)
-    cols = torch.arange(T)[None,None,None,:].repeat(B,2, 1, 1)
-    rows, cols = torch.broadcast_tensors(rows, cols) # B, 2, T, T
+    matrix_padding = padding[:, None, None, :] & padding[:, None, :, None] # B, 1, T, T
     
-    edges = torch.stack([rows, cols], dim=-1) 
-    edges = torch.where(padding[:,None, None, :,None] & padding[:, None, :, None,None], edges, -1)
+    adjacency = (dist_mat < epsilon) & matrix_padding
 
-    # Flatten
-    adjacency = adjacency.reshape(B,2,T*T)
-    edges = edges.reshape(B,2, T*T,2)
+    if adjacency_matrix:
+        # Remove self edges (diagonal) for the adjacency matrix
+        return adjacency & (~torch.eye(T, dtype=torch.bool, device=adjacency.device)[None, None, :, :])
 
-    # Max edges per graph rather than sum across both
-    E = adjacency.sum(dim=2).max().to(int).item() 
+    # For edge list:
+    # Remove self-loops (diagonal=1) and symmetric duplicates by keeping only upper triangle
+    triu_mask = torch.triu(torch.ones((T, T), dtype=torch.bool, device=adjacency.device), diagonal=1)
+    adjacency = adjacency & triu_mask[None, None, :, :]
 
-    # Mask invalid edges before topk
-    edges = torch.where(adjacency.unsqueeze(-1), edges, -1)
+    # Flatten spatial dimensions to process edge extraction
+    adj_flat = adjacency.view(B, 2, T * T)
 
-    # Push valid edges to front and get indices
-    _, indices = torch.topk(adjacency.to(int),E,dim=2) # [B,2,E] 
+    # Find the maximum number of valid edges across the entire batch
+    E = adj_flat.sum(dim=2).max().item()
+    
+    # Handle edge case where no nodes are within epsilon
+    if E == 0:
+        return torch.zeros((B, 2, 0, 2), dtype=torch.long, device=adjacency.device), \
+               torch.zeros((B, 2), dtype=torch.long, device=adjacency.device)
 
-    # Get indices with dummy dimensions
-    b_idx = torch.arange(B)[:, None, None] # [B, 1, 1]
-    c_idx = torch.arange(2)[None, :, None] # [1, 2, 1]
+    # Sort pushes True (1) values to the front. 
+    # This neatly organizes all valid edges to the start of the list.
+    _, indices = torch.sort(adj_flat.int(), dim=2, descending=True)
+    indices = indices[:, :, :E] # [B, 2, E]
 
-    # Gather edges
-    out_list = edges[b_idx, c_idx, indices] # [B,2, E, 2]
-    # out list should be equal along the pair dims
-    out_lengths = ((out_list[:,0,:,0] == -1) | (out_list[:,0,:,1] == -1)).sum(dim=-1) # B, max < E
-    return out_list, out_lengths
-   
+    # Convert 1D flat indices back to 2D (row, col) coordinates
+    rows = torch.div(indices, T, rounding_mode='floor')
+    cols = indices % T
+    
+    # Stack into [B, 2, E, 2]
+    edges = torch.stack([rows, cols], dim=-1)
+
+    # We need to mask out the dummy edges that got pulled in by the fixed `E` dimension.
+    # Check if the pulled indices were actually True in the original adjacency matrix.
+    valid_edge_mask = torch.gather(adj_flat, dim=2, index=indices).unsqueeze(-1) # [B, 2, E, 1]
+
+    # PyG will CRASH if given a negative index like -1. 
+    # By multiplying by the boolean mask, padded invalid edges safely default to (0, 0).
+    out_list = edges * valid_edge_mask
+
+    # Get the actual number of valid edges per graph
+    out_lengths = valid_edge_mask.sum(dim=2).squeeze(-1) # [B, 2]
+
+    return out_list, out_lengths 
      
     
     
