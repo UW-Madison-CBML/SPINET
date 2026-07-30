@@ -7,6 +7,7 @@ def check_class_distribution():
     csv_path = os.path.abspath("motions.csv")
     print(f"Loading data from {csv_path}...")
     df = pd.read_csv(csv_path)
+     
     
     # Instantiate the dataset
     dataset = MotionClassifierDataset(df)
