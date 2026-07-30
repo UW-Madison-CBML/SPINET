@@ -6,7 +6,7 @@ PROTEIN=$1
 PDB_INPUT="$PROTEIN.pdb"
 FF="amber99sb-ildn"
 WATER="tip3p"
-OUT_DIR="data"
+OUT_DIR="md_data"
 MDP_DIR="./mdp"
 BOX=dodecahedron   # changes amount of water, see description for other options
 BOX_DIST=1.0       # box edge distance in nm
@@ -19,7 +19,7 @@ mkdir -p $OUT_DIR
 echo "******************************************"
 echo "Step 1: Generating Topology..."
 gmx pdb2gmx -f $PDB_INPUT -o $OUT_DIR/processed.gro -p $OUT_DIR/topol.top -ff $FF -water $WATER
-mv posre.itp data/
+mv posre.itp $OUT_DIR/
 
 # 2. Creating the Box & Solvating
 echo "******************************************"
@@ -58,3 +58,53 @@ echo "******************************************"
 echo "Step 7: Production Run..."
 gmx grompp -f $MDP_DIR/md.mdp -c $OUT_DIR/npt.gro -t $OUT_DIR/npt.cpt -p $OUT_DIR/topol.top -o $OUT_DIR/production.tpr -po $OUT_DIR/md_out.mdp
 gmx mdrun -v -deffnm $OUT_DIR/production
+
+
+# =====================================================================
+# Step 8: Data Extraction for Conformation & Energy Landscape Analysis
+# =====================================================================
+echo "******************************************"
+echo "Step 8: Extracting Landscape Data..."
+
+
+# 1. Grab Energy Descent from Energy Minimization (Potential Energy vs. Step)
+# '11' is typically Potential Energy in minim.edr. 
+# We echo '11' and an empty newline to select it automatically.
+echo -e "Potential\n" | gmx energy -f $OUT_DIR/em.edr -o $OUT_DIR/em_potential.xvg
+
+# 2. Grab Thermodynamic Trajectory (Temperature, Pressure, Total Energy)
+# These track how the system settles during equilibration and production.
+echo -e "Temperature\nPressure\nPotential\nKinetic-En.\nTotal-Energy\n" | \
+gmx energy -f $OUT_DIR/production.edr -o $OUT_DIR/production_thermo.xvg
+
+# 3. Clean the Production Trajectory (Fix Periodic Boundary Conditions)
+# Centering the protein ensures structural analysis calculations are correct.
+# Select '1' (Protein) for centering and '0' (System) for output.
+echo -e "Protein\nSystem\n" | gmx trjconv \
+    -s $OUT_DIR/production.tpr \
+    -f $OUT_DIR/production.xtc \
+    -o $OUT_DIR/fixed_production.xtc \
+    -pbc mol -center
+
+# 4. Extract Structural Conformation Data (RMSD, RMSF, Radius of Gyration)
+# These values act as coordinates for your conformational space map.
+
+# RMSD: Structural distance from starting structure over time (Select 1 for Protein)
+echo -e "Protein\nProtein\n" | gmx rms \
+    -s $OUT_DIR/production.tpr \
+    -f $OUT_DIR/fixed_production.xtc \
+    -o $OUT_DIR/rmsd.xvg
+
+# Radius of Gyration: Compactness/folding state over time (Select 1 for Protein)
+echo -e "Protein\n" | gmx gyrate \
+    -s $OUT_DIR/production.tpr \
+    -f $OUT_DIR/fixed_production.xtc \
+    -o $OUT_DIR/gyrate.xvg
+
+# RMSF: Per-residue flexibility profile (Select 1 for Protein)
+echo -e "Protein\n" | gmx rmsf \
+    -s $OUT_DIR/production.tpr \
+    -f $OUT_DIR/fixed_production.xtc \
+    -o $OUT_DIR/rmsf.xvg -res
+
+echo "Data extraction complete. Files saved in $OUT_DIR"

@@ -7,6 +7,7 @@
 set -ex
 PROTEIN_NAME=$1
 
+
 # Crappy workaround for condor path issues
 export HOME=$_CONDOR_SCRATCH_DIR
 export XDG_CACHE_HOME=$_CONDOR_SCRATCH_DIR/.cache
@@ -31,9 +32,10 @@ gmx -version
 
 echo "Running GROMACS job: ${PROTEIN_NAME}"
 tar -xzvf mdp.tar.gz
+tar -xvzf md_data.tar.gz
 mkdir data
 time ./gromacs_pipeline.sh ${PROTEIN_NAME}
 
-tar -czvf data.tar.gz data
+tar -czvf md_data.tar.gz md_data/
 
-rm -rf data mdp mdp.tar.gz
+rm -rf md_data/ mdp mdp.tar.gz
