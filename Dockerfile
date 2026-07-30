@@ -9,5 +9,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # TODO figure this out
 #RUN pip install --no-cache-dir torch-cluster -f https://data.pyg.org/whl/torch-2.9.0+cu128.html
 
+ENV FORCE_CUDA=1
+RUN pip install --no-cache-dir torch-scatter torch-sparse torch-cluster torch-geometric
+
 COPY lib/ ./lib/
 

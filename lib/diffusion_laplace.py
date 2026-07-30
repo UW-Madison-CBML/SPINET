@@ -10,7 +10,7 @@ def sym_matrix_pow(matrix: torch.Tensor, p: float) -> torch.Tensor:
     """
     vals, vecs = torch.linalg.eigh(matrix)
     
-    # Differentiable, out-of-place thresholding to prevent NaN gradients from negative eigenvalues
+    safe_vals = torch.clamp(vals, min=1e-7)
     vals_pow = torch.where(vals > 1e-6, vals.pow(p), torch.zeros_like(vals))
     
     # Use diag_embed and .mT to support batched matrices (N, K, K)

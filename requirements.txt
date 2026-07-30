@@ -9,4 +9,3 @@ matplotlib
 wandb
 huggingface_hub
 tqdm
-torch-sparse

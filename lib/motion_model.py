@@ -81,9 +81,6 @@ class DiscreteDiffusionStep(torch.nn.Module):
             X = self.lin_right_weights(X)
         
         # Apply sparse matrix multiplication: -L * X
-        X = torch_sparse.spmm(L[0], L[1], X.size(0), X.size(0), -X)
-
-
         dX = torch_sparse.spmm(L[0], L[1], X.size(0), X.size(0), -X)
 
         X = X + (dt * dX)
@@ -150,6 +147,8 @@ class SheafDiffusion(torch.nn.Module):
 
                 X = self.diffuse(self.dt, X, edge_index)
 
+                X = torch.clamp(X, min=-1e4, max=1e4) # prevent param explosion for high step size
+
                 self.diffuse.L = self.diffuse.L # Prevent from rebuilding laplacian on each step.
         
             X = X.view(num_total_nodes, -1)
@@ -160,23 +159,27 @@ class SheafDiffusion(torch.nn.Module):
 
 
 class MotionClassifier(torch.nn.Module):  
-    def __init__(self, X, edge_index, K=8, num_classes=5, hidden_dim=64):
+    def __init__(self, X, edge_index, K=8, num_classes=5, hidden_dim=64, steps=3, step_size=0.2, input_dropout=0.2, dropout=0.2):
         super().__init__()
 
         self.input_dim = X.shape[-1]
         self.num_nodes = X.shape[-2]
         self.stalk_dimensions = 3 
         self.hidden_dim = hidden_dim
+        self.steps = steps
+        self.step_size = step_size
+        self.input_dropout = input_dropout
+        self.dropout = dropout
         self.K = K
 
         self.sheaf_diffusion = SheafDiffusion(args={
             'd': self.stalk_dimensions,
             'hidden_channels': self.hidden_dim,
-            'steps': 5, # number of diffusion steps
-            'step_size': 0.2,
+            'steps': self.steps, # number of diffusion steps
+            'step_size': self.step_size,
             'linear': False,
-            'input_dropout': 0.1,
-            'dropout': 0.1,
+            'input_dropout': self.input_dropout,
+            'dropout': self.dropout,
             'left_weights': False,
             'right_weights': False,
             'use_act': True,

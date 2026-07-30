@@ -40,7 +40,7 @@ def train_motion_classifier():
     batch_size = 32 
     hidden_dim = 64
     diffusion_steps = 5
-    step_size = 0.2 # diffusion step size
+    step_size = 0.1 # diffusion step size
 
     
     # set up device 
@@ -110,7 +110,8 @@ def train_motion_classifier():
         X=dummy_X, 
         edge_index=dummy_edges, 
         num_classes=num_classes, 
-        hidden_dim=hidden_dim
+        hidden_dim=hidden_dim,
+
     ).to(torch.float32)
     model = model.to(DEVICE)
     
@@ -130,6 +131,8 @@ def train_motion_classifier():
 
             residues = residues.to(DEVICE) # B, T
             motion_classes = motion_classes.to(DEVICE) # B
+
+            lengths = lengths.to(DEVICE)
             
             # Extract edges without adjacency matrix (B, 2, E, 2)
             edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
@@ -144,8 +147,9 @@ def train_motion_classifier():
             center1 = conformations1.mean(dim=1, keepdim=True) # B, 1, 3
             center2 = conformations2.mean(dim=1, keepdim=True) # B, 1, 3
 
-            conformations1 = conformations1 - center1 # B, T, 3
-            conformations2 = conformations2 - center2 # B, T, 3
+            # Downscale to prevent param explosion
+            conformations1 = (conformations1 - center1) / 10.0 # B, T, 3
+            conformations2 = (conformations2 - center2) / 10.0 # B, T, 3
 
             node_features1 = torch.cat([conformations1, residues_one_hot], dim=2) # B, T, 3 + amino_acids 
             node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
@@ -164,6 +168,9 @@ def train_motion_classifier():
            
             # back propagate and reset
             loss.backward() 
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optimizer.step()
 
         # validation
@@ -179,6 +186,8 @@ def train_motion_classifier():
 
                 residues = residues.to(DEVICE) # B, T
                 motion_classes = motion_classes.to(DEVICE) # B
+
+                lengths = lengths.to(DEVICE)
                 
                 edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
                 edge_index = edges.permute(0, 1, 3, 2).long()
