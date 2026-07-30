@@ -7,6 +7,19 @@ from motion_classifier_dataset import MotionClassifierDataset
 import os
 from tqdm import tqdm
 
+# Import biophysical properties and mappings directly from Biopython
+from Bio.Data.IUPACData import protein_letters_3to1, protein_weights
+from Bio.SeqUtils.ProtParamData import kd as hydropathy_index
+from Bio.SeqUtils.ProtParamData import Flex as flexibility_index
+
+PHYSIOLOGICAL_CHARGE = {
+    'R': 1.0,  # Arginine
+    'K': 1.0,  # Lysine
+    'H': 0.1,  # Histidine
+    'D': -1.0, # Aspartic Acid
+    'E': -1.0  # Glutamic Acid
+}
+
 def main(use_uniprot):
     # the last two columns seem to be empty
     columns = ['uniprot_ID', 'pdb_1', 'pocket_size_free', 'pdb_2', 'ligand', 'pocket_size_bound', 'motion_class', 'motion_residues', 'RMSD_pocket']
@@ -22,7 +35,6 @@ def main(use_uniprot):
     dif_ligand_df.columns = columns
 
     df = pd.concat([free_bound_df, dif_ligand_df], axis=0, ignore_index=True)
-    # TODO what other of these features could be incorporated into the pipeline
     df = df[["pdb_1", "pdb_2", "motion_class", "uniprot_ID"]] # remove unecessary rows before we dropna
 
     df = df.dropna()
@@ -58,26 +70,45 @@ def main(use_uniprot):
             for res in residues:
                 try:
                     residue_indices.append(MotionClassifierDataset.AMINO_ACIDS.index(res.upper()))
-                # TODO this will not work with Cross entropy loss
                 except ValueError:
                     residue_indices.append(-1)
+            
+            # ---> Biopython Feature Extraction <---
+            hydropathy_vals = []
+            weight_vals = []
+            flexibility_vals = []
+            charge_vals = []
+
+            for res in residues:
+                # Biopython's 3-to-1 map uses capitalized 3-letter codes (e.g., 'Ala', 'Arg')
+                res_3 = res.capitalize() 
+                # Convert to 1-letter code; use 'X' for unknown/non-standard residues
+                res_1 = protein_letters_3to1.get(res_3, 'X')
+                
+                # Fetch properties using the 1-letter code (defaulting to neutral values if not found)
+                hydropathy_vals.append(hydropathy_index.get(res_1, 0.0))
+                weight_vals.append(protein_weights.get(res_1, 0.0))
+                flexibility_vals.append(flexibility_index.get(res_1, 1.0))
+                charge_vals.append(PHYSIOLOGICAL_CHARGE.get(res_1, 0.0))
             
             res_df = pd.DataFrame({
                 "residue": residue_indices,
                 "motion_class": row["motion_class"],
                 "motion_id": row["motion_id"],
-                "res_name": list(residues)
+                "res_name": list(residues),
+                "hydropathy": hydropathy_vals,
+                "weight": weight_vals,
+                "flexibility": flexibility_vals,
+                "charge": charge_vals
             })
 
             # construct x,y,x coords
-            conformation1_df = pd.DataFrame(conformation1, columns=["conf1_0", "conf1_1", "conf1_2"], index=res_df.index) 
-            conformation2_df = pd.DataFrame(conformation2, columns=["conf2_0", "conf2_1", "conf2_2"], index=res_df.index) 
+            conformation1_df = pd.DataFrame(conformation1, columns=["conf1_0", "conf1_1", "conf1_2"], index=res_df.index)
+            conformation2_df = pd.DataFrame(conformation2, columns=["conf2_0", "conf2_1", "conf2_2"], index=res_df.index)
 
             conformation_df = pd.concat([res_df, conformation1_df, conformation2_df], axis=1)
             groups.append(conformation_df)
-        # KeyError: the PDB structure[0] dict got an invalid key
-        # ZeroDivisionError: the conformation aligner got an empty seqeunce of atoms, meaning the intersection of the aligned sequences was empty
-        # 
+            
         except (ValueError, KeyError, AttributeError,ZeroDivisionError) as e:
             print(f"error skipping row {row['motion_id']}: {e}")
 
