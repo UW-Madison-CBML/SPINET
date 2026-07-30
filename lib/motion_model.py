@@ -50,7 +50,7 @@ class DiscreteDiffusionStep(torch.nn.Module):
         self.nonlinear = nonlinear
         self.left_weights = left_weights
         self.right_weights = right_weights
-        self.use_act = use_act
+        #self.use_act = use_act
         self.L = None
         
         if self.left_weights:
@@ -72,6 +72,7 @@ class DiscreteDiffusionStep(torch.nn.Module):
         else:
             L = self.L
         
+        #TODO: check this tensor logic is correct
         if self.left_weights:
             X = X.t().reshape(-1, self.d)
             X = self.lin_left_weights(X)
@@ -80,13 +81,10 @@ class DiscreteDiffusionStep(torch.nn.Module):
         if self.right_weights:
             X = self.lin_right_weights(X)
         
-        # Apply sparse matrix multiplication: -L * X
-        dX = torch_sparse.spmm(L[0], L[1], X.size(0), X.size(0), -X)
+        # Apply sparse matrix multiplication: L * X
+        dX = torch_sparse.spmm(L[0], L[1], X.size(0), X.size(0), X)
 
-        X = X + (dt * dX)
-
-        if self.use_act:
-            X = F.elu(X)
+        X = X - F.elu((dt * dX))
 
         return X
 
