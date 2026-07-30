@@ -7,6 +7,7 @@
 set -ex
 PROTEIN_NAME=$1
 
+curl -o inputs/$PROTEIN_NAME.pdb https://rcsb.org
 
 # Crappy workaround for condor path issues
 export HOME=$_CONDOR_SCRATCH_DIR

@@ -9,14 +9,14 @@ import time
 import os
 #TODO: so we need to load in the amino acid sequence from uniprot, and get the two structures from pdb. Then we align them    
     
-def retrieve_pdb_file(pdb_id, file_format = "cif"):
+def retrieve_pdb_file(pdb_id, file_format = "cif", parent_dir="./"):
     url = f"https://files.rcsb.org/download/{pdb_id.lower()}.{file_format}"
     
     # TODO remove in case of anonymization
     headers = {
         "User-Agent": "jlundsgaard@wisc.edu"
     }
-    file_path = os.path.abspath(f"{pdb_id}.{file_format}")
+    file_path = os.path.abspath(os.path.join(parent_dir, f"{pdb_id}.{file_format}"))
 
     i = 0
     attempts = 8
