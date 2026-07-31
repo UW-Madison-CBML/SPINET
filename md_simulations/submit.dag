@@ -1,14 +1,5 @@
+JOB job_pdb grab_pdbs.sub
+VARS job_pdb proteins="6vxx"
 JOB job0 md_submit.sub
-VARS job0 protein="4hhb"
-JOB job1 md_submit.sub
-VARS job1 protein="1a81"
-JOB job2 md_submit.sub
-VARS job2 protein="1bna"
-JOB job3 md_submit.sub
-VARS job3 protein="1crn"
-JOB job4 md_submit.sub
-VARS job4 protein="6vxx"
-PARENT job0 CHILD job1
-PARENT job1 CHILD job2
-PARENT job2 CHILD job3
-PARENT job3 CHILD job4
+VARS job0 protein="6vxx"
+PARENT job_pdb CHILD job0

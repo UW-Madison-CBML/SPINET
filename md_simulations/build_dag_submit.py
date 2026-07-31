@@ -7,7 +7,7 @@ if __name__ == "__main__":
     sub_file = "md_submit.sub"
     out_string = "" 
     out_string += f"JOB job_pdb grab_pdbs.sub\n"  
-    out_string += f"VARS job_pdb proteins={\" \".join(sys.argv[1:])}\n"  
+    out_string += f"VARS job_pdb proteins=\"{' '.join(sys.argv[1:])}\"\n"  
     for job_id, job in enumerate(sys.argv[1:]):
         out_string += f"JOB job{job_id} {sub_file}\n"  
         out_string += f"VARS job{job_id} protein=\"{job}\"\n"  
