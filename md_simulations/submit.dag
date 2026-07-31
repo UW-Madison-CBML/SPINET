@@ -1,5 +1,26 @@
 JOB job_pdb grab_pdbs.sub
-VARS job_pdb proteins="6vxx_a"
+VARS job_pdb proteins="1UBQ_A 6LYZ_A 1CRN_A 1BRS_A 2LZM_A 1PGA_A 1L2Y_A 4LZT_A"
 JOB job0 md_submit.sub
-VARS job0 protein="6vxx_a"
+VARS job0 protein="1UBQ_A"
+JOB job1 md_submit.sub
+VARS job1 protein="6LYZ_A"
+JOB job2 md_submit.sub
+VARS job2 protein="1CRN_A"
+JOB job3 md_submit.sub
+VARS job3 protein="1BRS_A"
+JOB job4 md_submit.sub
+VARS job4 protein="2LZM_A"
+JOB job5 md_submit.sub
+VARS job5 protein="1PGA_A"
+JOB job6 md_submit.sub
+VARS job6 protein="1L2Y_A"
+JOB job7 md_submit.sub
+VARS job7 protein="4LZT_A"
 PARENT job_pdb CHILD job0
+PARENT job0 CHILD job1
+PARENT job1 CHILD job2
+PARENT job2 CHILD job3
+PARENT job3 CHILD job4
+PARENT job4 CHILD job5
+PARENT job5 CHILD job6
+PARENT job6 CHILD job7
