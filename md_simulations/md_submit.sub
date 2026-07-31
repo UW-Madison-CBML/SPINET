@@ -3,9 +3,10 @@ docker_image            = docker://gromacs/gromacs:2022.2
 # Artefact
 executable              = run.sh
 arguments               = $(protein)
-transfer_input_files    = gromacs_pipeline.sh,mdp.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+#transfer_input_files    = gromacs_pipeline.sh,mdp.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+transfer_input_files    = gromacs_pipeline.sh,mdp.tar.gz, md_data.tar.gz # remove once pelican works
 transfer_output_files   = md_data.tar.gz
-transfer_output_remaps  = "md_data.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz" 
+#transfer_output_remaps  = "md_data.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz" 
 
 output                  = condor_log/output.$(Cluster)-$(Process).txt
 error                   = condor_log/error.$(Cluster)-$(Process).txt
