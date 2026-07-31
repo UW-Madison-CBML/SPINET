@@ -34,12 +34,12 @@ def process_protein(pdb_id, chain_id=None):
     io.set_structure(structure)
 
     if chain_id:
-        output_file = os.path.join("inputs",f"{pdb_id}_{chain_id}.pdb")
+        output_file = os.path.join("inputs",f"{pdb_id.upper()}_{chain_id.upper()}.pdb")
         io.save(output_file, select=ChainSelectOnlyProtein(chain_id.upper()))
         print(f"Successfully extracted chain {chain_id}: {output_file}\n")
     else:
         chain_id = structure.get_chains()[0]
-        output_file = os.path.join("inputs",f"{pdb_id}.pdb")
+        output_file = os.path.join("inputs",f"{pdb_id.upper()}.pdb")
         io.save(output_file, select=ChainSelectOnlyProtein(chain_id.upper())) # implicit chain? TODO
         print(f"Successfully extracted all chains into single file: {output_file}\n")
     

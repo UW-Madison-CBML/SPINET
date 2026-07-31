@@ -10,7 +10,7 @@ if __name__ == "__main__":
     out_string += f"VARS job_pdb proteins=\"{' '.join(sys.argv[1:])}\"\n"  
     for job_id, job in enumerate(sys.argv[1:]):
         out_string += f"JOB job{job_id} {sub_file}\n"  
-        out_string += f"VARS job{job_id} protein=\"{job}\"\n"  
+        out_string += f"VARS job{job_id} protein=\"{job.upper()}\"\n"  
         #retrieve_pdb_file(job, file_format="pdb", parent_dir="inputs")
     
     out_string += f"PARENT job_pdb CHILD job0\n"
