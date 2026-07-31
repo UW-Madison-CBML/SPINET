@@ -17,25 +17,20 @@ mkdir -p $OUT_DIR
 
 
 gmx --version | grep -i "GPU support"
-# 1. Structure Conversion (Generates structure in a vacuum)
+
 echo "Step 1: Generating Topology..."
-gmx pdb2gmx -f $PDB_INPUT -o $OUT_DIR/processed.gro -p $OUT_DIR/topol.top -ff $FF -water none
-mv posre.itp $OUT_DIR/ 2>/dev/null
+gmx pdb2gmx -f $PDB_INPUT -o $OUT_DIR/processed.gro -p $OUT_DIR/topol.top -ff amber99sb-ildn -water none
 
-# 2. Large Box (Prevents a vacuum molecule from seeing its own periodic images)
-echo "Step 2: Defining Vacuum Box..."
-gmx editconf -f $OUT_DIR/processed.gro -o $OUT_DIR/boxed.gro -bt cubic -d 3.0
+echo "Step 2: Defining Box..."
+gmx editconf -f $OUT_DIR/processed.gro -o $OUT_DIR/boxed.gro -bt cubic -d 2.0
 
-# 3. Quick CPU Minimization (Ensures atoms aren't overlapping before the MD run)
-echo "Step 3: Energy Minimization (CPU)..."
+echo "Step 3: Minimization..."
 gmx grompp -f $MDP_DIR/minim.mdp -c $OUT_DIR/boxed.gro -p $OUT_DIR/topol.top -o $OUT_DIR/em.tpr
 gmx mdrun -v -deffnm $OUT_DIR/em -nb cpu -pme cpu
 
-# 4. Production Run Entirely on GPU (Tracks your trajectory and energy)
-echo "Step 4: Production Run on GPU..."
+echo "Step 4: Production Run..."
 gmx grompp -f $MDP_DIR/md.mdp -c $OUT_DIR/em.gro -p $OUT_DIR/topol.top -o $OUT_DIR/production.tpr
 gmx mdrun -v -deffnm $OUT_DIR/production -nb gpu -pme gpu -bonded gpu -update gpu
-
 
 ### 1. Structure Conversion
 #echo "******************************************"
