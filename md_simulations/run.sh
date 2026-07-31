@@ -8,7 +8,7 @@ set -ex
 PROTEIN_NAME=$1
 
 tar -xvf inputs.tar.gz 
-mv inputs/$PROTEIN_NAME ./
+mv inputs/"$PROTEIN_NAME".pdb ./
 
 # Crappy workaround for condor path issues
 export HOME=$_CONDOR_SCRATCH_DIR

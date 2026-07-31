@@ -23,8 +23,8 @@ request_gpus            = 1
 Requirements            = (Target.CUDADriverVersion >= 12.0)
 
 # for non-DAG use
-queue protein from (
-6vxx
-)
+#queue protein from (
+#6vxx
+#)
 # for DAG use
-#queue 1 
+queue 1 

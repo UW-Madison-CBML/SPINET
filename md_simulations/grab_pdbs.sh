@@ -1,7 +1,5 @@
 #!/bin/bash
 mkdir inputs
-for var in "$@"
-do
-    curl -o inputs/"$var".pdb https://rcsb.org
-done
+pip install biopython --quiet
+python grab_pdbs.py "$@"
 tar -czvf inputs.tar.gz inputs/
