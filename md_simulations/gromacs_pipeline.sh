@@ -86,9 +86,6 @@ echo -e "Protein\nSystem\n" | gmx trjconv \
     -o $OUT_DIR/fixed_production.xtc \
     -pbc mol -center
 
-# 4. Extract Structural Conformation Data (RMSD, RMSF, Radius of Gyration)
-# These values act as coordinates for your conformational space map.
-
 # RMSD: Structural distance from starting structure over time (Select 1 for Protein)
 echo -e "Protein\nProtein\n" | gmx rms \
     -s $OUT_DIR/production.tpr \
