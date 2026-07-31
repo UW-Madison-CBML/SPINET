@@ -1,0 +1,17 @@
+docker_image            = docker://gromacs/gromacs:2022.2
+
+# Artefact
+executable              = grab_pdbs.sh
+arguments               = $(proteins)
+transfer_output_files   = inputs.tar.gz
+
+output                  = condor_log/$(Cluster)-$(Process).out
+error                   = condor_log/$(Cluster)-$(Process).err
+log                     = condor_log/$(Cluster)-$(Process).log
+
+# Compute resources
+request_cpus            = 1
+request_memory          = 16GB
+request_disk            = 64GB
+
+queue 1 
