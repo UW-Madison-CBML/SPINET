@@ -60,6 +60,7 @@ def load_pdb(pdb_plus_chain, pdb_dir): # save the pdb to a directory, if pdb_dir
 
     io = PDB.PDBIO()
     io.set_structure(structure)
+    io.save(os.path.join(pdb_dir, f"{pdb_plus_chain}.pdb"))
 
     first_structure = structure[0]
     all_chains = list(first_structure.get_chains())
@@ -220,8 +221,9 @@ def load_motion_structures_no_uniprot(pdb1, pdb2):
 
     alignment = aligner.align(seq1_str, seq2_str)[0]  
     blocks1, blocks2 = alignment.aligned[:2]
-
-
+    # we need to also save the ground truth order of original residues for downstream labeling
+    gt_res_indicies1 
+    
     for block1, block2 in zip(blocks1, blocks2):
         for idx in range(block1[1] - block1[0]): # block1[1] - block1[0] = block2[1] - block2[0]
             idx1 = idx + block1[0]
