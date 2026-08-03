@@ -39,7 +39,7 @@ def main(use_uniprot):
 
     df = df.dropna()
     # universal motion identifier
-    df["motion_id"] = df['pdb_1'] + "-" + df['pdb_2']
+    df["motion_id"] = df['pdb_1'] + "-" + df['pdb_2'] # is this actually a primary key?
 
     groups = []
     pbar = tqdm(list(df.iterrows()))
@@ -62,10 +62,11 @@ def main(use_uniprot):
                     continue
             
             # padded, uniprot-aligned coordinates
+            # save aligned but ground truth pdb files
             if(use_uniprot):
-                conformation1, conformation2, residues = load_motion_structures(row["pdb_1"], row["pdb_2"], uniprot_seq)
+                conformation1, conformation2, residues = load_motion_structures(row["pdb_1"], row["pdb_2"], uniprot_seq, "pdbs")
             else:
-                conformation1, conformation2, residues = load_motion_structures_no_uniprot(row["pdb_1"], row["pdb_2"])
+                conformation1, conformation2, residues = load_motion_structures_no_uniprot(row["pdb_1"], row["pdb_2"], "pdbs")
 
             residue_indices = []
             for res in residues:
