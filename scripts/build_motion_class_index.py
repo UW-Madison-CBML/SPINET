@@ -38,7 +38,8 @@ def main(use_uniprot):
     df = df[["pdb_1", "pdb_2", "motion_class", "uniprot_ID"]] # remove unecessary rows before we dropna
 
     df = df.dropna()
-    df["motion_id"] = df['pdb_1'] + df['pdb_2']
+    # universal motion identifier
+    df["motion_id"] = df['pdb_1'] + "-" + df['pdb_2']
 
     groups = []
     pbar = tqdm(list(df.iterrows()))
