@@ -66,7 +66,6 @@ class DiscreteDiffusionStep(torch.nn.Module):
             # Reshape back to (num_total_nodes, hidden_channels * d) for sheaf learning
             X_maps = X.view(num_total_nodes, -1)
             maps = self.sheaf_learner(X_maps, edge_index)
-            # Assuming lap.build_norm_sheaf_laplacian returns a tuple of (edge_index, edge_weights)
             self.L = lap.build_norm_sheaf_laplacian(num_total_nodes, self.d, edge_index, maps)
             L = self.L
         else:
@@ -201,7 +200,6 @@ class MotionClassifier(torch.nn.Module):
         
         num_graphs = B * num_confs
         
-        # 1. Vectorized edge offsetting
         # Reshape to (B*2, 2, E)
         edge_index_reshaped = edge_index.view(num_graphs, 2, E)
         
@@ -216,16 +214,15 @@ class MotionClassifier(torch.nn.Module):
         # We transpose to (2, B*2, E) then flatten the last two dims
         batched_edge_index = batched_edge_index.transpose(0, 1).reshape(2, -1)
 
-        # 2. Flatten X
         X_flat = X.view(num_graphs * N, F_dim)
 
-        # 3. Pass both X and the flattened edge_index into diffusion
+        # Pass both X and the flattened edge_index into diffusion
         X_diffused = self.sheaf_diffusion(X_flat, batched_edge_index)
         
-        # 4. Restore original structure (B, 2, N, hidden_dim * d)
+        # Restore original structure (B, 2, N, hidden_dim * d)
         X_diffused = X_diffused.view(B, num_confs, N, -1)
 
-        # 5. Graph Pooling & Classification
+        # Graph Pooling & Classification
         graph_emb = X_diffused.mean(dim=2) 
         combined_emb = torch.cat([graph_emb[:, 0, :], graph_emb[:, 1, :]], dim=-1)
         logits = self.classifier(combined_emb)
