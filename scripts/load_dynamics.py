@@ -16,6 +16,8 @@ def main():
     threads = {}
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api" 
     atlas_df = pd.read_csv(os.path.abspath("atlas.csv"))
+    # for whatever reason the format for the api is slightly different
+    atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
     md_urls = [base_url + f"/ATLAS/analysis/{pdb}" for pdb in atlas_df["pdb"].to_list()]
 
     for i in md_urls:

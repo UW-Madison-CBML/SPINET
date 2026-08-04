@@ -8,3 +8,6 @@ api_keys.txt
 # PDB file formats
 *.cif
 *.pdb
+*.pyc
+__pycache__
+lib/__pycache__
