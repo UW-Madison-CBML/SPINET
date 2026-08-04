@@ -1,7 +1,7 @@
 #!/bin/bash
 
 mkdir md_data
-pip install pandas requests
+pip install pandas requests mdtraj numpy
 
 python load_dynamics.py
 

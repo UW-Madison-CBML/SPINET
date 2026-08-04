@@ -26,4 +26,3 @@ class MotionClassifierDataset(Dataset):
 
         return conformations1_padded
 
-
