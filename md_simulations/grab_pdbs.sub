@@ -1,0 +1,18 @@
+# Artefact
+docker_image            = docker://python:3.11-slim
+
+executable              = grab_pdbs.sh
+arguments               = $(proteins)
+transfer_input_files    = grab_pdbs.sh, grab_pdbs.py
+transfer_output_files   = inputs.tar.gz
+
+output                  = condor_log/grab_pdbs_$(Cluster)-$(Process).out
+error                   = condor_log/grab_pdbs_$(Cluster)-$(Process).err
+log                     = condor_log/grab_pdbs_$(Cluster)-$(Process).log
+
+# Compute resources
+request_cpus            = 1
+request_memory          = 16GB
+request_disk            = 64GB
+
+queue 1 

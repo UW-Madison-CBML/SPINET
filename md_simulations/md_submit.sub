@@ -1,18 +1,17 @@
-JobBatchName            = "theMD"
 docker_image            = docker://gromacs/gromacs:2022.2
 
 # Artefact
 executable              = run.sh
 arguments               = $(protein)
-transfer_input_files    = gromacs_pipeline.sh,mdp.tar.gz,inputs/$(protein).pdb, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+transfer_input_files = gromacs_pipeline.sh,inputs/$(protein).pdb, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+#transfer_input_files = gromacs_pipeline.sh,mdp.tar.gz, inputs.tar.gz, md_data.tar.gz
+# remove once pelican works
 transfer_output_files   = md_data.tar.gz
 transfer_output_remaps  = "md_data.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz" 
 
-# Logging
-stream_output           = true
-output                  = condor_log/output.$(Cluster)-$(Process).txt
-error                   = condor_log/error.$(Cluster)-$(Process).txt
-log                     = condor_log/log.$(Cluster)-$(Process).txt
+output                  = condor_log/$(Cluster)-$(Process).out
+error                   = condor_log/$(Cluster)-$(Process).err
+log                     = condor_log/$(Cluster)-$(Process).log
 
 # Compute resources
 request_cpus            = 8
@@ -21,12 +20,11 @@ request_disk            = 50GB
 
 # Extra GPU settings
 request_gpus            = 1
-require_gpus            = GlobalMemoryMb >= 8000
-+WantGPULab             = true
-+GPUJobLength           = "short"
 Requirements            = (Target.CUDADriverVersion >= 12.0)
 
 # for non-DAG use
-#queue protein from proteins.txt
+#queue protein from (
+#6vxx
+#)
 # for DAG use
 queue 1 

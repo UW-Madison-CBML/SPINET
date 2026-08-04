@@ -1,6 +1,8 @@
 #!/bin/bash
 
-python build_motion_class_index.py 1
+mkdir pdbs
+python build_motion_class_index.py
+tar -czvf pdbs.tar.gz pdbs/
 
 rm *.pdb
-rm *.ent
+rm *.cif

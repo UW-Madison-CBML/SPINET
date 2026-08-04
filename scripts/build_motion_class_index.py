@@ -35,10 +35,11 @@ def main(use_uniprot):
     dif_ligand_df.columns = columns
 
     df = pd.concat([free_bound_df, dif_ligand_df], axis=0, ignore_index=True)
-    df = df[["pdb_1", "pdb_2", "motion_class", "uniprot_ID"]] # remove unecessary rows before we dropna
+    df = df[["pdb_1", "pdb_2", "motion_class", "uniprot_ID", "ligand","motion_residues"]] # remove unecessary rows before we dropna
 
     df = df.dropna()
-    df["motion_id"] = df['pdb_1'] + df['pdb_2']
+    # universal motion identifier
+    df["motion_id"] = df['pdb_1'] + "-" + df['pdb_2'] # is this actually a primary key?
 
     groups = []
     pbar = tqdm(list(df.iterrows()))
@@ -61,10 +62,11 @@ def main(use_uniprot):
                     continue
             
             # padded, uniprot-aligned coordinates
+            # save aligned but ground truth pdb files
             if(use_uniprot):
-                conformation1, conformation2, residues = load_motion_structures(row["pdb_1"], row["pdb_2"], uniprot_seq)
+                conformation1, conformation2, residues = load_motion_structures(row["pdb_1"], row["pdb_2"], uniprot_seq, "pdbs")
             else:
-                conformation1, conformation2, residues = load_motion_structures_no_uniprot(row["pdb_1"], row["pdb_2"])
+                conformation1, conformation2, residues = load_motion_structures_no_uniprot(row["pdb_1"], row["pdb_2"], "pdbs")
 
             residue_indices = []
             for res in residues:
@@ -99,9 +101,10 @@ def main(use_uniprot):
                 "hydropathy": hydropathy_vals,
                 "weight": weight_vals,
                 "flexibility": flexibility_vals,
-                "charge": charge_vals
+                "charge": charge_vals,
+                "ligand": row["ligand"] 
             })
-
+            
             # construct x,y,x coords
             conformation1_df = pd.DataFrame(conformation1, columns=["conf1_0", "conf1_1", "conf1_2"], index=res_df.index)
             conformation2_df = pd.DataFrame(conformation2, columns=["conf2_0", "conf2_1", "conf2_2"], index=res_df.index)

@@ -36,7 +36,7 @@ def retrieve_pdb_file(pdb_id, file_format = "cif", parent_dir="./"):
     raise ValueError(f"{pdb_id} could not be accessed at {url}: error code {response.status_code}")
 
 
-def load_pdb(pdb_plus_chain):
+def load_pdb(pdb_plus_chain, pdb_dir): # save the pdb to a directory, if pdb_dir == "" it doesn't save it
     # pdb ids are sometimes formatted like this
     pdb_plus_chain = pdb_plus_chain.replace(":", "_")
     if("_" not in pdb_plus_chain):
@@ -57,6 +57,11 @@ def load_pdb(pdb_plus_chain):
     # parser = PDB.PDBParser(QUIET=True)
     parser = PDB.MMCIFParser(QUIET=True) 
     structure = parser.get_structure(pdb_id, file_path) 
+
+    io = PDB.PDBIO()
+    io.set_structure(structure)
+    io.save(os.path.join(pdb_dir, f"{pdb_plus_chain}.pdb"))
+
     first_structure = structure[0]
     all_chains = list(first_structure.get_chains())
 
@@ -166,12 +171,11 @@ def map_pdb_to_uniprot(atoms, res_names, uniprot_seq:str):
     return aligned_atoms
 
 
-
-def load_motion_structures(pdb1, pdb2, uniprot_seq:str):
+def load_motion_structures(pdb1, pdb2, uniprot_seq:str, pdb_dir):
 
     # uniprot_seq: single letter residues 
-    atoms1, res_names1 = load_pdb(pdb1)
-    atoms2, res_names2 = load_pdb(pdb2)
+    atoms1, res_names1 = load_pdb(pdb1, pdb_dir)
+    atoms2, res_names2 = load_pdb(pdb2, pdb_dir)
 
     aligned_atoms1 = map_pdb_to_uniprot(atoms1, res_names1, uniprot_seq)
     aligned_atoms2 = map_pdb_to_uniprot(atoms2, res_names2, uniprot_seq)
@@ -198,8 +202,8 @@ def load_motion_structures(pdb1, pdb2, uniprot_seq:str):
     return conformation1, conformation2, intersection_residues
 
 def load_motion_structures_no_uniprot(pdb1, pdb2):
-    atoms1, res_names1 = load_pdb(pdb1)
-    atoms2, res_names2 = load_pdb(pdb2)
+    atoms1, res_names1 = load_pdb(pdb1, pdb_dir)
+    atoms2, res_names2 = load_pdb(pdb2, pdb_dir)
 
     aligner = Align.PairwiseAligner()
     aligner.mode = 'global'
@@ -217,8 +221,9 @@ def load_motion_structures_no_uniprot(pdb1, pdb2):
 
     alignment = aligner.align(seq1_str, seq2_str)[0]  
     blocks1, blocks2 = alignment.aligned[:2]
-
-
+    # we need to also save the ground truth order of original residues for downstream labeling
+    gt_res_indicies1 
+    
     for block1, block2 in zip(blocks1, blocks2):
         for idx in range(block1[1] - block1[0]): # block1[1] - block1[0] = block2[1] - block2[0]
             idx1 = idx + block1[0]
@@ -238,6 +243,7 @@ def load_motion_structures_no_uniprot(pdb1, pdb2):
 
     
     return intersecting_atoms1, intersecting_atoms2, [atom.get_parent().get_resname() for atom in intersecting_atoms1]
+
 # for temporary use
 if __name__ == "__main__":
     pdb_list = [
