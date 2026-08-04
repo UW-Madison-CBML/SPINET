@@ -14,6 +14,7 @@ when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 
 transfer_input_files = build_motion_class_index.sh, build_motion_class_index.py, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/free_bound_pocket.csv, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/bound_dif_ligand_pocket.csv ,../lib/pdb_api.py, ../lib/motion_classifier_dataset.py
+
 transfer_output_files = motions.csv, pdbs.tar.gz
 transfer_output_remaps = "motions.csv = file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/motions.csv; pdbs.tar.gz = file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/pdbs.tar.gz;"
 

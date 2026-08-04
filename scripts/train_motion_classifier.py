@@ -1,4 +1,3 @@
-# for use them directly
 from motion_classifier_dataset import MotionClassifierDataset
 from motion_model import MotionClassifier
 from sheaf_utils import build_graph
@@ -36,21 +35,31 @@ def train_motion_classifier():
     epsilon = 5.0 # in Angstroms
     learning_rate = 1e-4
     epochs = 8
-    val_ratio = 0.3 
+    val_ratio = 0.15
+    test_ratio = 0.15
     batch_size = 32 
     hidden_dim = 64
-    diffusion_steps = 5
+    steps = 5 # num diffusion steps
     step_size = 0.1 # diffusion step size
 
-    
     # set up device 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
     
-    # load in data
+    # load in data and create 3-way split
     df = pd.read_csv(os.path.abspath("motions.csv"))
     motion_ids = df["motion_id"].unique()
-    val_motions = motion_ids[:int(val_ratio * len(motion_ids))]
-    df_mask = df["motion_id"].isin(val_motions)
+    num_motions = len(motion_ids)
+    
+    val_cutoff = int(val_ratio * num_motions)
+    test_cutoff = val_cutoff + int(test_ratio * num_motions)
+    
+    val_motions = motion_ids[:val_cutoff]
+    test_motions = motion_ids[val_cutoff:test_cutoff]
+    train_motions = motion_ids[test_cutoff:]
+    
+    train_df = df[df["motion_id"].isin(train_motions)]
+    val_df = df[df["motion_id"].isin(val_motions)]
+    test_df = df[df["motion_id"].isin(test_motions)]
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -63,20 +72,18 @@ def train_motion_classifier():
             "lr": learning_rate,
             "epochs": epochs,
             "val_ratio": val_ratio,
+            "test_ratio": test_ratio,
             "batch_size": batch_size,
             "hidden_dim": hidden_dim,
-            "steps": diffusion_steps,
+            "steps": steps,
             "step_size": step_size
         },
     )
 
     # WANDB artifact logging
     artifact = wandb.Artifact(name="scripts", type="model_file")
-    
-    # Use __file__ to dynamically get the path of this current training script
     artifact.add_file(os.path.abspath(__file__))
     
-    # Add your other dependencies based on your imports
     dependencies = [
         "motion_model.py", 
         "motion_classifier_dataset.py", 
@@ -88,20 +95,19 @@ def train_motion_classifier():
             
     run.log_artifact(artifact)
 
-    # set up validation split
-    val_df = df[df_mask]
-    df = df[~ df_mask]
-    dataset = MotionClassifierDataset(df)
+    # Initialize datasets
+    train_dataset = MotionClassifierDataset(train_df)
     val_dataset = MotionClassifierDataset(val_df)
+    test_dataset = MotionClassifierDataset(test_df)
 
-    # set up dataloader
-    loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
+    # set up dataloaders
+    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
     
     num_classes = len(MotionClassifierDataset.MOTION_CLASSES)
     
     # set up new diffusion model
-    # Generate dummy data to initialize the model's dynamically tracked dimensions
     F_dim = len(MotionClassifierDataset.AMINO_ACIDS) + 3
     dummy_X = torch.zeros((1, 2, 10, F_dim), device=DEVICE)
     dummy_edges = torch.zeros((1, 2, 2, 2), dtype=torch.long, device=DEVICE)
@@ -111,139 +117,180 @@ def train_motion_classifier():
         edge_index=dummy_edges, 
         num_classes=num_classes, 
         hidden_dim=hidden_dim,
-
+        step_size = step_size,
+        steps = steps
     ).to(torch.float32)
     model = model.to(DEVICE)
     
+    # ==========================================
+    # Calculate Class Weights
+    # ==========================================
+    print("Calculating class weights from training set...")
+    class_counts = torch.zeros(num_classes, dtype=torch.float32)
+    
+    # Do a quick pass through the dataset to tally instances per class
+    for i in tqdm(range(len(train_dataset)), desc="Counting classes"):
+        _, _, _, motion_class = train_dataset[i]
+        class_counts[motion_class] += 1
+        
+    # Prevent division by zero
+    class_counts = torch.clamp(class_counts, min=1.0)
+    
+    # Calculate inverse frequency weights (N / (C * N_c))
+    total_samples = class_counts.sum()
+    class_weights = total_samples / (num_classes * class_counts)
+    class_weights = class_weights.to(DEVICE)
+    
+    print(f"Class counts: {class_counts.tolist()}")
+    print(f"Class weights applied to loss: {class_weights.tolist()}")
+
     # set up other training stuff
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5) 
-    crit = torch.nn.CrossEntropyLoss()
+    # Pass the calculated weights to the CrossEntropyLoss
+    crit = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-    # training  
-    #TODO: Adapt build_graph for COO format. Edge_lengths unnecessary, and should output PyG's expected 2,E format directly.
+    # training loop
     for epoch in range(epochs):
-        pbar = tqdm(loader)
-        model = model.train()
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        model.train()
+        
         for conformations1, conformations2, residues, motion_classes, lengths in pbar:
-
-            conformations1 = conformations1.to(DEVICE) # B, T, 3  
-            conformations2 = conformations2.to(DEVICE) # B, T, 3 
-
-            residues = residues.to(DEVICE) # B, T
-            motion_classes = motion_classes.to(DEVICE) # B
-
+            conformations1 = conformations1.to(DEVICE) 
+            conformations2 = conformations2.to(DEVICE) 
+            residues = residues.to(DEVICE) 
+            motion_classes = motion_classes.to(DEVICE) 
             lengths = lengths.to(DEVICE)
             
-            # Extract edges without adjacency matrix (B, 2, E, 2)
             edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
-            
-            # Reshape edges from (B, 2, E, 2) to PyG's expected (B, 2, 2, E) format
             edge_index = edges.permute(0, 1, 3, 2).long()
             
-            residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS)) # B, T, amino_acids
+            residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS)) 
 
-            # center the conformations to origin
-            #TODO: is this necessary?
-            center1 = conformations1.mean(dim=1, keepdim=True) # B, 1, 3
-            center2 = conformations2.mean(dim=1, keepdim=True) # B, 1, 3
+            center1 = conformations1.mean(dim=1, keepdim=True) 
+            center2 = conformations2.mean(dim=1, keepdim=True) 
 
-            # Downscale to prevent param explosion
-            conformations1 = (conformations1 - center1) / 10.0 # B, T, 3
-            conformations2 = (conformations2 - center2) / 10.0 # B, T, 3
+            conformations1 = (conformations1 - center1) / 10.0 
+            conformations2 = (conformations2 - center2) / 10.0 
 
-            node_features1 = torch.cat([conformations1, residues_one_hot], dim=2) # B, T, 3 + amino_acids 
+            node_features1 = torch.cat([conformations1, residues_one_hot], dim=2)  
             node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
             
-            node_features = torch.stack([node_features1, node_features2], dim=1)
-            node_features = node_features.to(torch.float32)
+            node_features = torch.stack([node_features1, node_features2], dim=1).to(torch.float32)
             
             optimizer.zero_grad()
-
-            # Forward pass through the sheaf diffusion model
             logits = model(node_features, edge_index) 
 
-            # compare prediction to ground truth classes
             loss = crit(logits, motion_classes)
-            run.log({"loss": loss.detach().cpu().item()})
-           
-            # back propagate and reset
+            run.log({"train_loss": loss.detach().cpu().item(), "epoch": epoch})
+            
             loss.backward() 
-
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
             optimizer.step()
 
-        # validation
+        # Validation Check
         model.eval()
-        
-        # Accumulator for global confusion matrix
-        global_confusion_mat = torch.zeros((num_classes, num_classes), device=DEVICE)
-        
+        val_losses = []
         with torch.no_grad():
-            for conformations1, conformations2, residues, motion_classes, lengths in val_loader:
-                conformations1 = conformations1.to(DEVICE) # B, T, 3  
-                conformations2 = conformations2.to(DEVICE) # B, T, 3 
-
-                residues = residues.to(DEVICE) # B, T
-                motion_classes = motion_classes.to(DEVICE) # B
-
+            for conformations1, conformations2, residues, motion_classes, lengths in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+                conformations1 = conformations1.to(DEVICE) 
+                conformations2 = conformations2.to(DEVICE) 
+                residues = residues.to(DEVICE) 
+                motion_classes = motion_classes.to(DEVICE) 
                 lengths = lengths.to(DEVICE)
                 
                 edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
                 edge_index = edges.permute(0, 1, 3, 2).long()
                 
-                residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS)) # B, T, amino_acids
-                node_features1 = torch.cat([conformations1, residues_one_hot], dim=2) # B, T, 3 + amino_acids 
+                residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS))
+                center1 = conformations1.mean(dim=1, keepdim=True) 
+                center2 = conformations2.mean(dim=1, keepdim=True) 
+                conformations1 = (conformations1 - center1) / 10.0 
+                conformations2 = (conformations2 - center2) / 10.0 
+
+                node_features1 = torch.cat([conformations1, residues_one_hot], dim=2)
                 node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
                 
-                node_features = torch.stack([node_features1, node_features2], dim=1)
-                node_features = node_features.to(torch.float32)
+                node_features = torch.stack([node_features1, node_features2], dim=1).to(torch.float32)
 
                 logits = model(node_features, edge_index)
-
-                # compare prediction to ground truth classes
                 loss = crit(logits, motion_classes)
-                run.log({"val_loss": loss.cpu().item()})
+                val_losses.append(loss.cpu().item())
                 
-                preds = logits.argmax(dim=-1)
-                
-                # compute batch confusion matrix and accumulate
-                batch_conf_mat = get_batch_confusion_matrix(motion_classes, preds, num_classes)
-                global_confusion_mat += batch_conf_mat
+        avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+        run.log({"epoch_val_loss": avg_val_loss, "epoch": epoch})
 
-        # Calculate metrics globally based on entire validation set
-        confusion_mat_cpu = global_confusion_mat.cpu()
-        diag = confusion_mat_cpu.diag()
-        
-        # sum(dim=1) gives total actual instances of each class
-        recall = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=1), 0.0)
-        
-        # sum(dim=0) gives total predicted instances of each class
-        precision = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=0), 0.0)
-        
-        f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
 
-        prf_dict = {}
-        for k, motion_class in enumerate(MotionClassifierDataset.MOTION_CLASSES):
-            prf_dict[f"{motion_class}_precision"] = precision[k].item()
-            prf_dict[f"{motion_class}_recall"] = recall[k].item()
-            prf_dict[f"{motion_class}_f1"] = f1[k].item()
+    # Final Test Evaluation
+    print("Training complete. Running final evaluation on Test Set...")
+    model.eval()
+    
+    global_confusion_mat = torch.zeros((num_classes, num_classes), device=DEVICE)
+    test_losses = []
+    
+    with torch.no_grad():
+        for conformations1, conformations2, residues, motion_classes, lengths in tqdm(test_loader, desc="Testing"):
+            conformations1 = conformations1.to(DEVICE) 
+            conformations2 = conformations2.to(DEVICE) 
+            residues = residues.to(DEVICE) 
+            motion_classes = motion_classes.to(DEVICE) 
+            lengths = lengths.to(DEVICE)
+            
+            edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
+            edge_index = edges.permute(0, 1, 3, 2).long()
+            
+            residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS))
+            center1 = conformations1.mean(dim=1, keepdim=True) 
+            center2 = conformations2.mean(dim=1, keepdim=True) 
+            conformations1 = (conformations1 - center1) / 10.0 
+            conformations2 = (conformations2 - center2) / 10.0 
 
-        # do display for the confusion matrix 
-        fig, ax = plt.subplots(figsize=(10, 10))
-        disp = ConfusionMatrixDisplay(
-            confusion_matrix=confusion_mat_cpu.numpy().astype(int), 
-            display_labels=MotionClassifierDataset.MOTION_CLASSES
-        )
-        disp.plot(cmap='Blues', ax=ax, values_format='d')
-        plt.setp(ax.get_xticklabels(), rotation=45, ha='right') 
+            node_features1 = torch.cat([conformations1, residues_one_hot], dim=2) 
+            node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
+            
+            node_features = torch.stack([node_features1, node_features2], dim=1).to(torch.float32)
 
-        prf_dict["confusion_matrix"] = wandb.Image(fig)
-        prf_dict["epoch"] = epoch
-        run.log(prf_dict) 
+            logits = model(node_features, edge_index)
 
-        plt.close(fig)
- 
+            # track test loss
+            test_loss = crit(logits, motion_classes)
+            test_losses.append(test_loss.cpu().item())
+            
+            preds = logits.argmax(dim=-1)
+            batch_conf_mat = get_batch_confusion_matrix(motion_classes, preds, num_classes)
+            global_confusion_mat += batch_conf_mat
+
+    avg_test_loss = sum(test_losses) / len(test_losses) if test_losses else 0
+    run.log({"final_test_loss": avg_test_loss})
+
+    # Calculate metrics based on entire test set
+    confusion_mat_cpu = global_confusion_mat.cpu()
+    diag = confusion_mat_cpu.diag()
+    
+    recall = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=1), 0.0)
+    precision = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=0), 0.0)
+    f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
+
+    prf_dict = {}
+    for k, motion_class in enumerate(MotionClassifierDataset.MOTION_CLASSES):
+        prf_dict[f"test_{motion_class}_precision"] = precision[k].item()
+        prf_dict[f"test_{motion_class}_recall"] = recall[k].item()
+        prf_dict[f"test_{motion_class}_f1"] = f1[k].item()
+
+    # generate and log test confusion matrix
+    fig, ax = plt.subplots(figsize=(10, 10))
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=confusion_mat_cpu.numpy().astype(int), 
+        display_labels=MotionClassifierDataset.MOTION_CLASSES
+    )
+    disp.plot(cmap='Blues', ax=ax, values_format='d')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right') 
+    plt.title("Test Set Confusion Matrix")
+
+    prf_dict["test_confusion_matrix"] = wandb.Image(fig)
+    run.log(prf_dict) 
+
+    plt.close(fig)
+    
     run.finish()
 
 if __name__ == "__main__":
