@@ -35,10 +35,9 @@ gmx -version
 
 echo "Running GROMACS job: ${PROTEIN_NAME}"
 tar -xzvf mdp.tar.gz
-tar -xvzf md_data.tar.gz
+
 mkdir data
 time ./gromacs_pipeline.sh ${PROTEIN_NAME}
 
-tar -czvf md_data.tar.gz md_data/
+tar -czvf "$PROTEIN_NAME"_data.tar.gz "$PROTEIN_NAME"/
 
-rm -rf md_data/ mdp mdp.tar.gz
