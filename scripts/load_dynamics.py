@@ -133,6 +133,7 @@ if __name__ == "__main__":
 
 
 
+import shutil
 import os
 import requests
 import mdtraj
@@ -193,32 +194,35 @@ def process_traj(traj):
     return df
 
 def download_and_process_file(url, pdb_id):
-    os.makedirs("md_data", exist_ok=True)
-    zip_file = os.path.join("md_data", f"{pdb_id}.zip")
-    folder = os.path.join("md_data", f"{pdb_id}")
+    base_md_dir = "md_data"
+    os.makedirs(base_md_dir, exist_ok=True)
     
-    if os.path.exists(folder):
-        return pd.DataFrame()  # Skip if already downloaded/processed
-        
-    os.makedirs(folder, exist_ok=True)
+    # OPTIMIZATION: Work entirely inside an isolated scratch folder
+    worker_temp_dir = os.path.join(base_md_dir, f"tmp_{pdb_id}")
+    os.makedirs(worker_temp_dir, exist_ok=True)
+    
+    zip_file = os.path.join(worker_temp_dir, f"{pdb_id}.zip")
+    extract_folder = os.path.join(worker_temp_dir, "extracted")
     
     try:
-        # Download stream block
+        # 1. Stream the download
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
             with open(zip_file, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=65536): # 64kb chunks for faster network IO
+                for chunk in r.iter_content(chunk_size=65536):
                     f.write(chunk)
                     
+        # 2. Extract files locally
         with ZipFile(zip_file, 'r') as zObject:
-            zObject.extractall(path=folder)
+            zObject.extractall(path=extract_folder)
             
         traj_ids = [f"{pdb_id}_R{i}" for i in range(1, 4)]
         dfs = []
         
+        # 3. Process into RAM
         for eye_d in traj_ids:
-            xtc_path = os.path.join(folder, f"{eye_d}.xtc")
-            pdb_path = os.path.join(folder, f"{pdb_id}.pdb")
+            xtc_path = os.path.join(extract_folder, f"{eye_d}.xtc")
+            pdb_path = os.path.join(extract_folder, f"{pdb_id}.pdb")
             
             if not os.path.exists(xtc_path) or not os.path.exists(pdb_path):
                 continue
@@ -234,16 +238,18 @@ def download_and_process_file(url, pdb_id):
         trajectories_df = pd.concat(dfs, axis=0, ignore_index=True)
         trajectories_df["pdb_id"] = pdb_id
         
-        try:
-            os.remove(zip_file)
-        except OSError:
-            pass
-            
+        # Return the DataFrame directly to main memory
         return trajectories_df
         
     except Exception as e:
         print(f"Failed to process {pdb_id}: {str(e)}")
         return pd.DataFrame()
+        
+    finally:
+        # OPTIMIZATION: Always wipe the entire temp folder immediately.
+        # This keeps your hard drive perfectly clean while processing.
+        if os.path.exists(worker_temp_dir):
+            shutil.rmtree(worker_temp_dir, ignore_errors=True)
 
 def main():
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api"
