@@ -23,17 +23,17 @@ def process_traj(traj): #, features):
         centroids[:, i, :] = (sub.xyz * masses[None, :, None]).sum(axis=1) / masses.sum()
     # first look at angles and distances
     sequence_differences = np.diff(centroids, axis=1)
-    bond_len = np.linalg.norm(d, axis=2)
+    bond_len = np.linalg.norm(sequence_differences, axis=2)
     bond_len = np.pad(bond_len, ((0,0),(0,1)), mode="edge")
  
     v1, v2 = centroids[:,1:-1] - centroids[:,:-2], centroids[:,2:] - centroids[:,1:-1]
     cosang = np.einsum('tij,tij->ti', v1, v2) / (
         np.linalg.norm(v1, axis=2) * np.linalg.norm(v2, axis=2))
-    bond_ang = np.pad(np.arccos(np.clip(cosang, -1, 1)), ((0,0),(0,2)), mode="edge")
+    bond_ang = np.pad(np.arccos(np.clip(cosang, -1, 1)), ((0,0),(1,1)), mode="edge")
   
     # now look at time differences for velocity
     time_differences = np.diff(centroids, axis=0)
-    features = np.concatenate([differences, centroids[1:], bond_len[1:,:, None], bond_ang[1:,:, None]], axis=2)
+    features = np.concatenate([time_differences, centroids[1:], bond_len[1:,:, None], bond_ang[1:,:, None]], axis=2)
 
     timesteps = np.broadcast_to(np.arange(features.shape[0])[:, None], features.shape[:2])
 
@@ -53,6 +53,7 @@ def process_traj(traj): #, features):
 def download_and_process_file(url, pdb_id):
     zip_file = os.path.join("md_data",f"{pdb_id}.zip")
     folder = os.path.join("md_data",f"{pdb_id}")
+    os.makedirs(folder)
     try:
         with requests.get(url, stream=True) as r: # stream=True is very important
             r.raise_for_status()
@@ -60,7 +61,6 @@ def download_and_process_file(url, pdb_id):
                 for chunk in r.iter_content(chunk_size=8192): 
                     f.write(chunk)
         
-        os.makedirs(folder)
         with ZipFile(zip_file, 'r') as zObject:
             zObject.extractall(path=folder)
         traj_ids = [f"{pdb_id}_R{i}" for i in range(1,4)]
@@ -87,7 +87,7 @@ def download_and_process_file(url, pdb_id):
 def main():
     threads = {}
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api" 
-    atlas_df = pd.read_csv(os.path.abspath("atlas.csv")).iloc[:20]
+    atlas_df = pd.read_csv(os.path.abspath("atlas.csv"))
     # for whatever reason the format for the api is slightly different
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
     md_urls = [(base_url + f"/ATLAS/analysis/{pdb}", pdb) for pdb in atlas_df["pdb"].to_list()]
