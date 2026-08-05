@@ -102,13 +102,14 @@ def train_motion_classifier():
     test_dataset = ResidueClassifierDataset(test_df)
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=MotionClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
+    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
     
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
     
     # set up new diffusion model # TODO fix all this
+    # ---------------------------------------------
     F_dim = len(MotionClassifierDataset.AMINO_ACIDS) + 3
     dummy_X = torch.zeros((1, 2, 10, F_dim), device=DEVICE)
     dummy_edges = torch.zeros((1, 2, 2, 2), dtype=torch.long, device=DEVICE)
@@ -121,6 +122,8 @@ def train_motion_classifier():
         step_size = step_size,
         steps = steps
     ).to(torch.float32)
+
+    # -----------------------------------------
     model = model.to(DEVICE)
     
     crit = torch.nn.CrossEntropyLoss() # TODO replace this with a properly masked loss, if it exists
@@ -129,14 +132,12 @@ def train_motion_classifier():
     for epoch in range(epochs):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         model.train()
-        
-        for conformations1, conformations2, residues, motion_classes, lengths in pbar:
-            conformations1 = conformations1.to(DEVICE) 
-            conformations2 = conformations2.to(DEVICE) 
+         
+        for features, residues, masks in pbar:
+            features = features.to(DEVICE)
             residues = residues.to(DEVICE) 
-            motion_classes = motion_classes.to(DEVICE) 
-            lengths = lengths.to(DEVICE)
-            
+            masks = masks.to(DEVICE) 
+            conformations 
             edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
             edge_index = edges.permute(0, 1, 3, 2).long()
             

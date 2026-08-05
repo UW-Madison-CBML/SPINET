@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 import pandas as pd
 from Bio.Data import IUPACData
 
-class MotionClassifierDataset(Dataset):
+class ResidueClassifierDataset(Dataset):
     # ground truth order of amino acid indices. they must be capitalized
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()] + ["PYL", "SEC"] # add pyrrolysine and selenocysteine
     FEATURE_COLS = ["x","y","z", "dx", "dy", "dz", "bond_ang", "bond_len"]
@@ -26,6 +26,6 @@ class MotionClassifierDataset(Dataset):
         features_padded = pad_sequence(features, batch_first=True, padding_value=0.0)
         targets_padded = pad_sequence(targets, batch_first=True, padding_value=0l)
         masks_padded = pad_sequence(masks, batch_first=True, padding_value=False)
-
-        return features_padded, targets_padded, masks_padded
+        lengths = torch.stack([torch.arange(features.shape[1])[None,:] < torch.tensor([len(feat_seq) for feat_seq in features], dtype=torch.int)[:,None] ], dim=1)
+        return features_padded, targets_padded, masks_padded, lengths
 
