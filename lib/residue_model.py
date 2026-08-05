@@ -7,7 +7,7 @@ from typing import Tuple
 from torch_geometric.nn.conv import GATConv
 from torch_geometric.nn import MessagePassing
 
-import diffusion_laplace as lap
+#import diffusion_laplace as lap
 
 class SheafLearnerLowRankNormal(nn.Module):
     def __init__(self, in_channels: int, stalk_dim: int, rank: int):
@@ -71,6 +71,7 @@ class SheafLaplacian(nn.Module):
         out = x_global - laplacian_product
         data.x = out.view(num_nodes, self.d)
         return data
+
 class SheafLearner(torch.nn.Module):
     def __init__(self, input_dim:int, stalk_dim:int):
         super().__init__()
@@ -102,13 +103,17 @@ class SheafResidualGATBlock(torch.nn.Module):
             self.sheaf_learner = SheafLearnerLowRankNormal(self.hidden_dim, self.hidden_dim, self.hidden_dim // 4) # alternatively SheafLearner(self.hidden_dim, self.hidden_dim)
             self.apply_laplacian = SheafLaplacian(self.hidden_dim)
         self.gat_block = GATConv(self.hidden_dim, self.hidden_dim, heads=self.num_heads, concat=False, residual=True, dropout=self.dropout) # TODO check how this is implemented
+
     def forward(self, data):
         # in case of custom residual definition: skip = data.x
         if(not self.ablate_sheaves):
             data.maps = sheaf_learner(data.x, data.edge_index)
+
         data.x = self.gat_block(data.x, data.edge_index)
+
         if(not self.ablate_sheaves):
             data = self.apply_laplacian(data)
+
         return data
         
         
@@ -124,7 +129,11 @@ class SheafResidualGAT(torch.nn.Module):
         self.dropout = dropout
         self.ablate_sheaves = ablate_sheaves 
 
-        self.blocks = torch.nn.Sequential([SheafResidualGATBlock(self.num_heads, self.hidden_dim, dropout=self.dropout, ablate_sheaves=self.ablate_sheaves)] * self.num_blocks)
+        self.blocks = torch.nn.Sequential(
+                [SheafResidualGATBlock(self.num_heads, 
+                                       self.hidden_dim, 
+                                       dropout=self.dropout, 
+                                       ablate_sheaves=self.ablate_sheaves)] * self.num_blocks)
         
     def forward(self, data):
         return self.blocks(data)
@@ -207,7 +216,7 @@ class NodeSheafGATClassifier(torch.nn.Module):
     def forward(self, data):
         # take in batch of graphs
         # embed based on egocentric features, since positions are raw and absolute
-        data = self.init_dynamics_embedding(data)
+        data = self.init_dynamics_embedding(data.x, data.pos, data.edge_index)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
