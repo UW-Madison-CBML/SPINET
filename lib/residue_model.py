@@ -7,30 +7,89 @@ from typing import Tuple
 
 import diffusion_laplace as lap
 
+class SheafLearnerLowRankNormal(nn.Module):
+    def __init__(self, in_channels: int, stalk_dim: int, rank: int):
+        super().__init__()
+        assert rank <= stalk_dim, "Rank 'r' cannot be greater than stalk dimension 'd'."
+        self.d = stalk_dim
+        self.r = rank
+        
+        self.q_generator = nn.Linear(in_channels * 2, self.d * self.r)
+        self.scale_generator = nn.Linear(in_channels * 2, self.r)
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
+        row, col = edge_index
+        edge_features = torch.cat([x[row], x[col]], dim=-1)
+        raw_Q = self.q_generator(edge_features).view(-1, self.d, self.r)
+        Q, R = torch.linalg.qr(raw_Q) 
+        d_sign = torch.diagonal(R, dim1=-2, dim2=-1).sign().unsqueeze(-2)
+        Q = Q * d_sign 
+        eigenvalues = torch.tanh(self.scale_generator(edge_features)) 
+        Sigma = torch.diag_embed(eigenvalues)
+        W = torch.matmul(Q, torch.matmul(Sigma, Q.transpose(-1, -2))) 
+        return W
+
+class SheafLaplacian(nn.Module):
+    def __init__(self, stalk_dim: int):
+        super().__init__()
+        self.d = stalk_dim
+
+    def forward(self, data):
+        num_nodes = data.x.size(0)
+        device = data.x.device
+        
+        row, col = data.edge_index
+        num_edges = data.edge_index.size(1)
+        
+        w_t_w = torch.matmul(data.maps.transpose(-1, -2), data.maps)
+        off_diag_values = -w_t_w
+        
+        grid_x, grid_y = torch.meshgrid(torch.arange(self.d, device=device), torch.arange(self.d, device=device), indexing='ij')
+        
+        off_diag_rows = (col.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
+        off_diag_cols = (row.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
+        off_diag_indices = torch.stack([off_diag_rows, off_diag_cols], dim=0)
+        off_diag_flat_values = off_diag_values.flatten()
+
+        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
+        diag_values.index_add_(0, row, w_t_w)
+        
+        node_indices = torch.arange(num_nodes, device=device)
+        diag_rows = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
+        diag_cols = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
+        diag_indices = torch.stack([diag_rows, diag_cols], dim=0)
+        diag_flat_values = diag_values.flatten()
+
+        all_indices = torch.cat([off_diag_indices, diag_indices], dim=1)
+        all_values = torch.cat([off_diag_flat_values, diag_flat_values], dim=0)
+        matrix_dim = num_nodes * self.d
+        L_F_sparse = torch.sparse_coo_tensor(all_indices, all_values, (matrix_dim, matrix_dim)).coalesce()
+        x_global = data.x.view(matrix_dim, 1)
+        laplacian_product = torch.sparse.mm(L_F_sparse, x_global)
+        out = x_global - laplacian_product
+        return out.view(num_nodes, self.d)
 
 class SheafLearner(torch.nn.Module):
-    """Learns a sheaf from local features and stalk dimensions."""
-    def __init__(self, in_channels: int, out_shape: Tuple[int, int]):
+    def __init__(self, stalk_dim:int, low_rank_dim:int):
         super().__init__()
-        self.out_shape = out_shape
-        # The output needs to form two d x d matrices per edge (source and target)
-        self.linear1 = torch.nn.Linear(in_channels, 2 * out_shape[0] * out_shape[1])
-        self.act = torch.tanh 
+        self.stalk_dim = stalk_dim
+        self.low_rank_dim = low_rank_dim if low_rank_dim < stalk_dim else stalk_dim
+        self.lin1 = torch.nn.Linear(2*self.stalk_dim, self.stalk_dim) # TODO is this too much?
+        self.map_learner = torch.nn.Linear(self.stalk_dim, 2 * (self.stalk_dim * self.low_rank_dim))
+        self.act = F.relu
 
-    def forward(self, X, edge_index):
-        # X: shape = (num_total_nodes, num_features)
-        # edge_index: shape = (2, num_edges)
+    def forward(self, x, edge_index):
         row, col = edge_index
 
-        x_row = X[row]
-        x_col = X[col]
+        x_row = x[row]
+        x_col = x[col]
 
-        # Concatenate local features and pass through linear layer + activation
-        maps = self.linear1(torch.cat([x_row, x_col], dim=-1))
-        maps = self.act(maps)
+        maps_flat = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1))))
         
-        # Reshape to (num_edges, 2, d, d)
-        maps = maps.view(-1, 2, self.out_shape[0], self.out_shape[1])
+        map_pairs = maps.view(-1, 2, 2, self.stalk_dim, self.low_rank_dim) # dim 2 is the pair of two
+        maps_left = map_pairs[:,:,0,:,:]
+        maps_right = map_pairs[:,:,1,:,:]
+        maps = torch.bmm(maps_left, torch.transpose(maps_right,2,3))
 
         return maps
 

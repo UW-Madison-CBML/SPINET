@@ -5,6 +5,11 @@ import threading
 import os
 from zipfile import ZipFile
 import mdtraj
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from tqdm import tqdm
+
+
 def process_traj(traj): #, features):
     top = traj.topology
     residues = list(top.residues)
@@ -84,24 +89,41 @@ def download_and_process_file(url, pdb_id):
     
 
 
+
+
+
 def main():
-    threads = {}
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api" 
     atlas_df = pd.read_csv(os.path.abspath("atlas.csv"))
     # for whatever reason the format for the api is slightly different
-    atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
+    atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1]).iloc[:100]
     md_urls = [(base_url + f"/ATLAS/analysis/{pdb}", pdb) for pdb in atlas_df["pdb"].to_list()]
-    dfs = []
-    for url, pdb in md_urls:
-        print(url)
-        threads[url] = threading.Thread(target=download_and_process_file, args=(url,pdb))
-    for i in threads.keys():
-        threads[i].start()
-    dfs = []
-    for i in threads.keys():
-        dfs.append(threads[i].join())
+
+    out_dfs = []
+
+    max_workers = 16
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+        futures = {
+            executor.submit(download_and_process_file, url, pdb): pdb for url,pdb in md_urls
+        }
+
+        kwargs = {
+            "total": len(futures),
+            "desc": "Processing jobs",
+            "unit": "job",
+        }
+        for future in tqdm(as_completed(futures), **kwargs):
+            try:
+                out_df = future.result()
+                out_dfs.append(out_df)
+            except Exception as e:
+                print(f"Job generated an exception: {e}")
+
     out_df = pd.concat(dfs, axis=0, ignore_index=True)     
     out_df.to_csv(os.path.join("md_data","atlas_index.csv"))
+
+
 
 if __name__ == "__main__":
     main()
