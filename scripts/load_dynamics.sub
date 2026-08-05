@@ -19,7 +19,7 @@ transfer_output_files = md_data.tar.gz
 transfer_output_remaps = "md_data.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz"
 
 request_cpus = 16
-request_memory = 32GB
+request_memory = 64GB
 request_disk = 256GB
 
 queue 1

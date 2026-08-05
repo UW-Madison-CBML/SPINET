@@ -7,7 +7,7 @@ from Bio.Data import IUPACData
 class MotionClassifierDataset(Dataset):
     # ground truth order of amino acid indices. they must be capitalized
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()] + ["PYL", "SEC"] # add pyrrolysine and selenocysteine
-    FEATURE_COLS = ["x","y","z", "dx", "dy", "dz"]
+    FEATURE_COLS = ["x","y","z", "dx", "dy", "dz", "bond_ang", "bond_len"]
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     def __init__(self, df):
         self.df = df
