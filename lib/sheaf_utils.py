@@ -2,84 +2,29 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from scipy.spatial import distance_matrix
+from torch_geometric.nn import radius_graph
+from torch_geometric.data import Data
 
-def build_graph(conformations1, conformations2, lengths, epsilon, adjacency_matrix=True):
-    """
-    Creates edges between nodes (atoms/residues) epsilon distance from one another.
-    Processes two conformations at once so they are transformed in same way for valid comparison.
-    Outputs either an adjacency matrix or a dense batched edge list.
-
-    Args:
-        conformations1: Batched 3-D tensor of residue positions for conf 1 (B, T, 3).
-        conformations2: Batched 3-D tensor of residue positions for conf 2 (B, T, 3).
-        lengths: Number of valid residues per batch (B,).
-        epsilon: Max distance for edge between residues.
-        adjacency_matrix: If True, returns bool matrix. If False, returns batched edge lists.
-    Return:
-        If adjacency_matrix=True:
-            adjacency: (B, 2, T, T) boolean tensor
-        If adjacency_matrix=False:
-            out_list: (B, 2, E_max, 2) tensor of edges, padded with (0,0)
-            out_lengths: (B, 2) tensor of valid edge counts
-    """
-    B, T, _ = conformations1.shape
-    
-    # padding needs to be on CUDA
-    padding = (torch.arange(T, device=conformations1.device)[None, :] < lengths[:, None])
-
-    dist_mat1 = torch.cdist(conformations1, conformations1, p=2) # B, T, T
-    dist_mat2 = torch.cdist(conformations2, conformations2, p=2) # B, T, T
-    dist_mat = torch.stack([dist_mat1, dist_mat2], dim=1)        # B, 2, T, T
-
-    matrix_padding = padding[:, None, None, :] & padding[:, None, :, None] # B, 1, T, T
-    
-    adjacency = (dist_mat < epsilon) & matrix_padding
-
-    if adjacency_matrix:
-        # Remove self edges (diagonal) for the adjacency matrix
-        return adjacency & (~torch.eye(T, dtype=torch.bool, device=adjacency.device)[None, None, :, :])
-
-    # For edge list:
-    # Remove self-loops (diagonal=1) and symmetric duplicates by keeping only upper triangle
-    triu_mask = torch.triu(torch.ones((T, T), dtype=torch.bool, device=adjacency.device), diagonal=1)
-    adjacency = adjacency & triu_mask[None, None, :, :]
-
-    # Flatten spatial dimensions to process edge extraction
-    adj_flat = adjacency.view(B, 2, T * T)
-
-    # Find the maximum number of valid edges across the entire batch
-    E = adj_flat.sum(dim=2).max().item()
-    
-    # Handle edge case where no nodes are within epsilon
-    if E == 0:
-        return torch.zeros((B, 2, 0, 2), dtype=torch.long, device=adjacency.device), \
-               torch.zeros((B, 2), dtype=torch.long, device=adjacency.device)
-
-    # Sort pushes True (1) values to the front. 
-    # This neatly organizes all valid edges to the start of the list.
-    _, indices = torch.sort(adj_flat.int(), dim=2, descending=True)
-    indices = indices[:, :, :E] # [B, 2, E]
-
-    # Convert 1D flat indices back to 2D (row, col) coordinates
-    rows = torch.div(indices, T, rounding_mode='floor')
-    cols = indices % T
-    
-    # Stack into [B, 2, E, 2]
-    edges = torch.stack([rows, cols], dim=-1)
-
-    # We need to mask out the dummy edges that got pulled in by the fixed `E` dimension.
-    # Check if the pulled indices were actually True in the original adjacency matrix.
-    valid_edge_mask = torch.gather(adj_flat, dim=2, index=indices).unsqueeze(-1) # [B, 2, E, 1]
-
-    # PyG will CRASH if given a negative index like -1. 
-    # By multiplying by the boolean mask, padded invalid edges safely default to (0, 0).
-    out_list = edges * valid_edge_mask
-
-    # Get the actual number of valid edges per graph
-    out_lengths = valid_edge_mask.sum(dim=2).squeeze(-1) # [B, 2]
-
-    return out_list, out_lengths 
+def build_graph(coords, feats, labels, mask, epsilon=5.0, add_temporal_edges=True):
      
+    pos = torch.as_tensor(coords, dtype=torch.float32)
+    x = torch.as_tensor(feats, dtype=torch.float32)
+    y = torch.as_tensor(labels, dtype=torch.long)
+    node_mask = torch.as_tensor(mask, dtype=torch.bool)
+ 
+    edge_index = radius_graph(pos, r=epsilon, max_num_neighbors=32, loop=False)
+    edge_attr = (pos[edge_index[0]] - pos[edge_index[1]]).norm(dim=-1, keepdim=True)
+ 
+    if add_temporal_edges and pos.size(0) > 1:
+        idx = torch.arange(pos.size(0) - 1)
+        temporal = torch.stack([
+            torch.cat([idx, idx + 1]),
+            torch.cat([idx + 1, idx]),
+        ])
+        temporal_attr = (pos[temporal[0]] - pos[temporal[1]]).norm(dim=-1, keepdim=True)
+        edge_index = torch.cat([edge_index, temporal], dim=1)
+ 
+    return Data(x=x, pos=pos, y=y, node_mask=node_mask, edge_index=edge_index)
     
     
 
