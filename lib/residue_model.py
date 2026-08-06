@@ -139,6 +139,7 @@ class SheafResidualGAT(torch.nn.Module):
         return self.blocks(data)
 # ----------------------------------------------------------------------------------------------
 # this  initial dynamics embedding will be the main thing we change when editing the input data
+# it will be harder to hard code some of this stuff
 class InitDynamicsEmbedding(MessagePassing):  
     def __init__(self, output_dim, input_dim = 5, velocity_range = (0,3)):
         super().__init__(aggr='mean') 
@@ -159,10 +160,10 @@ class InitDynamicsEmbedding(MessagePassing):
 
     def message(self, x_i, x_j, pos_i, pos_j):
         relative_pos = pos_j - pos_i
-        non_vel_features_x_i = x_i[velocity_range[1]:] # non velocity features like bond_ang, bond_len
-        non_vel_features_x_j = x_j[velocity_range[1]:]
-        d_pos_i = x_i[velocity_range[0]:velocity_range[1]] # these are velocity
-        d_pos_j = x_j[velocity_range[0]:velocity_range[1]] # 
+        non_vel_features_x_i = x_i[self.velocity_range[1]:] # non velocity features like bond_ang, bond_len
+        non_vel_features_x_j = x_j[self.velocity_range[1]:]
+        d_pos_i = x_i[self.velocity_range[0]:self.velocity_range[1]] # these are velocity
+        d_pos_j = x_j[self.velocity_range[0]:self.velocity_range[1]] # 
 
         prev_pos_i = pos_i - d_pos_i
         prev_pos_j = pos_j - d_pos_j
@@ -200,6 +201,7 @@ class NodeSheafGATClassifier(torch.nn.Module):
             input_dim = 5,
             velocity_range = (0,3), # exclusive, other features will be already egocentric
         )
+
         self.label_embedding = torch.nn.Embedding(self.num_classes, self.hidden_dim) 
 
         self.sheaf_residual_gat = SheafResidualGAT(self.num_blocks, self.num_heads, self.hidden_dim, dropout=self.gat_dropout, ablate_sheaves=self.ablate_sheaves) 

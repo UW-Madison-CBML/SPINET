@@ -41,7 +41,8 @@ def train_motion_classifier():
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
     
     # load in data and create 3-way split
-    df = pd.read_csv(os.path.abspath("atlas_index.csv"))
+    # the data is split into different csvs
+    df = pd.concat([pd.read_csv(os.path.join(md_data, f"atlas_index_{i}.csv")) for i in range(4)], axis=0, ignore_index=True)
     pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
     
@@ -126,7 +127,7 @@ def train_motion_classifier():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
          
         for batch in pbar:
-            batch = barch.to(DEVICE)
+            batch = batch.to(DEVICE)
 
             optimizer.zero_grad()
 
