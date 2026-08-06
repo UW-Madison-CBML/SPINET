@@ -9,15 +9,15 @@ from torch_geometric.nn import MessagePassing
 
 #import diffusion_laplace as lap
 
-class SheafLearnerLowRankNormal(nn.Module):
+class SheafLearnerLowRankNormal(torch.nn.Module):
     def __init__(self, in_channels: int, stalk_dim: int, rank: int):
         super().__init__()
         assert rank <= stalk_dim, "Rank 'r' cannot be greater than stalk dimension 'd'."
         self.d = stalk_dim
         self.r = rank
         
-        self.q_generator = nn.Linear(in_channels * 2, self.d * self.r)
-        self.scale_generator = nn.Linear(in_channels * 2, self.r)
+        self.q_generator = torch.nn.Linear(in_channels * 2, self.d * self.r)
+        self.scale_generator = torch.nn.Linear(in_channels * 2, self.r)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
         row, col = edge_index
@@ -31,7 +31,7 @@ class SheafLearnerLowRankNormal(nn.Module):
         W = torch.matmul(Q, torch.matmul(Sigma, Q.transpose(-1, -2))) 
         return W
 
-class SheafLaplacian(nn.Module):
+class SheafLaplacian(torch.nn.Module):
     def __init__(self, stalk_dim: int):
         super().__init__()
         self.d = stalk_dim
@@ -107,7 +107,7 @@ class SheafResidualGATBlock(torch.nn.Module):
     def forward(self, data):
         # in case of custom residual definition: skip = data.x
         if(not self.ablate_sheaves):
-            data.maps = sheaf_learner(data.x, data.edge_index)
+            data.maps = self.sheaf_learner(data.x, data.edge_index)
 
         data.x = self.gat_block(data.x, data.edge_index)
 
@@ -130,7 +130,7 @@ class SheafResidualGAT(torch.nn.Module):
         self.ablate_sheaves = ablate_sheaves 
 
         self.blocks = torch.nn.Sequential(
-                [SheafResidualGATBlock(self.num_heads, 
+                *[SheafResidualGATBlock(self.num_heads, 
                                        self.hidden_dim, 
                                        dropout=self.dropout, 
                                        ablate_sheaves=self.ablate_sheaves)] * self.num_blocks)
@@ -147,13 +147,13 @@ class InitDynamicsEmbedding(MessagePassing):
         self.input_dim = input_dim
         self.velocity_range = velocity_range
         
-        self.mlp = Sequential(
-            Linear(15, 16), # TODO don't hard code this, tho it is super specific to the data
-            ReLU(),
-            Linear(16, output_dim)
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(15, 16), # TODO don't hard code this, tho it is super specific to the data
+            torch.nn.ReLU(),
+            torch.nn.Linear(16, output_dim)
         )
         
-        self.update_linear = Linear(input_dim + output_dim, output_dim)
+        self.update_linear = torch.nn.Linear(input_dim + output_dim, output_dim)
 
     def forward(self, x, pos, edge_index):
         return self.propagate(edge_index, x=x, pos=pos)
@@ -190,7 +190,7 @@ class NodeSheafGATClassifier(torch.nn.Module):
         self.hidden_dim = hidden_dim
         self.num_blocks=num_blocks
         self.num_heads=num_heads
-        self.dropout = dropout
+        self.gat_dropout = gat_dropout
         self.num_classes = num_classes
         self.ablate_sheaves = ablate_sheaves
         self.gat_dropout = gat_dropout

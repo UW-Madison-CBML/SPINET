@@ -201,7 +201,7 @@ def load_motion_structures(pdb1, pdb2, uniprot_seq:str, pdb_dir):
         
     return conformation1, conformation2, intersection_residues
 
-def load_motion_structures_no_uniprot(pdb1, pdb2):
+def load_motion_structures_no_uniprot(pdb1, pdb2, pdb_dir):
     atoms1, res_names1 = load_pdb(pdb1, pdb_dir)
     atoms2, res_names2 = load_pdb(pdb2, pdb_dir)
 
@@ -222,7 +222,7 @@ def load_motion_structures_no_uniprot(pdb1, pdb2):
     alignment = aligner.align(seq1_str, seq2_str)[0]  
     blocks1, blocks2 = alignment.aligned[:2]
     # we need to also save the ground truth order of original residues for downstream labeling
-    gt_res_indicies1 
+    #gt_res_indicies1 
     
     for block1, block2 in zip(blocks1, blocks2):
         for idx in range(block1[1] - block1[0]): # block1[1] - block1[0] = block2[1] - block2[0]
@@ -273,8 +273,8 @@ if __name__ == "__main__":
     '4rzu',
     '4rzu']
 
-    for i in pdb_list:
-        uniprot_id = pdb_chain_to_uniprot_id(i)
-        uniprot_seq = get_uniprot_sequence(uniprot_id)
-        print(load_motion_structures(i, i, uniprot_seq))
+    #for i in pdb_list:
+    #    uniprot_id = pdb_chain_to_uniprot_id(i)
+    #    uniprot_seq = get_uniprot_sequence(uniprot_id)
+    #    print(load_motion_structures(i, i, uniprot_seq))
     

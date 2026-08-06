@@ -25,7 +25,7 @@ def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     return confusion_mat
 
 
-def train_motion_classifier():
+def train_residue_classifier():
     # hyperparameters
     epsilon = 5.0 # in Angstroms
     learning_rate = 1e-4
@@ -42,7 +42,7 @@ def train_motion_classifier():
     
     # load in data and create 3-way split
     # the data is split into different csvs
-    df = pd.concat([pd.read_csv(os.path.join(md_data, f"atlas_index_{i}.csv")) for i in range(4)], axis=0, ignore_index=True)
+    df = pd.concat([pd.read_csv(os.path.join("md_data", f"atlas_index_{i}.csv")) for i in range(4)], axis=0, ignore_index=True)
     pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
     
@@ -71,8 +71,6 @@ def train_motion_classifier():
             "test_ratio": test_ratio,
             "batch_size": batch_size,
             "hidden_dim": hidden_dim,
-            "steps": steps,
-            "step_size": step_size,
             "task":"predicting residues from motions"
         },
     )
@@ -139,7 +137,7 @@ def train_motion_classifier():
             run.log({"train_loss": loss.item(), "epoch": epoch})
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_{model.parameters(), max_norm=1.0}
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
         # Validation Check
@@ -196,7 +194,7 @@ def train_motion_classifier():
     f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
 
     prf_dict = {}
-    for k, residue in enumerate(MotionClassifierDataset.AMINO_ACIDS):
+    for k, residue in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
         prf_dict[f"test_{residue}_precision"] = precision[k].item()
         prf_dict[f"test_{residue}_recall"] = recall[k].item()
         prf_dict[f"test_{residue}_f1"] = f1[k].item()
@@ -207,7 +205,7 @@ def train_motion_classifier():
     fig, ax = plt.subplots(figsize=(12, 12))
     disp = ConfusionMatrixDisplay(
         confusion_matrix=confusion_mat_cpu.numpy().astype(int), 
-        display_labels=MotionClassifierDataset.AMINO_ACIDS
+        display_labels=ResidueClassifierDataset.AMINO_ACIDS
     )
     disp.plot(cmap='Blues', ax=ax, values_format='d')
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right') 
@@ -221,4 +219,4 @@ def train_motion_classifier():
     run.finish()
 
 if __name__ == "__main__":
-    train_motion_classifier()
+    train_residue_classifier()
