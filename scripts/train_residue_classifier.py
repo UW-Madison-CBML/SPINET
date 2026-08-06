@@ -1,28 +1,23 @@
-from residue_classifier_dataset import ResidueClassifierDataset
-from motion_model import MotionClassifier
-from sheaf_utils import build_graph
+import os
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
 from tqdm import tqdm
 
-import os
-import math
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Data
+
+from residue_classifier_dataset import ResidueClassifierDataset
+from residue_model import NodeSheafGATClassifier
+from sheaf_utils import build_graph
 
 
-def get_batch_confusion_matrix(gt_indices, pred_indices, num_classes):
-    # gt_indices: shape = (B), 0 <= min(), max() < num_classes
-    # pred_indices: shape = (B), 0 <= min(), max() < num_classes
-    # returns: confusion_mat. shape = num_classes, num_classes
-
-    # Convert pred indices and gt indices into one-hot encoded vectors
-    # einsum "bi, bj->ij" does batched matrix multiplication. 
-    # i (rows) represents Ground Truth, j (cols) represents Predictions.
+def get_confusion_matrix(gt_indices, pred_indices, num_classes):
+    """Compute confusion matrix over 1D array of pred and target."""
     gt_one_hot = F.one_hot(gt_indices, num_classes=num_classes).float()
     pred_one_hot = F.one_hot(pred_indices, num_classes=num_classes).float()
 
@@ -39,8 +34,8 @@ def train_motion_classifier():
     test_ratio = 0.15
     batch_size = 32 
     hidden_dim = 64
-    steps = 5 # num diffusion steps
-    step_size = 0.1 # diffusion step size
+    num_blocks = 4
+    num_heads = 4
 
     # set up device 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
@@ -57,16 +52,16 @@ def train_motion_classifier():
     test_pdbs = pdb_ids[val_cutoff:test_cutoff]
     train_pdbs = pdb_ids[test_cutoff:]
     
-    train_df = df[df["motion_id"].isin(train_pdbs)]
-    val_df = df[df["motion_id"].isin(val_pdbs)]
-    test_df = df[df["motion_id"].isin(test_pdbs)]
+    train_df = df[df["traj_id"].isin(train_pdbs)]
+    val_df = df[df["traj_id"].isin(val_pdbs)]
+    test_df = df[df["traj_id"].isin(test_pdbs)]
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
         project="SheafProtein",
-        name="sheaf_diffusion_training",
+        name="residue_classifier_training",
         config={
             "epsilon": epsilon,
             "lr": learning_rate,
@@ -86,8 +81,8 @@ def train_motion_classifier():
     artifact.add_file(os.path.abspath(__file__))
     
     dependencies = [ # TODO fix
-        "motion_model.py", 
-        "motion_classifier_dataset.py", 
+        "residue_model.py", 
+        "residue_classifier_dataset.py", 
         "sheaf_utils.py"
     ]
     for file in dependencies:
@@ -97,9 +92,9 @@ def train_motion_classifier():
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df)
-    val_dataset = ResidueClassifierDataset(val_df)
-    test_dataset = ResidueClassifierDataset(test_df)
+    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon)
+    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon)
+    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
@@ -109,90 +104,57 @@ def train_motion_classifier():
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
     
     # set up new diffusion model # TODO fix all this
+    # do we need this dummy data initialization?
     # ---------------------------------------------
-    F_dim = len(MotionClassifierDataset.AMINO_ACIDS) + 3
-    dummy_X = torch.zeros((1, 2, 10, F_dim), device=DEVICE)
-    dummy_edges = torch.zeros((1, 2, 2, 2), dtype=torch.long, device=DEVICE)
 
-    model = MotionClassifier(
-        X=dummy_X, 
-        edge_index=dummy_edges, 
+    model = NodeSheafGATClassifier(
         num_classes=num_classes, 
         hidden_dim=hidden_dim,
-        step_size = step_size,
-        steps = steps
-    ).to(torch.float32)
+        num_blocks=num_blocks,
+        num_heads=num_heads,
+        ablate_sheaves=False
+    ).to(DEVICE)
 
     # -----------------------------------------
-    model = model.to(DEVICE)
     
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     crit = torch.nn.CrossEntropyLoss() # TODO replace this with a properly masked loss, if it exists
 
     # training loop
     for epoch in range(epochs):
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         model.train()
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
          
-        for features, residues, masks in pbar:
-            features = features.to(DEVICE)
-            residues = residues.to(DEVICE) 
-            masks = masks.to(DEVICE) 
-            conformations 
-            edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
-            edge_index = edges.permute(0, 1, 3, 2).long()
-            
-            residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS)) 
+        for batch in pbar:
+            batch = barch.to(DEVICE)
 
-            center1 = conformations1.mean(dim=1, keepdim=True) 
-            center2 = conformations2.mean(dim=1, keepdim=True) 
-
-            conformations1 = (conformations1 - center1) / 10.0 
-            conformations2 = (conformations2 - center2) / 10.0 
-
-            node_features1 = torch.cat([conformations1, residues_one_hot], dim=2)  
-            node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
-            
-            node_features = torch.stack([node_features1, node_features2], dim=1).to(torch.float32)
-            
             optimizer.zero_grad()
-            logits = model(node_features, edge_index) 
 
-            loss = crit(logits, motion_classes)
-            run.log({"train_loss": loss.detach().cpu().item(), "epoch": epoch})
-            
-            loss.backward() 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            out_batch = model(batch)
+
+            pred_mask = ~batch.node_mask.bool()
+
+            loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
+            run.log({"train_loss": loss.item(), "epoch": epoch})
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_{model.parameters(), max_norm=1.0}
             optimizer.step()
 
         # Validation Check
         model.eval()
         val_losses = []
+
         with torch.no_grad():
-            for conformations1, conformations2, residues, motion_classes, lengths in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
-                conformations1 = conformations1.to(DEVICE) 
-                conformations2 = conformations2.to(DEVICE) 
-                residues = residues.to(DEVICE) 
-                motion_classes = motion_classes.to(DEVICE) 
-                lengths = lengths.to(DEVICE)
-                
-                edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
-                edge_index = edges.permute(0, 1, 3, 2).long()
-                
-                residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS))
-                center1 = conformations1.mean(dim=1, keepdim=True) 
-                center2 = conformations2.mean(dim=1, keepdim=True) 
-                conformations1 = (conformations1 - center1) / 10.0 
-                conformations2 = (conformations2 - center2) / 10.0 
+            for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+                batch = batch.to(DEVICE)
+                out_batch = model(batch)
 
-                node_features1 = torch.cat([conformations1, residues_one_hot], dim=2)
-                node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
-                
-                node_features = torch.stack([node_features1, node_features2], dim=1).to(torch.float32)
+                pred_mask = ~batch.node_mask.bool()
+                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
 
-                logits = model(node_features, edge_index)
-                loss = crit(logits, motion_classes)
-                val_losses.append(loss.cpu().item())
-                
+                val_losses.append(loss.item())
+               
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         run.log({"epoch_val_loss": avg_val_loss, "epoch": epoch})
 
@@ -205,35 +167,20 @@ def train_motion_classifier():
     test_losses = []
     
     with torch.no_grad():
-        for conformations1, conformations2, residues, motion_classes, lengths in tqdm(test_loader, desc="Testing"):
-            conformations1 = conformations1.to(DEVICE) 
-            conformations2 = conformations2.to(DEVICE) 
-            residues = residues.to(DEVICE) 
-            motion_classes = motion_classes.to(DEVICE) 
-            lengths = lengths.to(DEVICE)
+        for batch in tqdm(test_loader, desc="Testing"):
+            batch = batch.to(DEVICE) 
+            out_batch = model(batch)
             
-            edges, _ = build_graph(conformations1, conformations2, lengths, torch.tensor(epsilon, device=DEVICE), adjacency_matrix=False) 
-            edge_index = edges.permute(0, 1, 3, 2).long()
-            
-            residues_one_hot = F.one_hot(residues, num_classes=len(MotionClassifierDataset.AMINO_ACIDS))
-            center1 = conformations1.mean(dim=1, keepdim=True) 
-            center2 = conformations2.mean(dim=1, keepdim=True) 
-            conformations1 = (conformations1 - center1) / 10.0 
-            conformations2 = (conformations2 - center2) / 10.0 
+            pred_mask = ~batch.node_mask.bool()
 
-            node_features1 = torch.cat([conformations1, residues_one_hot], dim=2) 
-            node_features2 = torch.cat([conformations2, residues_one_hot], dim=2) 
-            
-            node_features = torch.stack([node_features1, node_features2], dim=1).to(torch.float32)
+            test_logits = out_batch.x[pred_mask]
+            test_targets = out_batch.y[pred_mask]
 
-            logits = model(node_features, edge_index)
+            test_loss = crit(test_logits, test_targets)
+            test_losses.append(test_loss.item())
 
-            # track test loss
-            test_loss = crit(logits, motion_classes)
-            test_losses.append(test_loss.cpu().item())
-            
-            preds = logits.argmax(dim=-1)
-            batch_conf_mat = get_batch_confusion_matrix(motion_classes, preds, num_classes)
+            preds = test_logits.argmax(dim=-1)
+            batch_conf_mat = get_confusion_matrix(test_targets, preds, num_classes)
             global_confusion_mat += batch_conf_mat
 
     avg_test_loss = sum(test_losses) / len(test_losses) if test_losses else 0
@@ -248,16 +195,18 @@ def train_motion_classifier():
     f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
 
     prf_dict = {}
-    for k, motion_class in enumerate(MotionClassifierDataset.MOTION_CLASSES):
-        prf_dict[f"test_{motion_class}_precision"] = precision[k].item()
-        prf_dict[f"test_{motion_class}_recall"] = recall[k].item()
-        prf_dict[f"test_{motion_class}_f1"] = f1[k].item()
+    for k, residue in enumerate(MotionClassifierDataset.AMINO_ACIDS):
+        prf_dict[f"test_{residue}_precision"] = precision[k].item()
+        prf_dict[f"test_{residue}_recall"] = recall[k].item()
+        prf_dict[f"test_{residue}_f1"] = f1[k].item()
 
     # generate and log test confusion matrix
-    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # Hopefully plot will be big enough for 22 classes
+    fig, ax = plt.subplots(figsize=(12, 12))
     disp = ConfusionMatrixDisplay(
         confusion_matrix=confusion_mat_cpu.numpy().astype(int), 
-        display_labels=MotionClassifierDataset.MOTION_CLASSES
+        display_labels=MotionClassifierDataset.AMINO_ACIDS
     )
     disp.plot(cmap='Blues', ax=ax, values_format='d')
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right') 

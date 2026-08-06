@@ -4,6 +4,7 @@ from torch.utils.data import Dataset
 import pandas as pd
 from Bio.Data import IUPACData
 from torch_geometric.data import Data, Batch
+from sheaf_utils import build_graph
 
 class ResidueClassifierDataset(Dataset):
     # ground truth order of amino acid indices. they must be capitalized
@@ -27,6 +28,6 @@ class ResidueClassifierDataset(Dataset):
  
     @staticmethod
     def graph_collate(batch):
-        return Batch.from_data_list(data_list)
+        return Batch.from_data_list(batch)
 
         
