@@ -2,8 +2,6 @@
 ls -R
 python -m ruff check . --select F821,E9 || exit 1
 
-# for pigz
-apt-get update && apt-get install -y pigz
 tar -I "pigz -p 256" -xvf md_data.tar.gz
 
 rm md_data.tar.gz

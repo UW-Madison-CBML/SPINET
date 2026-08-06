@@ -126,7 +126,8 @@ def train_residue_classifier():
          
         for batch in pbar:
             batch = batch.to(DEVICE)
-
+            
+            batch = batch.sort() # for ConvGAT aggregation
             optimizer.zero_grad()
 
             out_batch = model(batch)
@@ -147,6 +148,7 @@ def train_residue_classifier():
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
                 batch = batch.to(DEVICE)
+                batch = batch.sort() # for ConvGAT aggregation
                 out_batch = model(batch)
 
                 pred_mask = ~batch.node_mask.bool()
@@ -168,6 +170,9 @@ def train_residue_classifier():
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Testing"):
             batch = batch.to(DEVICE) 
+
+            batch = batch.sort() # for ConvGAT aggregation
+
             out_batch = model(batch)
             
             pred_mask = ~batch.node_mask.bool()
