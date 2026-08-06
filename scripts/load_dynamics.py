@@ -11,6 +11,8 @@ import pandas as pd
 from zipfile import ZipFile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
+FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
+
 
 def process_traj(traj):
     top = traj.topology
@@ -56,11 +58,12 @@ def process_traj(traj):
     timesteps = np.broadcast_to(np.arange(n_frames - 1)[:, None], (n_frames - 1, n_res)).flatten()
     res_targets = np.broadcast_to(res_indices[None, :], (n_frames - 1, n_res)).flatten()
     
-    df = pd.DataFrame(features, columns=["x","y","z","dx","dy","dz","bond_len", "bond_ang"])
-    df.insert(0, "timestep", timesteps)
-    df["residue"] = res_targets
     
-    return df
+    df = pd.DataFrame({"residue":res_targets})
+    df.insert(0, "timestep", timesteps)
+    
+    
+    return df, features 
 
 def download_and_process_file(url, pdb_id):
     base_md_dir = "md_data"
@@ -82,33 +85,35 @@ def download_and_process_file(url, pdb_id):
         with ZipFile(zip_file, 'r') as zObject:
             zObject.extractall(path=extract_folder)
             
-        traj_ids = [f"{pdb_id}_R{i}" for i in range(1, 4)]
-        dfs = []
+        traj_ids = [f"{pdb_id}_R{i}" for i in range(1, 2)]# just look at first one, can load whole dataset this way
+        data = []
         
+        pdb_path = os.path.join(extract_folder, f"{pdb_id}.pdb")
         for eye_d in traj_ids:
             xtc_path = os.path.join(extract_folder, f"{eye_d}.xtc")
-            pdb_path = os.path.join(extract_folder, f"{pdb_id}.pdb")
             
             if not os.path.exists(xtc_path) or not os.path.exists(pdb_path):
                 continue
                 
             traj = mdtraj.load_xtc(xtc_path, top=pdb_path)
-            df = process_traj(traj)
+            df, features = process_traj(traj)
             df["traj_id"] = eye_d
-            dfs.append(df)
+            data.append((df, features))
             
-        if not dfs:
+        if not data:
             return pd.DataFrame()
-            
+        dfs, features = zip(*data) 
         trajectories_df = pd.concat(dfs, axis=0, ignore_index=True)
         trajectories_df["pdb_id"] = pdb_id
+        features_np = np.concatenate(features, axis=0)
         
         # Return the DataFrame directly to main memory
-        return trajectories_df
+        return trajectories_df, features_np
         
     except Exception as e:
         print(f"Failed to process {pdb_id}: {str(e)}")
-        return pd.DataFrame()
+        return pd.DataFrame(), np.empty((0, len(FEATURE_COLUMNS)))
+
         
     finally:
         if os.path.exists(worker_temp_dir):
@@ -119,7 +124,7 @@ def main(atlas_df, out_csv_name):
        
     md_urls = [(base_url + f"/ATLAS/analysis/{pdb}", pdb) for pdb in atlas_df["pdb"].to_list()]
     
-    out_dfs = []
+    out_data = []
     max_workers = os.cpu_count()
     
     print(f"Starting pipeline using {max_workers} parallel workers...")
@@ -129,16 +134,20 @@ def main(atlas_df, out_csv_name):
         kwargs = {"total": len(futures), "desc": "Processing PDB jobs", "unit": "job"}
         for future in tqdm(as_completed(futures), **kwargs):
             try:
-                res_df = future.result()
+                res_df, out_np = future.result()
                 if not res_df.empty:
-                    out_dfs.append(res_df)
+                    out_data.append((res_df, out_np))
             except Exception as e:
                 print(f"Worker generated an exception: {e}")
                 
-    if out_dfs:
+    if out_data:
         print("Saving final concatenated dataset...")
+        out_dfs, out_nps = zip(*out_data)
+        
         final_df = pd.concat(out_dfs, axis=0, ignore_index=True)
+        final_np = np.concat(out_nps, axis=0)
         final_df.to_csv(os.path.join("md_data", f"{out_csv_name}.csv"), index=False)
+        np.save( os.path.join("md_data", f"{out_csv_name}.npy"), final_np)
         print("Done!")
     else:
         print("No data processed successfully.")
@@ -146,8 +155,10 @@ def main(atlas_df, out_csv_name):
 if __name__ == "__main__":
     atlas_df = pd.read_csv("atlas.csv")
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
-    atlas_df
     df_len = len(atlas_df)
-    for i in range(16):
-        main(atlas_df.iloc[i * (df_len // 16) : (i+1)*(df_len // 16)], f"atlas_index_{i}")
+
+    main(atlas_df, f"atlas_index")
+
+    #for i in range(16):
+        #main(atlas_df.iloc[i * (df_len // 16) : (i+1)*(df_len // 16)], f"atlas_index_{i}")
 

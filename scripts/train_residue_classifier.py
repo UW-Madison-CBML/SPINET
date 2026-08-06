@@ -37,12 +37,19 @@ def train_residue_classifier():
     num_blocks = 4
     num_heads = 4
 
+    # CAUTION: this is based on the order of features defined in load_dynamics.py and is used to label the columns of the npy features file
+    FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
+
     # set up device 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
     
     # load in data and create 3-way split
     # the data is split into different csvs
-    df = pd.concat([pd.read_csv(os.path.join("md_data", f"atlas_index_{i}.csv")) for i in range(4)], axis=0, ignore_index=True)
+    df = pd.read_csv(os.path.join("md_data","atlas_index.csv"))
+
+    features_np = np.load(os.path.join("md_data","atlas_index.npy"))
+    df = pd.concat([df, pd.DataFrame(features_np, columns=FEATURE_COLUMNS, index=df.index)], axis=1)
+    
     pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
     

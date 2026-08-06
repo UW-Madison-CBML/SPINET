@@ -1,6 +1,6 @@
 # train_residue_classifier.sub
 
-docker_image = jenslundsgaard/sheaf_training:v2.1
+docker_image = cmikulski4/sheaf_training:v2.2
 #docker_image = pytorch/pytorch:2.9.0-cuda12.8-cudnn9-runtime
 #docker_image = pytorch/pytorch:1.1.0-cuda10.0-cudnn7.5-runtime
 universe = docker
@@ -9,6 +9,7 @@ universe = docker
 #  $(Process) will be a integer number for each job, starting with "0"
 #  and increasing for the relevant number of jobs.
 shell = ./train_residue_classifier.sh 
+#$(args)
 #$(ablation)
 
 # Specify the name of the log, standard error, and standard output (or
@@ -23,6 +24,7 @@ Requirements = (Target.HasCHTCStaging == true)
 #require_gpus = (DriverVersion >= 10.1)
 # Transfer our executable script
 transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../api_keys.txt, ../lib/, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+
 gpus_minimum_capability = 7.0
 requirements= Machine=="bhaskargpu4000.chtc.wisc.edu"
 
@@ -37,5 +39,7 @@ request_gpus = 1
 #TODO add ablations
 #queue ablation from ablation.txt
 
-
 queue 1
+#queue args from (
+
+#)
