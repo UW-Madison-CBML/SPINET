@@ -52,7 +52,7 @@ def train_residue_classifier():
 
     df["mask"] = np.random.rand(len(df)) < masking_ratio # mask
 
-    pdb_ids = df["pdb_id"].unique()[:200]
+    pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
 
     val_cutoff = int(val_ratio * num_pdbs)

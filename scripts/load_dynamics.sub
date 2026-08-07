@@ -1,6 +1,6 @@
 # load_dynamics.sub
 
-docker_image = python:3.10-slim
+docker_image = jenslundsgaard/sheaf_learning:v2.7
 
 universe = docker
 
@@ -17,10 +17,11 @@ Requirements = (Target.HasCHTCStaging == true)
 
 transfer_input_files = load_dynamics.py, load_dynamics.sh, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/atlas.csv
 transfer_output_files = md_data.tar.gz
-transfer_output_remaps = "md_data.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz"
+transfer_output_remaps = "md_data.tar.gz = file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz"
+#pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz"
 
 request_cpus = 16
-request_memory = 128GB
-request_disk = 256GB
+request_memory = 64GB
+request_disk = 128GB
 
 queue 1

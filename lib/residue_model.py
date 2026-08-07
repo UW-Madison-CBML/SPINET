@@ -31,6 +31,27 @@ class SheafLearnerLowRankNormal(torch.nn.Module):
         W = torch.matmul(Q, torch.matmul(Sigma, Q.transpose(-1, -2))) 
         return W
 
+class SheafLearnerOrthogonal(torch.nn.Module):
+    def __init__(self, input_dim: int, stalk_dim: int):
+        super().__init__()
+        self.input_dim = input_dim
+        self.stalk_dim = stalk_dim
+        
+        self.lin = torch.nn.Linear(self.input_dim * 2, self.input_dim)
+        self.triu_learner = torch.nn.Linear(self.input_dim, (self.stalk_dim * (self.stalk_dim-1) )// 2)
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
+        row, col = edge_index
+        edge_features = torch.cat([x[row], x[col]], dim=-1)
+        upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
+        maps = torch.zeroes((len(edge_index), self.stalk_dim, self.stalk_dim), device=x.device) 
+        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim, 1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
+        lower_indices = torch.tril_indices(self.stalk_dim, self.stalk_dim, -1, device=x.device)
+        maps[:, upper_indices] = upper_tri
+        maps[:, lower_indices] = -1 * upper_tri
+        maps = torch.linalg.matrix_exp(maps) # this forces it into SO(n) for whatever reason
+        return maps
+
+
 class SheafLaplacian(torch.nn.Module):
     def __init__(self, stalk_dim: int):
         super().__init__()

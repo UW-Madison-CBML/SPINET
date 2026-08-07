@@ -1,7 +1,3 @@
-
-
-
-
 import shutil
 import os
 import requests
@@ -49,8 +45,8 @@ def process_traj(traj):
     time_differences = np.diff(centroids, axis=0)
     
     features = np.concatenate([
-        time_differences, 
         centroids[1:], 
+        time_differences, 
         bond_len[1:, :, None], 
         bond_ang[1:, :, None]
     ], axis=2).reshape(-1, 8)
@@ -58,11 +54,14 @@ def process_traj(traj):
     timesteps = np.broadcast_to(np.arange(n_frames - 1)[:, None], (n_frames - 1, n_res)).flatten()
     res_targets = np.broadcast_to(np.array(top.residues)[None, :], (n_frames - 1, n_res)).flatten()
     
-    
     df = pd.DataFrame({"residue":res_targets})
     df.insert(0, "timestep", timesteps)
     
-    
+    # limit the number of timesteps:
+    timestep_mask = df["timestep"] < 200 
+    df = df[timestep_mask]
+    features = features[timestep_mask]
+
     return df, features 
 
 def download_and_process_file(url, pdb_id):
