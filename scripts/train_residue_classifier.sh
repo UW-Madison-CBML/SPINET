@@ -11,7 +11,7 @@ export HF_TOKEN=$HF_KEY
 WANDB_KEY=$(tail -n 1 api_keys.txt)
 export WANDB_KEY=$WANDB_KEY
 
-python train_motion_classifier.py
+python train_residue_classifier.py
 
 rm *.ent
 rm -rf md_data/

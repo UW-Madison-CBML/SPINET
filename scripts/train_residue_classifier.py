@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
 from tqdm import tqdm
 
-from torch_geometric.loader import DataLoader
+from torch.utils.data import DataLoader
 from torch_geometric.data import Data
 
 from residue_classifier_dataset import ResidueClassifierDataset
