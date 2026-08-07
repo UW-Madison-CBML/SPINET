@@ -23,7 +23,9 @@ when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 #require_gpus = (DriverVersion >= 10.1)
 # Transfer our executable script
-transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../api_keys.txt, ../lib/, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../api_keys.txt, ../lib/, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz 
+#pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+
 
 gpus_minimum_capability = 7.0
 requirements= Machine=="bhaskargpu4000.chtc.wisc.edu"
@@ -32,7 +34,7 @@ requirements= Machine=="bhaskargpu4000.chtc.wisc.edu"
 # Requirements (e.g., operating system) your job needs, what amount of
 # compute resources each job will need on the computer where it runs.
 request_cpus = 16
-request_memory = 64GB
+request_memory = 128GB
 request_disk = 128GB
 request_gpus = 1
 

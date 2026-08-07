@@ -56,7 +56,7 @@ def process_traj(traj):
     ], axis=2).reshape(-1, 8)
     
     timesteps = np.broadcast_to(np.arange(n_frames - 1)[:, None], (n_frames - 1, n_res)).flatten()
-    res_targets = np.broadcast_to(res_indices[None, :], (n_frames - 1, n_res)).flatten()
+    res_targets = np.broadcast_to(np.array(top.residues)[None, :], (n_frames - 1, n_res)).flatten()
     
     
     df = pd.DataFrame({"residue":res_targets})
@@ -145,6 +145,7 @@ def main(atlas_df, out_csv_name):
         out_dfs, out_nps = zip(*out_data)
         
         final_df = pd.concat(out_dfs, axis=0, ignore_index=True)
+        print(final_df.head())
         final_np = np.concat(out_nps, axis=0)
         final_df.to_csv(os.path.join("md_data", f"{out_csv_name}.csv"), index=False)
         np.save( os.path.join("md_data", f"{out_csv_name}.npy"), final_np)

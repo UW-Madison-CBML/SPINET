@@ -32,10 +32,11 @@ def train_residue_classifier():
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 32 
+    batch_size = 8
     hidden_dim = 64
     num_blocks = 4
     num_heads = 4
+    masking_ratio = 0.75
 
     # CAUTION: this is based on the order of features defined in load_dynamics.py and is used to label the columns of the npy features file
     FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
@@ -48,21 +49,33 @@ def train_residue_classifier():
     df = pd.read_csv(os.path.join("md_data","atlas_index.csv"))
 
     features_np = np.load(os.path.join("md_data","atlas_index.npy"))
-    df = pd.concat([df, pd.DataFrame(features_np, columns=FEATURE_COLUMNS, index=df.index)], axis=1)
-    
-    pdb_ids = df["pdb_id"].unique()
+
+    df["mask"] = np.random.rand(len(df)) < masking_ratio # mask
+
+    pdb_ids = df["pdb_id"].unique()[:200]
     num_pdbs = len(pdb_ids)
-    
+
     val_cutoff = int(val_ratio * num_pdbs)
     test_cutoff = val_cutoff + int(test_ratio * num_pdbs)
-    
+
     val_pdbs = pdb_ids[:val_cutoff]
     test_pdbs = pdb_ids[val_cutoff:test_cutoff]
     train_pdbs = pdb_ids[test_cutoff:]
-    
-    train_df = df[df["traj_id"].isin(train_pdbs)]
-    val_df = df[df["traj_id"].isin(val_pdbs)]
-    test_df = df[df["traj_id"].isin(test_pdbs)]
+
+    train_mask = df["pdb_id"].isin(train_pdbs)
+    train_np = features_np[train_mask]
+    train_df = df[train_mask]
+    train_df = pd.concat([train_df, pd.DataFrame(train_np, columns=FEATURE_COLUMNS, index=train_df.index)], axis=1)
+
+    val_mask = df["pdb_id"].isin(val_pdbs)
+    val_np = features_np[val_mask]
+    val_df = df[val_mask]
+    val_df = pd.concat([val_df, pd.DataFrame(val_np, columns=FEATURE_COLUMNS, index=val_df.index)], axis=1)
+
+    test_mask = df["pdb_id"].isin(test_pdbs)
+    test_np = features_np[test_mask]
+    test_df = df[test_mask]
+    test_df = pd.concat([test_df, pd.DataFrame(test_np, columns=FEATURE_COLUMNS, index=test_df.index)], axis=1)
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -78,6 +91,7 @@ def train_residue_classifier():
             "test_ratio": test_ratio,
             "batch_size": batch_size,
             "hidden_dim": hidden_dim,
+            "masking_ratio": masking_ratio,
             "task":"predicting residues from motions"
         },
     )
@@ -103,9 +117,9 @@ def train_residue_classifier():
     test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon)
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.pad_collate, pin_memory=True, drop_last=False) 
+    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
     
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
     

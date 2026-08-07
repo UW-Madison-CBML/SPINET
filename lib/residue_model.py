@@ -102,7 +102,7 @@ class SheafResidualGATBlock(torch.nn.Module):
             # 1 sheaf learner per block
             self.sheaf_learner = SheafLearnerLowRankNormal(self.hidden_dim, self.hidden_dim, self.hidden_dim // 4) # alternatively SheafLearner(self.hidden_dim, self.hidden_dim)
             self.apply_laplacian = SheafLaplacian(self.hidden_dim)
-        self.gat_block = GATConv(self.hidden_dim, self.hidden_dim, heads=self.num_heads, concat=False, residual=True, dropout=self.dropout) # TODO check how this is implemented
+        self.gat_block = GATConv(self.hidden_dim, self.hidden_dim, heads=self.num_heads, concat=False, dropout=self.dropout) # TODO check how this is implemented
 
     def forward(self, data):
         # in case of custom residual definition: skip = data.x
