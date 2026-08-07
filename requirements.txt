@@ -1,6 +1,6 @@
 requests
 pandas
-numpy
+numpy<2
 beautifulsoup4
 biopython
 ruff
