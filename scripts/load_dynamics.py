@@ -7,6 +7,7 @@ import pandas as pd
 from zipfile import ZipFile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
+import traceback
 FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
 
 
@@ -14,7 +15,7 @@ def process_traj(traj):
     top = traj.topology
     n_frames = traj.n_frames
     n_res = top.n_residues
-    
+    res_names = [res.name for res in top.residues]    
     res_indices = np.array([r.index for r in top.residues])
     
     heavy_atoms = top.select("not element H")
@@ -52,7 +53,7 @@ def process_traj(traj):
     ], axis=2).reshape(-1, 8)
     
     timesteps = np.broadcast_to(np.arange(n_frames - 1)[:, None], (n_frames - 1, n_res)).flatten()
-    res_targets = np.broadcast_to(np.array(top.residues)[None, :], (n_frames - 1, n_res)).flatten()
+    res_targets = np.broadcast_to(np.array(res_names)[None, :], (n_frames - 1, n_res)).flatten()
     
     df = pd.DataFrame({"residue":res_targets})
     df.insert(0, "timestep", timesteps)
@@ -111,6 +112,7 @@ def download_and_process_file(url, pdb_id):
         
     except Exception as e:
         print(f"Failed to process {pdb_id}: {str(e)}")
+        traceback.print_exception(e)
         return pd.DataFrame(), np.empty((0, len(FEATURE_COLUMNS)))
 
         
