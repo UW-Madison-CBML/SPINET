@@ -181,11 +181,10 @@ class InitDynamicsEmbedding(MessagePassing):
 
     def message(self, x_i, x_j, pos_i, pos_j):
         relative_pos = pos_j - pos_i
-        non_vel_features_x_i = x_i[self.velocity_range[1]:] # non velocity features like bond_ang, bond_len
-        non_vel_features_x_j = x_j[self.velocity_range[1]:]
-        d_pos_i = x_i[self.velocity_range[0]:self.velocity_range[1]] # these are velocity
-        d_pos_j = x_j[self.velocity_range[0]:self.velocity_range[1]] # 
-
+        non_vel_features_x_i = x_i[:, self.velocity_range[1]:] # non velocity features like bond_ang, bond_len
+        non_vel_features_x_j = x_j[:, self.velocity_range[1]:]
+        d_pos_i = x_i[:,self.velocity_range[0]:self.velocity_range[1]] # these are velocity
+        d_pos_j = x_j[:,self.velocity_range[0]:self.velocity_range[1]] # 
         prev_pos_i = pos_i - d_pos_i
         prev_pos_j = pos_j - d_pos_j
         
@@ -239,7 +238,7 @@ class NodeSheafGATClassifier(torch.nn.Module):
     def forward(self, data):
         # take in batch of graphs
         # embed based on egocentric features, since positions are raw and absolute
-        data = self.init_dynamics_embedding(data.x, data.pos, data.edge_index)
+        data.x = self.init_dynamics_embedding(data.x, data.pos, data.edge_index)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

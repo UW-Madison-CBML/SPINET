@@ -28,15 +28,16 @@ def get_confusion_matrix(gt_indices, pred_indices, num_classes):
 def train_residue_classifier():
     # hyperparameters
     epsilon = 5.0 # in Angstroms
-    learning_rate = 1e-4
+    learning_rate = 1e-2
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
     batch_size = 8
-    hidden_dim = 64
+    hidden_dim = 16
     num_blocks = 4
     num_heads = 4
     masking_ratio = 0.75
+    ablate_sheaves=True
 
     # CAUTION: this is based on the order of features defined in load_dynamics.py and is used to label the columns of the npy features file
     FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
@@ -92,7 +93,8 @@ def train_residue_classifier():
             "batch_size": batch_size,
             "hidden_dim": hidden_dim,
             "masking_ratio": masking_ratio,
-            "task":"predicting residues from motions"
+            "task":"predicting residues from motions",
+            "ablate_sheaves":ablate_sheaves
         },
     )
 
@@ -132,7 +134,7 @@ def train_residue_classifier():
         hidden_dim=hidden_dim,
         num_blocks=num_blocks,
         num_heads=num_heads,
-        ablate_sheaves=False
+        ablate_sheaves=ablate_sheaves
     ).to(DEVICE)
 
     # -----------------------------------------
