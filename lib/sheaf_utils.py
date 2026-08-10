@@ -5,27 +5,7 @@ from scipy.spatial import distance_matrix
 from torch_geometric.nn import radius_graph
 from torch_geometric.data import Data
 
-def build_graph(coords, feats, labels, mask, epsilon=5.0, add_temporal_edges=True):
-     
-    pos = torch.as_tensor(coords, dtype=torch.float32)
-    x = torch.as_tensor(feats, dtype=torch.float32)
-    y = torch.as_tensor(labels, dtype=torch.long)
-    node_mask = torch.as_tensor(mask, dtype=torch.bool)
- 
-    edge_index = radius_graph(pos, r=epsilon, max_num_neighbors=32, loop=False)
-    edge_attr = (pos[edge_index[0]] - pos[edge_index[1]]).norm(dim=-1, keepdim=True)
- 
-    if add_temporal_edges and pos.size(0) > 1:
-        idx = torch.arange(pos.size(0) - 1)
-        temporal = torch.stack([
-            torch.cat([idx, idx + 1]),
-            torch.cat([idx + 1, idx]),
-        ])
-        temporal_attr = (pos[temporal[0]] - pos[temporal[1]]).norm(dim=-1, keepdim=True)
-        edge_index = torch.cat([edge_index, temporal], dim=1)
- 
-    return Data(x=x, pos=pos, y=y, node_mask=node_mask, edge_index=edge_index)
-    
+   
     
 
 def eigenspectrum(laplacians, lengths):

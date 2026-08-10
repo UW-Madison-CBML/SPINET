@@ -34,24 +34,30 @@ def train_residue_classifier():
     test_ratio = 0.15
     batch_size = 8
     hidden_dim = 16
+    stalk_dim = 8 
     num_blocks = 4
     num_heads = 4
     masking_ratio = 0.75
     ablate_sheaves=True
+    seed=42
+    
 
-    # CAUTION: this is based on the order of features defined in load_dynamics.py and is used to label the columns of the npy features file
+
+    torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
+    np_rng = np.random.default_rng(seed=seed)
+    # CAUTION: this is based on the order of features defined in load_dynamics.py and is used to label the columns of the npy features file and is liable to change
+    # ensure load_dynamics is correctly implemented w.r.t the below
     FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
 
     # set up device 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
     
     # load in data and create 3-way split
-    # the data is split into different csvs
     df = pd.read_csv(os.path.join("md_data","atlas_index.csv"))
 
     features_np = np.load(os.path.join("md_data","atlas_index.npy"))
-
-    df["mask"] = np.random.rand(len(df)) < masking_ratio # mask
+    # mask
+    df["mask"] = np_rng.random(len(df)) < masking_ratio
 
     pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
@@ -77,6 +83,7 @@ def train_residue_classifier():
     test_np = features_np[test_mask]
     test_df = df[test_mask]
     test_df = pd.concat([test_df, pd.DataFrame(test_np, columns=FEATURE_COLUMNS, index=test_df.index)], axis=1)
+    print(train_df.head(), val_df.head(), test_df.head())
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -94,7 +101,9 @@ def train_residue_classifier():
             "hidden_dim": hidden_dim,
             "masking_ratio": masking_ratio,
             "task":"predicting residues from motions",
-            "ablate_sheaves":ablate_sheaves
+            "ablate_sheaves":ablate_sheaves,
+            "stalk_dim": stalk_dim,
+            "seed":seed
         },
     )
 
@@ -119,7 +128,7 @@ def train_residue_classifier():
     test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon)
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
+    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
     test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
     
@@ -132,6 +141,7 @@ def train_residue_classifier():
     model = NodeSheafGATClassifier(
         num_classes=num_classes, 
         hidden_dim=hidden_dim,
+        stalk_dim=stalk_dim,
         num_blocks=num_blocks,
         num_heads=num_heads,
         ablate_sheaves=ablate_sheaves

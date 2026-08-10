@@ -27,8 +27,6 @@ transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py,
 #pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
 
 
-gpus_minimum_capability = 7.0
-requirements= Machine=="bhaskargpu4000.chtc.wisc.edu"
 
 #+GPUModel = "NVIDIA H200"
 # Requirements (e.g., operating system) your job needs, what amount of
