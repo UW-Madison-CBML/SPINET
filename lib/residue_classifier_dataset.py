@@ -81,13 +81,13 @@ class ResidueClassifierDataset(Dataset):
         self.traj_len = traj_len
 
         if self.traj_len is not None and self.fixed_length is not None:
-            self.index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_lenth + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), dim=-1).reshape(-1, 3)
+            self.index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_length + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), axis=-1).reshape(-1, 3)
         elif self.fixed_length is not None: 
             self.index = []
             for i, traj in enumerate(self.groups):
                 length = len(traj) 
-                self.index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), dim=-1))
-            self.index = np.cat(self.index, dim=0)
+                self.index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
+            self.index = np.cat(self.index, axis=0)
         else:
             self.index = []
             min_len, max_len = self.variable_length
@@ -132,8 +132,8 @@ class ResidueClassifierDataset(Dataset):
                 
                 pad_config = (0, 0,  0, pad_amt,  0, 0) 
                 
-                batch[i].x = F.pad(batch[i].x, pad_config, value=0.0))   
-                batch[i].pos = F.pad(batch[i].pos, pad_config, value=0.0))   
+                batch[i].x = F.pad(batch[i].x, pad_config, value=0.0)
+                batch[i].pos = F.pad(batch[i].pos, pad_config, value=0.0)
 
             out_data = Batch.from_data_list(batch)
             out_data.lengths = lengths

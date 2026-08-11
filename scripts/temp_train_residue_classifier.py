@@ -121,14 +121,15 @@ def train_residue_classifier():
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon)
-    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon)
-    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon)
+    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon, fixed_length=16)
+    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, fixed_length=16)
+    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, fixed_length=16)
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
+    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:test_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
+
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
