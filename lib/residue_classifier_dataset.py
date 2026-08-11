@@ -6,7 +6,7 @@ from Bio.Data import IUPACData
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import dense_to_sparse
 import numpy as np
-
+from typing import Union, Tuple
 # this is a combination k-NN and distance threshold, generalized to use arbitrary dist mats
 def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32):
     N = dist_matrix.size(0)
@@ -56,33 +56,67 @@ class ResidueClassifierDataset(Dataset):
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()] + ["PYL", "SEC"] # add pyrrolysine and selenocysteine
     FEATURE_COLS = ["dx", "dy", "dz", "bond_ang", "bond_len"]
     POS_COLS = ["x","y","z"]
-    # CAUTION this is hardcoded
-    TRAJ_LEN = 200
-
+    
 
     #--------------------------------------------------
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
-    def __init__(self, df, epsilon=5.0, timesteps=16):
+    
+    def __init__(self, df, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
+        """
+        self
+        df: the dataframe containing trajectory information 
+        traj_len: the fixed length of all trajectories if it exists
+        variable_length: None if fixed length sequences else the range (inclusive) of valid sequence sizes
+        epsilon: tolerance to build edge between nodes, i.e. if during the trajectory the edges ever get within epsilon from eachother
+        """
         self.df = df
         self.groups = [group.groupby('timestep') for _, group in list(df.groupby("traj_id"))]
         self.epsilon = epsilon
-        self.timesteps = timesteps
+        assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
+        self.fixed_length = fixed_length
+        self.variable_length = variable_length
+        self.traj_len = traj_len
+
+        if self.traj_len is not None and self.fixed_length is not None:
+            self.index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_lenth + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), dim=-1).reshape(-1, 3)
+        elif self.fixed_length is not None: 
+            self.index = []
+            for i, traj in enumerate(self.groups):
+                length = len(traj) 
+                self.index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), dim=-1))
+            self.index = np.cat(self.index, dim=0)
+        else:
+            self.index = []
+            min_len, max_len = self.variable_length
+            for i, traj in enumerate(self.groups):
+                length = len(traj) 
+                for seq_len in range(self.variable_length[0], self.variable_length[1] + 1): # upper bound on lengths is inclusive
+                    for j in range(length-(seq_len - 1)):
+                        self.index.append((i,j,j+seq_len))
+            self.index = np.array(self.index)
+        
+
+
 
     def __len__(self):
-        return (self.__class__.TRAJ_LEN - (self.timesteps - 1)) * len(self.groups)
+        return len(self.index) 
 
     def __getitem__(self, idx):
-        traj = self.groups[idx // (self.__class__.TRAJ_LEN - (self.timesteps - 1))]
-        traj_window_idx = idx % (self.__class__.TRAJ_LEN - (self.timesteps - 1))
-        assert len(traj) == self.__class__.TRAJ_LEN, "TRAJ LEN does not match length of trajectory"
-        frames = [traj.get_group(traj_window_idx + i) for i in range(self.timesteps)]
+        group_idx, frame_idx_start, frame_idx_end = self.index[idx]
+        traj = self.groups[group_idx]
+        frame_idxs = range(frame_idx_start, frame_idx_end) # not inclusive
+
+        if(self.traj_len is not None):
+            assert len(traj) == self.traj_len, "TRAJ LEN does not match length of trajectory"
+
+        frames = [traj.get_group(i) for i in frame_idxs]
+        
         pos = np.stack([frame[self.__class__.POS_COLS].to_numpy() for frame in frames], axis=1)
         pos -= pos.mean(axis=(0,1)) # avg COM over time
         # I'm just using the first frame's mask as the mask, that way GT mask in the df remains
         return build_graph(pos, np.stack([frame[self.__class__.FEATURE_COLS].to_numpy() for frame in frames], axis=1), torch.tensor([self.__class__.AMINO_ACIDS.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long), frames[0]["mask"].to_numpy(), self.epsilon)
 
 
-    @staticmethod
-    def graph_collate(batch):
+    def graph_collate(self, batch):
         return Batch.from_data_list(batch)
