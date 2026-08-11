@@ -12,7 +12,9 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Data
 
 from residue_classifier_dataset import ResidueClassifierDataset
-from invariant_features_sheaf_model import NodeSheafClassifier
+from residue_model import NodeSheafGATClassifier
+from sheaf_utils import build_graph
+
 
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
@@ -32,13 +34,13 @@ def train_residue_classifier():
     test_ratio = 0.15
     batch_size = 8
     hidden_dim = 16
-    stalk_dim = 8
+    stalk_dim = 8 
     num_blocks = 4
     num_heads = 4
     masking_ratio = 0.75
     ablate_sheaves=True
     seed=42
-
+    
 
 
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
@@ -47,9 +49,9 @@ def train_residue_classifier():
     # ensure load_dynamics is correctly implemented w.r.t the below
     FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
 
-    # set up device
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    # set up device 
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+    
     # load in data and create 3-way split
     df = pd.read_csv(os.path.join("md_data","atlas_index.csv"))
 
@@ -108,16 +110,16 @@ def train_residue_classifier():
     # WANDB artifact logging
     artifact = wandb.Artifact(name="scripts", type="model_file")
     artifact.add_file(os.path.abspath(__file__))
-
+    
     dependencies = [ # TODO fix
-        "residue_model.py",
-        "residue_classifier_dataset.py",
+        "residue_model.py", 
+        "residue_classifier_dataset.py", 
         "sheaf_utils.py"
     ]
     for file in dependencies:
         if os.path.exists(file):
             artifact.add_file(os.path.abspath(file))
-
+            
     run.log_artifact(artifact)
 
     # Initialize datasets
@@ -126,18 +128,18 @@ def train_residue_classifier():
     test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon)
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
-
+    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False) 
+    
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
-
+    
     # set up new diffusion model # TODO fix all this
     # do we need this dummy data initialization?
     # ---------------------------------------------
 
-    model = NodeSheafClassifier(
-        num_classes=num_classes,
+    model = NodeSheafGATClassifier(
+        num_classes=num_classes, 
         hidden_dim=hidden_dim,
         stalk_dim=stalk_dim,
         num_blocks=num_blocks,
@@ -146,7 +148,7 @@ def train_residue_classifier():
     ).to(DEVICE)
 
     # -----------------------------------------
-
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     crit = torch.nn.CrossEntropyLoss() # TODO replace this with a properly masked loss, if it exists
 
@@ -154,16 +156,16 @@ def train_residue_classifier():
     for epoch in range(epochs):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
-
+         
         for batch in pbar:
             batch = batch.to(DEVICE)
-
+            
             batch = batch.sort() # for ConvGAT aggregation
             optimizer.zero_grad()
 
             out_batch = model(batch)
 
-            pred_mask = batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
             loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
             run.log({"train_loss": loss.item(), "epoch": epoch})
@@ -182,11 +184,11 @@ def train_residue_classifier():
                 batch = batch.sort() # for ConvGAT aggregation
                 out_batch = model(batch)
 
-                pred_mask = batch.node_mask.bool()
+                pred_mask = ~batch.node_mask.bool()
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
 
                 val_losses.append(loss.item())
-
+               
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         run.log({"epoch_val_loss": avg_val_loss, "epoch": epoch})
 
@@ -194,19 +196,19 @@ def train_residue_classifier():
     # Final Test Evaluation
     print("Training complete. Running final evaluation on Test Set...")
     model.eval()
-
+    
     global_confusion_mat = torch.zeros((num_classes, num_classes), device=DEVICE)
     test_losses = []
-
+    
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Testing"):
-            batch = batch.to(DEVICE)
+            batch = batch.to(DEVICE) 
 
             batch = batch.sort() # for ConvGAT aggregation
 
             out_batch = model(batch)
-
-            pred_mask = batch.node_mask.bool()
+            
+            pred_mask = ~batch.node_mask.bool()
 
             test_logits = out_batch.x[pred_mask]
             test_targets = out_batch.y[pred_mask]
@@ -224,7 +226,7 @@ def train_residue_classifier():
     # Calculate metrics based on entire test set
     confusion_mat_cpu = global_confusion_mat.cpu()
     diag = confusion_mat_cpu.diag()
-
+    
     recall = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=1), 0.0)
     precision = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=0), 0.0)
     f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
@@ -240,18 +242,18 @@ def train_residue_classifier():
     # Hopefully plot will be big enough for 22 classes
     fig, ax = plt.subplots(figsize=(12, 12))
     disp = ConfusionMatrixDisplay(
-        confusion_matrix=confusion_mat_cpu.numpy().astype(int),
+        confusion_matrix=confusion_mat_cpu.numpy().astype(int), 
         display_labels=ResidueClassifierDataset.AMINO_ACIDS
     )
     disp.plot(cmap='Blues', ax=ax, values_format='d')
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right') 
     plt.title("Test Set Confusion Matrix")
 
     prf_dict["test_confusion_matrix"] = wandb.Image(fig)
-    run.log(prf_dict)
+    run.log(prf_dict) 
 
     plt.close(fig)
-
+    
     run.finish()
 
 if __name__ == "__main__":
