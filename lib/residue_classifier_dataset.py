@@ -1,6 +1,7 @@
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
+import torch.nn.functional as F
 import pandas as pd
 from Bio.Data import IUPACData
 from torch_geometric.data import Data, Batch
@@ -24,14 +25,15 @@ def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32)
     edge_index, _ = dense_to_sparse(adj)
     return edge_index
 
-def build_graph(coords, feats, labels, mask, epsilon=5.0, add_temporal_edges=True):
+def build_graph(coords, feats, labels, mask, length, epsilon=5.0, add_temporal_edges=True):
 
     pos = torch.as_tensor(coords, dtype=torch.float32)
     x = torch.as_tensor(feats, dtype=torch.float32)
     y = torch.as_tensor(labels, dtype=torch.long)
     node_mask = torch.as_tensor(mask, dtype=torch.bool)
+    length = torch.as_tensor(length, dtype=torch.long)
 
-    dists,_ = torch.cdist(pos, pos, p=2.0).min(dim=0) # min so that any two nodes that are ever connected will have an direct edge
+    dists = torch.cdist(pos, pos, p=2.0).amin(dim=0) # min so that any two nodes that are ever connected will have an direct edge
 
     edge_index = edge_index_from_distmat(dists, epsilon=epsilon, k=32)
     edge_attr = torch.zeros(edge_index.shape[1], 1)
@@ -46,7 +48,7 @@ def build_graph(coords, feats, labels, mask, epsilon=5.0, add_temporal_edges=Tru
         edge_index = torch.cat([edge_index, temporal], dim=1)
         edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
 
-    return Data(x=x, pos=pos, y=y, node_mask=node_mask, edge_index=edge_index, edge_attr=edge_attr)
+    return Data(x=x, pos=pos, y=y, node_mask=node_mask, edge_index=edge_index, edge_attr=edge_attr, lengths=length.unsqueeze(0))
 
 
 
@@ -119,4 +121,24 @@ class ResidueClassifierDataset(Dataset):
 
 
     def graph_collate(self, batch):
-        return Batch.from_data_list(batch)
+        if self.fixed_length is not None:
+            return Batch.from_data_list(batch)
+        else:
+            lengths = torch.cat([data.lengths for data in batch])
+            max_len = lengths.amax().item()  
+             
+            for i, length in enumerate(lengths):
+                pad_amt = max_len - length
+                
+                pad_config = (0, 0,  0, pad_amt,  0, 0) 
+                
+                batch[i].x = F.pad(batch[i].x, pad_config, value=0.0))   
+                batch[i].pos = F.pad(batch[i].pos, pad_config, value=0.0))   
+
+            out_data = Batch.from_data_list(batch)
+            out_data.lengths = lengths
+            return out_data
+
+             
+            
+            
