@@ -190,7 +190,7 @@ def train_residue_classifier():
                 val_loss = crit(val_logits, val_targets)
                 val_losses.append(val_loss.item())
 
-                preds = test_logits.argmax(dim=-1)
+                preds = val_logits.argmax(dim=-1)
                 batch_conf_mat = get_confusion_matrix(val_targets, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
 
