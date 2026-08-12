@@ -126,16 +126,16 @@ def train_residue_classifier():
     test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, variable_length=(20,50))
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
+    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False, collate_fn=train_dataset.graph_collate)
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False, collate_fn=val_dataset.graph_collate)
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False, collate_fn=test_dataset.graph_collate)
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
     # ---------------------------------------------
 
     model = NodeSheafAttentionClassifier(
-        input_size=5,
+        input_size=3,
         num_classes=num_classes,
         hidden_dim=hidden_dim,
         stalk_dim=stalk_dim,
@@ -185,6 +185,9 @@ def train_residue_classifier():
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
 
                 val_losses.append(loss.item())
+                preds = logits.argmax(dim=-1)
+                batch_conf_mat = get_confusion_matrix(targets, preds, num_classes)
+                global_confusion_mat += batch_conf_mat
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         run.log({"epoch_val_loss": avg_val_loss, "epoch": epoch})

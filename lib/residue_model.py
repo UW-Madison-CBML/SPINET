@@ -268,7 +268,7 @@ class SheafResidualGAT(nn.Module):
 
 # ----------------------------------------------------------------------------------------------
 # LSTM that encodes MD trajectories
-class DynamicsTrajectoryEmbedding(MessagePassing):  
+class DynamicsTrajectoryEmbedding(nn.Module):  
     def __init__(self, input_size, hidden_size, num_layers=1, embedding_dim = 16):
         super().__init__() 
         
@@ -340,11 +340,12 @@ class NodeSheafAttentionClassifier(nn.Module):
 
         # expand from (batch_size,) to (total_nodes,)
         # LSTM treats every node as a sequence
-        node_seq_lengths = data.length[data.batch]
+        node_seq_lengths = data.lengths[data.batch]
 
         # take in batch of graph trajectories
         # embed based on time-series trajectories per node
-        data.x = self.dynamics_trajectory_embedding(data.x, node_seq_lengths)
+        # input data.pos for trajectories instead of data.x
+        data.x = self.dynamics_trajectory_embedding(data.pos, node_seq_lengths)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
@@ -352,7 +353,6 @@ class NodeSheafAttentionClassifier(nn.Module):
         # run sheaf gat residual blocks
         #data = self.sheaf_residual_gat(data)
         data = self.san(data)
-
         data.x = self.classifier(data.x) # classify nodes
 
         return data
