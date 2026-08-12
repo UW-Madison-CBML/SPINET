@@ -26,15 +26,15 @@ def get_confusion_matrix(gt_indices, pred_indices, num_classes):
 def train_residue_classifier():
     # hyperparameters
     epsilon = 5.0 # in Angstroms
-    learning_rate = 1e-2
+    learning_rate = 1e-3
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 8
+    batch_size = 32
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 4
-    num_heads = 4
+    num_heads = 8
     masking_ratio = 0.75
     ablate_sheaves=True
     seed=42
@@ -60,7 +60,7 @@ def train_residue_classifier():
 
     features_np = np.load(os.path.join("md_data","atlas_index.npy"))
     # mask
-    df["mask"] = np_rng.random(len(df)) < masking_ratio
+    df["mask"] = np_rng.random(len(df)) > masking_ratio
 
     pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
