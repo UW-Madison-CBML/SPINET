@@ -55,7 +55,7 @@ def train_residue_classifier():
 
     features_np = np.load(os.path.join("md_data","atlas_index.npy"))
     # mask
-    df["mask"] = np_rng.random(len(df)) < masking_ratio
+    df["mask"] = np_rng.random(len(df)) > masking_ratio
 
     pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
@@ -88,7 +88,7 @@ def train_residue_classifier():
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
         project="SheafProtein",
-        name="residue_classifier_training",
+        name="trajectory_based_residue_classifier_training",
         config={
             "epsilon": epsilon,
             "lr": learning_rate,
@@ -162,7 +162,7 @@ def train_residue_classifier():
 
             out_batch = model(batch)
 
-            pred_mask = batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
             loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
             run.log({"train_loss": loss.item(), "epoch": epoch})
@@ -175,13 +175,14 @@ def train_residue_classifier():
         model.eval()
         val_losses = []
 
+        global_confusion_mat = torch.zeros((num_classes, num_classes))
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
                 batch = batch.to(DEVICE)
                 batch = batch.sort() # for ConvGAT aggregation
                 out_batch = model(batch)
 
-                pred_mask = batch.node_mask.bool()
+                pred_mask = ~batch.node_mask.bool()
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
 
                 val_losses.append(loss.item())
@@ -208,7 +209,7 @@ def train_residue_classifier():
 
             out_batch = model(batch)
 
-            pred_mask = batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
             test_logits = out_batch.x[pred_mask]
             test_targets = out_batch.y[pred_mask]
