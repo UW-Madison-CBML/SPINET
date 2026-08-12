@@ -40,6 +40,7 @@ def train_residue_classifier(args_dict):
     run_name = args_dict["run_name"]
     seed=42
     num_timesteps = 32
+    use_scheduler=False
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -110,7 +111,9 @@ def train_residue_classifier(args_dict):
             "ablate_sheaves":ablate_sheaves,
             "stalk_dim": stalk_dim,
             "seed":seed,
-            "trajectory_subsequence_timesteps":num_timesteps
+            "trajectory_subsequence_timesteps":num_timesteps,
+            "use_scheduler":use_scheduler,
+            "scheduler_type":"cosine annealing warm restarts every epoch"
         },
     )
 
@@ -158,9 +161,10 @@ def train_residue_classifier(args_dict):
 
     # -----------------------------------------
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     crit = torch.nn.CrossEntropyLoss() # TODO replace this with a properly masked loss, if it exists
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
+    if use_scheduler:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
 
     # training loop
     for epoch in range(epochs):
@@ -183,7 +187,8 @@ def train_residue_classifier(args_dict):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            scheduler.step()
+            if use_scheduler:
+                scheduler.step()
 
         # Validation Check
         model.eval()
@@ -301,6 +306,6 @@ if __name__ == "__main__":
         prog='Train sheaf protein node residue classifier',
         description='Trains sheaf node classifier to predict nodes') 
     parser.add_argument('--run-name', type=str, default="residue_classifier")
-    parser.add_argument('--ablate_sheaves', action="store_true")
+    parser.add_argument('--ablate-sheaves', action="store_true")
     args = parser.parse_args()
     train_residue_classifier(vars(args))
