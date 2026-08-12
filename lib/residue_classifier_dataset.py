@@ -89,7 +89,7 @@ class ResidueClassifierDataset(Dataset):
             for i, traj in enumerate(self.groups):
                 length = len(traj) 
                 self.index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
-            self.index = np.cat(self.index, axis=0)
+            self.index = np.concatenate(self.index, axis=0)
         else:
             self.index = []
             min_len, max_len = self.variable_length
@@ -119,7 +119,16 @@ class ResidueClassifierDataset(Dataset):
         pos = np.stack([frame[self.__class__.POS_COLS].to_numpy() for frame in frames], axis=1)
         pos -= pos.mean(axis=(0,1)) # avg COM over time
         # I'm just using the first frame's mask as the mask, that way GT mask in the df remains
-        return build_graph(pos, np.stack([frame[self.__class__.FEATURE_COLS].to_numpy() for frame in frames], axis=1), torch.tensor([self.__class__.AMINO_ACIDS.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long), frames[0]["mask"].to_numpy(), self.epsilon)
+
+        length = len(frames)
+        return build_graph(
+                pos,
+                np.stack([frame[self.__class__.FEATURE_COLS].to_numpy() for frame in frames], axis=1),
+                torch.tensor([self.__class__.AMINO_ACIDS.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
+                frames[0]["mask"].to_numpy(),
+                length,
+                epsilon = self.epsilon
+        )
 
 
     def graph_collate(self, batch):

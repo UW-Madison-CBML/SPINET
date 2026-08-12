@@ -10,6 +10,10 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax
 from torch.func import functional_call, vmap
 
+# this model directly uses positions at MD timesteps instead of relative features
+# combines time-series positions with LSTM to node embedding
+# then learns sheaf over these embeddings and applies the Laplacian
+
 #-------------------------------------------------------
 # sheaf learners
 
@@ -47,7 +51,7 @@ class SheafLearnerOrthogonal(nn.Module):
         row, col = edge_index
         edge_features = torch.cat([x[row], x[col]], dim=-1)
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
-        maps = torch.zeroes((len(edge_index), self.stalk_dim, self.stalk_dim), device=x.device) 
+        maps = torch.zeros((len(edge_index), self.stalk_dim, self.stalk_dim), device=x.device) 
         upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim, 1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
         lower_indices = torch.tril_indices(self.stalk_dim, self.stalk_dim, -1, device=x.device)
         maps[:, upper_indices] = upper_tri
@@ -262,69 +266,59 @@ class SheafResidualGAT(nn.Module):
         return self.blocks(data)
 
 # ----------------------------------------------------------------------------------------------
-# this  initial dynamics embedding will be the main thing we change when editing the input data
-# it will be harder to not hard code some of this stuff
-class InitDynamicsEmbedding(MessagePassing):  
-    def __init__(self, output_dim, input_dim = 5, velocity_range = (0,3)):
-        super().__init__(aggr='mean') 
-        self.output_dim = output_dim
-        self.input_dim = input_dim
-        self.velocity_range = velocity_range
+# LSTM that encodes MD trajectories
+class DynamicsTrajectoryEmbedding(MessagePassing):  
+    def __init__(self, input_size, hidden_size, num_layers=1, embedding_dim = 16):
+        super().__init__() 
         
-        self.mlp = nn.Sequential(
-            nn.Linear(15, 16), # TODO don't hard code this, tho it is super specific to the data
-            nn.ReLU(),
-            nn.Linear(16, output_dim)
+        self.lstm = nn.LSTM(
+            input_size = input_size,
+            hidden_size = hidden_size,
+            num_layers = num_layers,
+            batch_first = True
         )
         
-        self.update_linear = nn.Linear(input_dim + output_dim, output_dim)
+        self.fc = nn.Linear(hidden_size, embedding_dim)
 
-    def forward(self, x, pos, edge_index):
-        return self.propagate(edge_index, x=x, pos=pos)
+    def forward(self, x, seq_lengths):
+        # x shape: (num_nodes, max_seq_len, features)
+        # seq_lengths shape: (num_nodes,) - true integer lengths
 
-    def message(self, x_i, x_j, pos_i, pos_j):
-        relative_pos = pos_j - pos_i
-        non_vel_features_x_i = x_i[:, self.velocity_range[1]:] # non velocity features like bond_ang, bond_len
-        non_vel_features_x_j = x_j[:, self.velocity_range[1]:]
-        d_pos_i = x_i[:,self.velocity_range[0]:self.velocity_range[1]] # these are velocity
-        d_pos_j = x_j[:,self.velocity_range[0]:self.velocity_range[1]] # 
-        prev_pos_i = pos_i - d_pos_i
-        prev_pos_j = pos_j - d_pos_j
-        
-        d_pos_j_angle = F.cosine_similarity(prev_pos_j - prev_pos_i, d_pos_j, dim=-1).unsqueeze(-1)
-        d_pos_i_angle = F.cosine_similarity(prev_pos_j - prev_pos_i, d_pos_i, dim=-1).unsqueeze(-1)
+        packed_input = pack_padded_sequence(
+                x, lengths=seq_lengths.cpu(), batch_first=True, enforce_sorted=False
+            )
 
-        dynamics_features = torch.cat([relative_pos, non_vel_features_x_i, non_vel_features_x_j, d_pos_i, d_pos_j, d_pos_i_angle, d_pos_j_angle], dim=-1)
-         
-        return self.mlp(dynamics_features)
+        packed_output, (h_n, c_n) = self.lstm(packed_input)
 
-    def update(self, aggr_out, x):
-        return self.update_linear(torch.cat([x, aggr_out], dim=-1))        
+        final_hidden_state = h_n[-1]
+
+        embedding = self.fc(final_hidden_state)
+
+        return embedding
+
 # -------------------------------------------------------------------------------------------
-         
- 
 
-
-class NodeSheafGATClassifier(nn.Module):  
-    def __init__(self, num_classes=22, hidden_dim=64, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2):
+class NodeSheafAttentionClassifier(nn.Module):  
+    def __init__(self, input_size, num_classes=22, hidden_dim=64, stalk_dim=16, num_lstm_layers=1, num_blocks=8, num_heads=8, ablate_sheaves=False, gat_dropout=0.2, classifier_dropout=0.2):
         super().__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
 
         self.hidden_dim = hidden_dim
         self.stalk_dim = stalk_dim
-        self.num_blocks=num_blocks
-        self.num_heads=num_heads
+        self.num_lstm_layers = num_lstm_layers
+        self.num_blocks = num_blocks
+        self.num_heads = num_heads
         self.gat_dropout = gat_dropout
         self.num_classes = num_classes
         self.ablate_sheaves = ablate_sheaves
         self.gat_dropout = gat_dropout
         self.classifier_dropout = classifier_dropout
 
-        self.init_dynamics_embedding = InitDynamicsEmbedding(
-            hidden_dim,
-            input_dim = 5,
-            velocity_range = (0,3), # exclusive on right, other features will be already egocentric
+        self.dynamics_trajectory_embedding = DynamicsTrajectoryEmbedding(
+            input_size = input_size,
+            hidden_size = hidden_dim,
+            embedding_dim = hidden_dim
         )
 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim) 
@@ -342,9 +336,9 @@ class NodeSheafGATClassifier(nn.Module):
         )
         
     def forward(self, data):
-        # take in batch of graphs
-        # embed based on egocentric features, since positions are raw and absolute
-        data.x = self.init_dynamics_embedding(data.x, data.pos, data.edge_index)
+        # take in batch of graph trajectories
+        # embed based on time-series trajectories per node
+        data.x = self.dynamics_trajectory_embedding(data.x, data.seq_lengths)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

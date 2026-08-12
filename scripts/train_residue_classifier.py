@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Data
 
 from residue_classifier_dataset import ResidueClassifierDataset
-from invariant_features_sheaf_model import NodeSheafClassifier
+from residue_model import NodeSheafAttentionClassifier 
 
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
@@ -28,11 +28,11 @@ def train_residue_classifier():
     epsilon = 5.0 # in Angstroms
     learning_rate = 1e-2
     epochs = 8
-    val_ratio = 0.15
-    test_ratio = 0.15
+    val_ratio = 0.1
+    test_ratio = 0.1
     batch_size = 8
-    hidden_dim = 16
-    stalk_dim = 8
+    hidden_dim = 64
+    stalk_dim = 16
     num_blocks = 4
     num_heads = 4
     masking_ratio = 0.75
@@ -121,9 +121,9 @@ def train_residue_classifier():
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon)
-    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon)
-    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon)
+    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon, variable_length=(20,50))
+    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, variable_length=(20,50))
+    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, variable_length=(20,50))
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False)
@@ -132,11 +132,10 @@ def train_residue_classifier():
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
-    # set up new diffusion model # TODO fix all this
-    # do we need this dummy data initialization?
     # ---------------------------------------------
 
-    model = NodeSheafClassifier(
+    model = NodeSheafAttentionClassifier(
+        input_size=5,
         num_classes=num_classes,
         hidden_dim=hidden_dim,
         stalk_dim=stalk_dim,
