@@ -10,11 +10,13 @@ import numpy as np
 from typing import Union, Tuple
 # this is a combination k-NN and distance threshold, generalized to use arbitrary dist mats
 def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32):
+    # change k so topk doesn't fail
+    k = min(k, masked.shape[-1])
     N = dist_matrix.size(0)
     masked = dist_matrix.clone()
     masked.fill_diagonal_(float('inf'))
     masked[masked > epsilon] = float('inf')
-    topk_dist, topk_idx = torch.topk(masked, k=min(k, masked.shape[-1]), largest=False, dim=-1)
+    topk_dist, topk_idx = torch.topk(masked, k=k, largest=False, dim=-1)
     valid = topk_dist.isfinite()
     row = torch.arange(N).unsqueeze(1).expand(-1, k)[valid]
     col = topk_idx[valid]
