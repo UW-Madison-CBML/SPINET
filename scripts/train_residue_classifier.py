@@ -183,12 +183,17 @@ def train_residue_classifier():
                 out_batch = model(batch)
 
                 pred_mask = ~batch.node_mask.bool()
-                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
 
-                val_losses.append(loss.item())
-                preds = logits.argmax(dim=-1)
-                batch_conf_mat = get_confusion_matrix(targets, preds, num_classes)
+                val_logits = out_batch.x[pred_mask]
+                val_targets = out_batch.y[pred_mask]
+
+                val_loss = crit(val_logits, val_targets)
+                val_losses.append(val_loss.item())
+
+                preds = test_logits.argmax(dim=-1)
+                batch_conf_mat = get_confusion_matrix(val_targets, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
+
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         run.log({"epoch_val_loss": avg_val_loss, "epoch": epoch})
