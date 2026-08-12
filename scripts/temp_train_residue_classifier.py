@@ -33,7 +33,7 @@ def train_residue_classifier():
     batch_size = 32
     hidden_dim = 16
     stalk_dim = 8
-    num_blocks = 4
+    num_blocks = 8
     num_heads = 8
     masking_ratio = 0.75
     ablate_sheaves=True
@@ -59,6 +59,7 @@ def train_residue_classifier():
     df = pd.read_csv(os.path.join("md_data","atlas_index.csv"))
 
     features_np = np.load(os.path.join("md_data","atlas_index.npy"))
+
     # mask
     df["mask"] = np_rng.random(len(df)) > masking_ratio
 
@@ -86,7 +87,6 @@ def train_residue_classifier():
     test_np = features_np[test_mask]
     test_df = df[test_mask]
     test_df = pd.concat([test_df, pd.DataFrame(test_np, columns=FEATURE_COLUMNS, index=test_df.index)], axis=1)
-    print(train_df.head(), val_df.head(), test_df.head())
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -169,7 +169,7 @@ def train_residue_classifier():
 
             out_batch = model(batch)
 
-            pred_mask = batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
             loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
             run.log({"train_loss": loss.item(), "epoch": epoch})
@@ -189,7 +189,7 @@ def train_residue_classifier():
                 batch = batch.sort() # for ConvGAT aggregation
                 out_batch = model(batch)
 
-                pred_mask = batch.node_mask.bool()
+                pred_mask = ~batch.node_mask.bool()
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
                 logits = out_batch.x[pred_mask].cpu()
                 targets = out_batch.y[pred_mask].cpu()
@@ -243,7 +243,7 @@ def train_residue_classifier():
 
             out_batch = model(batch)
 
-            pred_mask = batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
             test_logits = out_batch.x[pred_mask]
             test_targets = out_batch.y[pred_mask]

@@ -58,7 +58,7 @@ def build_graph(coords, feats, labels, mask, length, epsilon=5.0, add_temporal_e
 class ResidueClassifierDataset(Dataset):
 
     # ground truth order of amino acid indices. they must be capitalized
-    AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()] + ["PYL", "SEC"] # add pyrrolysine and selenocysteine
+    AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()]
     FEATURE_COLS = ["dx", "dy", "dz", "bond_ang", "bond_len"]
     POS_COLS = ["x","y","z"]
     
