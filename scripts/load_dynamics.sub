@@ -1,6 +1,6 @@
 # load_dynamics.sub
 
-docker_image = python:3.10-slim
+docker_image = jenslundsgaard/sheaf_training:v2.7
 
 universe = docker
 

@@ -60,7 +60,7 @@ class SheafLearner(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.stalk_dim = stalk_dim
-        self.lin = nn.Linear(2*self.stalk_dim, 2*self.stalk_dim) # TODO is this too much?
+        self.lin = nn.Linear(2*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
         self.map_learner = nn.Linear(2*self.stalk_dim, self.stalk_dim ** 2)
         self.act = F.relu
 
@@ -70,7 +70,7 @@ class SheafLearner(nn.Module):
         x_row = x[row]
         x_col = x[col]
 
-        maps = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(len(edge_index), self.stalk_dim, self.stalk_dim)
+        maps = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
 
         return maps
 
@@ -88,41 +88,57 @@ class SheafAttentionConv(MessagePassing):
         self.dropout = dropout
         self.num_channels = self.hidden_dim // self.stalk_dim
 
-        self.W = nn.ModuleList([nn.Linear(self.stalk_dim, self.stalk_dim, bias=False) for _ in range(self.num_heads)])
-        self.W_params = {
-            "weight": torch.stack([layer.weight for layer in self.W]),
-        }
-        self.att = nn.ModuleList([nn.Linear(2 * self.hidden_dim, 1, bias=False) for _ in range(self.num_heads)])
-        self.att_params = {
-            "weight": torch.stack([layer.weight for layer in self.att]),
-        }
+        self.W_weights = nn.Parameter(torch.empty(self.num_heads, self.stalk_dim, self.stalk_dim))
+        self.att_weights = nn.Parameter(torch.empty(self.num_heads, 1, 2 * self.hidden_dim))
+        nn.init.xavier_uniform_(self.W_weights)
+        nn.init.xavier_uniform_(self.att_weights)
+        self._stateless_W = nn.Linear(self.stalk_dim, self.stalk_dim, bias=False)
+        self._stateless_att = nn.Linear(2 * self.hidden_dim, 1, bias=False)
+
+        self.apply_W = vmap(
+            lambda params, tensor: functional_call(self._stateless_W, params, tensor),
+            in_dims=({"weight": 0}, 0)
+        )
+
+        self.apply_att = vmap(
+            lambda params, tensor: functional_call(self._stateless_att, params, tensor),
+            in_dims=({"weight": 0}, 0)
+        )
+
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
 
         self.sheaf_learner = SheafLearner(self.hidden_dim, self.stalk_dim)
 
-        self.apply_W = vmap(lambda tensor: functional_call(nn.Linear(self.stalk_dim, self.stalk_dim, bias=False), self.W_params, tensor), in_dims=(0, None))
-        self.apply_att = vmap(lambda tensor: functional_call(nn.Linear(2 * hidden_dim, 1, bias=False), self.att_params, tensor), in_dims=(0, None))
 
     def forward(self, x, edge_index):
         maps = self.sheaf_learner(x, edge_index)
-        x_stalk = x.view(edge_index, self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
+        x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
         out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps)
-        return self.project_concat(torch.cat(out, dim=-1))
+        return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
 
     def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
+        W_params = {"weight": self.W_weights}
+        att_params = {"weight": self.att_weights}
+        
+        edge_features = torch.cat([x_i, x_j], dim=-1) 
+        edge_features_batched = edge_features.unsqueeze(0).expand(self.num_heads,-1, -1, -1) 
+        
+        x_stalk_j_batched = x_stalk_j.unsqueeze(0).expand(self.num_heads,-1, -1, -1)
 
-        alpha = self.leaky(self.apply_att(torch.cat([x_i, x_j], dim=-1))) # num_heads, num_edges, 1?
-
-        alpha = softmax(alpha, index, ptr, size_i)
+        alpha = self.leaky(self.apply_att(att_params, edge_features_batched))
+        
+        transformed = self.apply_W(W_params, x_stalk_j_batched)
+        
+        alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2) 
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
-        transformed = self.apply_W(x_stalk_j) # num_heads, num_edges, stalk_dim
-        transported = torch.bmm(maps, transformed.unsqueeze(-1)).squeeze(-1)
-
-        return alpha * transported
-
-
+        maps_expanded = maps.unsqueeze(0).expand(self.num_heads, -1, -1, -1)
+        
+        transported = torch.matmul(maps_expanded, transformed.mT)
+        alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
+        return (alpha * transported).permute(1,0,2,3).contiguous()
+    
 class SheafResidualSANBlock(nn.Module):
     def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2):
         super().__init__()
@@ -266,14 +282,14 @@ class SheafResidualGAT(nn.Module):
 # it will be harder to not hard code some of this stuff
 class InitDynamicsEmbedding(MessagePassing):
     def __init__(self, output_dim, input_dim = 5, velocity_range = (0,3), num_timesteps=16):
-        super().__init__(aggr='mean')
+        super().__init__(aggr='mean', node_dim=0)
         self.output_dim = output_dim
         self.input_dim = input_dim
         self.velocity_range = velocity_range
         self.num_timesteps = num_timesteps
 
         self.mlp = nn.Sequential(
-            nn.Linear(9, 64), # TODO don't hard code this, tho it is super specific to the data
+            nn.Linear(10, 64), # TODO don't hard code this, tho it is super specific to the data
             nn.ReLU(),
             nn.Linear(64, output_dim)
         )
@@ -284,7 +300,8 @@ class InitDynamicsEmbedding(MessagePassing):
 
     def forward(self, x, pos, edge_index):
 
-        return self.propagate(edge_index, x=x, pos=pos).view(x,self.num_timesteps*self.output_dim)
+        agg = self.propagate(edge_index, x=x, pos=pos)
+        return self.project_features(agg.view(agg.shape[0],self.num_timesteps*self.output_dim))
 
     def message(self, x_i, x_j, pos_i, pos_j):
         relative_pos = pos_j - pos_i

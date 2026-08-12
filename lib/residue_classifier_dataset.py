@@ -41,8 +41,8 @@ def build_graph(coords, feats, labels, mask, length, epsilon=5.0, add_temporal_e
     edge_index = edge_index_from_distmat(dists, epsilon=epsilon, k=32)
     edge_attr = torch.zeros(edge_index.shape[1], 1)
 
-    if pos.size(0) > 1: # check that protein isn't a monomer
-        idx = torch.arange(pos.size(0) - 1)
+    if pos.shape[0] > 1: # check that protein isn't a monomer
+        idx = torch.arange(pos.shape[0] - 1)
         temporal = torch.stack([
             torch.cat([idx, idx + 1]),
             torch.cat([idx + 1, idx]),
