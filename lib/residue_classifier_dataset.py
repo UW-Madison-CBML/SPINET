@@ -151,6 +151,12 @@ class ResidueClassifierDataset(Dataset):
             out_data.lengths = lengths
             return out_data
 
-             
-            
+    @staticmethod   
+    def worker_init_fn(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+
+        worker_info = torch.utils.data.get_worker_info()
+        dataset = worker_info.dataset
+
+        dataset.rng = np.random.default_rng(seed=worker_seed)            
             

@@ -38,8 +38,13 @@ def train_residue_classifier():
     masking_ratio = 0.75
     ablate_sheaves=True
     seed=42
+    
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
-
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
@@ -110,7 +115,7 @@ def train_residue_classifier():
     artifact.add_file(os.path.abspath(__file__))
 
     dependencies = [ # TODO fix
-        "residue_model.py",
+        "invariant_features_sheaf_model.py",
         "residue_classifier_dataset.py",
         "sheaf_utils.py"
     ]
@@ -126,7 +131,7 @@ def train_residue_classifier():
     test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, fixed_length=16)
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
+    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
     test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:test_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
 
@@ -177,6 +182,7 @@ def train_residue_classifier():
         model.eval()
         val_losses = []
 
+        global_confusion_mat = torch.zeros((num_classes, num_classes))
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
                 batch = batch.to(DEVICE)
@@ -185,11 +191,41 @@ def train_residue_classifier():
 
                 pred_mask = batch.node_mask.bool()
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
+                logits = out_batch.x[pred_mask].cpu()
+                targets = out_batch.y[pred_mask].cpu()
 
                 val_losses.append(loss.item())
+                preds = logits.argmax(dim=-1)
+                batch_conf_mat = get_confusion_matrix(targets, preds, num_classes)
+                global_confusion_mat += batch_conf_mat
+
+        # Calculate metrics based on entire test set
+        diag = global_confusion_mat.diag()
+        recall = torch.nan_to_num(diag / global_confusion_mat.sum(dim=1), 0.0)
+        precision = torch.nan_to_num(diag / global_confusion_mat.sum(dim=0), 0.0)
+        f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
+
+        prf_dict = {}
+        for k, residue in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
+            prf_dict[f"val_{residue}_precision"] = precision[k].item()
+            prf_dict[f"val_{residue}_recall"] = recall[k].item()
+            prf_dict[f"val_{residue}_f1"] = f1[k].item()
+
+
+        fig, ax = plt.subplots(figsize=(12, 12))
+        disp = ConfusionMatrixDisplay(
+            confusion_matrix=global_confusion_mat.numpy().astype(int),
+            display_labels=ResidueClassifierDataset.AMINO_ACIDS
+        )
+        disp.plot(cmap='Blues', ax=ax, values_format='d')
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        plt.title("Val Set Confusion Matrix")
+
+        prf_dict["val_confusion_matrix"] = wandb.Image(fig)
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
-        run.log({"epoch_val_loss": avg_val_loss, "epoch": epoch})
+        run.log(prf_dict | {"epoch_val_loss": avg_val_loss, "epoch": epoch})
+
 
 
     # Final Test Evaluation
