@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax
 from torch.func import functional_call, vmap
-
+from torch.nn.utils.rnn import pack_padded_sequence
 # this model directly uses positions at MD timesteps instead of relative features
 # combines time-series positions with LSTM to node embedding
 # then learns sheaf over these embeddings and applies the Laplacian
@@ -92,11 +92,11 @@ class SheafAttentionConv(MessagePassing):
         self.dropout = dropout
         self.num_channels = self.hidden_dim // self.stalk_dim
 
-        self.W = nn.ModuleList(*[nn.Linear(self.stalk_dim, self.stalk_dim, bias=False) for _ in range(self.num_heads)])
+        self.W = nn.ModuleList([nn.Linear(self.stalk_dim, self.stalk_dim, bias=False) for _ in range(self.num_heads)])
         self.W_params = {
             "weight": torch.stack([layer.weight for layer in self.W]),
         }
-        self.att = nn.ModuleList(*[nn.Linear(2 * self.hidden_dim, 1, bias=False) for _ in range(self.num_heads)])
+        self.att = nn.ModuleList([nn.Linear(2 * self.hidden_dim, 1, bias=False) for _ in range(self.num_heads)])
         self.att_params = {
             "weight": torch.stack([layer.weight for layer in self.att]),
         }
