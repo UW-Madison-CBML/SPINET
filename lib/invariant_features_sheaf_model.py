@@ -7,7 +7,7 @@ from torch_geometric.nn import MessagePassing
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import softmax
+from torch_geometric.utils import softmax, sort_edge_index
 from torch.func import functional_call, vmap
 
 #-------------------------------------------------------
@@ -109,8 +109,8 @@ class SheafAttentionConv(MessagePassing):
         node_to_edge_maps = self.sheaf_learner(x, edge_index)
         
         # we need to get a map from the index of edge (a,b) to the index of edge (b,a) to learn the transport maps F_{b \unlhd e_{a,b}}^T @ F_{a \unlhd e_{a,b}} 
-        # edge_index comes in sorted so the above is in fact the map in binary that flips the 1's bit i.e. XOR 1
-        _, reverse_edge_indices = torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64) ^ 1 # this flips the last bit of the long, which is exactly the map to the opposite edge's position in the list since it comes in sorted
+        # edge_index comes in sorted so we sort again and keep track of the map by sorting an arange
+        _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
         edge_to_node_maps = maps[reverse_edge_indices].mT # get transpose as to "invert" the map
         
         transport_maps = torch.matmul(edge_to_node_maps, node_to_edge_maps) # now this is the sheaf generalization of the adjacency map 
