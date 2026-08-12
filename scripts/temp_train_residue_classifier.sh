@@ -11,5 +11,5 @@ export HF_TOKEN=$HF_KEY
 WANDB_KEY=$(tail -n 1 api_keys.txt)
 export WANDB_KEY=$WANDB_KEY
 
-python temp_train_residue_classifier.py
+python temp_train_residue_classifier.py "$@"
 

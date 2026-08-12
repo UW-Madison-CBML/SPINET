@@ -23,7 +23,7 @@ def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     return confusion_mat
 
 
-def train_residue_classifier():
+def train_residue_classifier(args_dict):
     # hyperparameters
     epsilon = 5.0 # in Angstroms
     learning_rate = 1e-3
@@ -36,7 +36,8 @@ def train_residue_classifier():
     num_blocks = 8
     num_heads = 8
     masking_ratio = 0.75
-    ablate_sheaves=True
+    ablate_sheaves=args_dict["ablate_sheaves"]
+    run_name = args_dict["run_name"]
     seed=42
     num_timesteps = 32
     
@@ -95,7 +96,7 @@ def train_residue_classifier():
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
         project="SheafProtein",
-        name="residue_classifier_training",
+        name=run_name,
         config={
             "epsilon": epsilon,
             "lr": learning_rate,
@@ -234,8 +235,6 @@ def train_residue_classifier():
 
 
 
-    # Final Test Evaluation
-    print("Training complete. Running final evaluation on Test Set...")
     model.eval()
 
     global_confusion_mat = torch.zeros((num_classes, num_classes), device=DEVICE)
@@ -264,7 +263,6 @@ def train_residue_classifier():
     avg_test_loss = sum(test_losses) / len(test_losses) if test_losses else 0
     run.log({"final_test_loss": avg_test_loss})
 
-    # Calculate metrics based on entire test set
     confusion_mat_cpu = global_confusion_mat.cpu()
     diag = confusion_mat_cpu.diag()
 
@@ -298,4 +296,11 @@ def train_residue_classifier():
     run.finish()
 
 if __name__ == "__main__":
-    train_residue_classifier()
+    import argparse 
+    parser = argparse.ArgumentParser(
+        prog='Train sheaf protein node residue classifier',
+        description='Trains sheaf node classifier to predict nodes') 
+    parser.add_argument('--run-name', type=str, default="residue_classifier")
+    parser.add_argument('--ablate_sheaves', action="store_true")
+    args = parser.parse_args()
+    train_residue_classifier(vars(args))

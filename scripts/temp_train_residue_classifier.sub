@@ -8,9 +8,7 @@ universe = docker
 #  commands) and arguments to be passed to jobs.
 #  $(Process) will be a integer number for each job, starting with "0"
 #  and increasing for the relevant number of jobs.
-shell = ./temp_train_residue_classifier.sh 
-#$(args)
-#$(ablation)
+shell = ./temp_train_residue_classifier.sh $(ablation)
 
 # Specify the name of the log, standard error, and standard output (or
 # "screen output") files. Wherever you see $(Cluster), HTCondor will insert the
@@ -29,17 +27,15 @@ transfer_input_files = temp_train_residue_classifier.sh, temp_train_residue_clas
 
 
 #+GPUModel = "NVIDIA H200"
-# Requirements (e.g., operating system) your job needs, what amount of
-# compute resources each job will need on the computer where it runs.
 request_cpus = 16
 request_memory = 128GB
 request_disk = 128GB
 request_gpus = 1
 
 #TODO add ablations
-#queue ablation from ablation.txt
+queue ablation from ablations.txt
 
-queue 1
+#queue 1
 #queue args from (
 
 #)
