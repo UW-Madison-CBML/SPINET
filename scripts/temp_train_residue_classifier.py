@@ -157,8 +157,9 @@ def train_residue_classifier():
 
     # -----------------------------------------
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
     crit = torch.nn.CrossEntropyLoss() # TODO replace this with a properly masked loss, if it exists
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
 
     # training loop
     for epoch in range(epochs):
@@ -181,6 +182,7 @@ def train_residue_classifier():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
 
         # Validation Check
         model.eval()
