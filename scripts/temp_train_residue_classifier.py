@@ -38,6 +38,7 @@ def train_residue_classifier():
     masking_ratio = 0.75
     ablate_sheaves=True
     seed=42
+    num_timesteps = 32
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -48,6 +49,7 @@ def train_residue_classifier():
 
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
+
     # CAUTION: this is based on the order of features defined in load_dynamics.py and is used to label the columns of the npy features file and is liable to change
     # ensure load_dynamics is correctly implemented w.r.t the below
     FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
@@ -106,7 +108,8 @@ def train_residue_classifier():
             "task":"predicting residues from motions",
             "ablate_sheaves":ablate_sheaves,
             "stalk_dim": stalk_dim,
-            "seed":seed
+            "seed":seed,
+            "trajectory_subsequence_timesteps":num_timesteps
         },
     )
 
@@ -126,9 +129,9 @@ def train_residue_classifier():
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon, fixed_length=16)
-    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, fixed_length=16)
-    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, fixed_length=16)
+    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
@@ -148,7 +151,8 @@ def train_residue_classifier():
         stalk_dim=stalk_dim,
         num_blocks=num_blocks,
         num_heads=num_heads,
-        ablate_sheaves=ablate_sheaves
+        ablate_sheaves=ablate_sheaves,
+        num_timesteps=num_timesteps 
     ).to(DEVICE)
 
     # -----------------------------------------

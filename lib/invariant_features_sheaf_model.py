@@ -13,27 +13,25 @@ from torch.func import functional_call, vmap
 #-------------------------------------------------------
 # sheaf learners
 
-class SheafLearnerLowRankNormal(nn.Module):
-    def __init__(self, in_channels: int, stalk_dim: int, rank: int):
+class SheafLearnerLowRank(nn.Module):
+    def __init__(self, input_dim: int, stalk_dim: int, rank: int):
         super().__init__()
         assert rank <= stalk_dim, "Rank 'r' cannot be greater than stalk dimension 'd'."
-        self.d = stalk_dim
-        self.r = rank
+        self.input_dim = input_dim
+        self.stalk_dim = stalk_dim
+        self.rank = rank
 
-        self.q_generator = nn.Linear(in_channels * 2, self.d * self.r)
-        self.scale_generator = nn.Linear(in_channels * 2, self.r)
+        self.lin = nn.Linear(self.input_dim * 2,self.input_dim * 2)
+        self.map_learner = nn.Linear(self.input_dim * 2, 2 * self.stalk_dim * self.rank)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
+    def forward(self, x, edge_index):
         row, col = edge_index
         edge_features = torch.cat([x[row], x[col]], dim=-1)
-        raw_Q = self.q_generator(edge_features).view(-1, self.d, self.r)
-        Q, R = torch.linalg.qr(raw_Q)
-        d_sign = torch.diagonal(R, dim1=-2, dim2=-1).sign().unsqueeze(-2)
-        Q = Q * d_sign
-        eigenvalues = torch.tanh(self.scale_generator(edge_features))
-        Sigma = torch.diag_embed(eigenvalues)
-        W = torch.matmul(Q, torch.matmul(Sigma, Q.transpose(-1, -2)))
-        return W
+        maps = self.map_learner(F.relu(self.lin(edge_features)))
+        left_maps = maps[:, :self.stalk_dim*self.rank].view(edge_index.shape[1], self.stalk_dim, self.rank)
+        right_maps = maps[:, self.stalk_dim*self.rank:].view(edge_index.shape[1], self.rank, self.stalk_dim)
+        return torch.matmul(left_maps, right_maps)
+         
 
 class SheafLearnerOrthogonal(nn.Module):
     def __init__(self, input_dim: int, stalk_dim: int):
@@ -62,7 +60,6 @@ class SheafLearner(nn.Module):
         self.stalk_dim = stalk_dim
         self.lin = nn.Linear(2*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
         self.map_learner = nn.Linear(2*self.stalk_dim, self.stalk_dim ** 2)
-        self.act = F.relu
 
     def forward(self, x, edge_index):
         row, col = edge_index
@@ -70,15 +67,12 @@ class SheafLearner(nn.Module):
         x_row = x[row]
         x_col = x[col]
 
-        maps = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+        maps = self.map_learner(F.relu(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
 
         return maps
 
 
 #-----------------------------------------------------------------------------------
-
-
-
 class SheafAttentionConv(MessagePassing):
     def __init__(self, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2):
         super().__init__(aggr='add', node_dim=0)
@@ -108,13 +102,22 @@ class SheafAttentionConv(MessagePassing):
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
 
-        self.sheaf_learner = SheafLearnerLowRankNormal(self.hidden_dim, self.stalk_dim, self.stalk_dim//2)
+        self.sheaf_learner = SheafLearnerLowRank(self.hidden_dim, self.stalk_dim, self.stalk_dim//2)
 
 
     def forward(self, x, edge_index):
-        maps = self.sheaf_learner(x, edge_index)
+        node_to_edge_maps = self.sheaf_learner(x, edge_index)
+        
+        # we need to get a map from the index of edge (a,b) to the index of edge (b,a) to learn the transport maps F_{b \unlhd e_{a,b}}^T @ F_{a \unlhd e_{a,b}} 
+        # edge_index comes in sorted so the above is in fact the map in binary that flips the 1's bit i.e. XOR 1
+        _, reverse_edge_indices = torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64) ^ 1 # this flips the last bit of the long, which is exactly the map to the opposite edge's position in the list since it comes in sorted
+        edge_to_node_maps = maps[reverse_edge_indices].mT # get transpose as to "invert" the map
+        
+        transport_maps = torch.matmul(edge_to_node_maps, node_to_edge_maps) # now this is the sheaf generalization of the adjacency map 
+
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
-        out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps)
+        
+        out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=transport_maps)
         return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
 
     def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
@@ -175,7 +178,7 @@ class MultiStalkLaplacian(nn.Module):
             [SheafLaplacian(stalk_dim) for _ in range(num_groups)]
         )
         self.learners = nn.ModuleList(
-            [SheafLearnerLowRankNormal(num_groups * stalk_dim, stalk_dim, stalk_dim // 2)
+            [SheafLearnerLowRank(num_groups * stalk_dim, stalk_dim, stalk_dim // 2)
              for _ in range(num_groups)]
         )
 
@@ -192,90 +195,6 @@ class MultiStalkLaplacian(nn.Module):
         return data
 
 
-class SheafLaplacian(nn.Module):
-    def __init__(self, stalk_dim: int):
-        super().__init__()
-        self.d = stalk_dim
-
-    def forward(self, data):
-        num_nodes = data.x.size(0)
-        device = data.x.device
-
-        row, col = data.edge_index
-        num_edges = data.edge_index.size(1)
-
-        w_t_w = torch.matmul(data.maps.transpose(-1, -2), data.maps)
-        off_diag_values = -w_t_w
-
-        grid_x, grid_y = torch.meshgrid(torch.arange(self.d, device=device), torch.arange(self.d, device=device), indexing='ij')
-
-        off_diag_rows = (col.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
-        off_diag_cols = (row.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
-        off_diag_indices = torch.stack([off_diag_rows, off_diag_cols], dim=0)
-        off_diag_flat_values = off_diag_values.flatten()
-
-        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
-        diag_values.index_add_(0, row, w_t_w)
-
-        node_indices = torch.arange(num_nodes, device=device)
-        diag_rows = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
-        diag_cols = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
-        diag_indices = torch.stack([diag_rows, diag_cols], dim=0)
-        diag_flat_values = diag_values.flatten()
-
-        all_indices = torch.cat([off_diag_indices, diag_indices], dim=1)
-        all_values = torch.cat([off_diag_flat_values, diag_flat_values], dim=0)
-        matrix_dim = num_nodes * self.d
-        L_F_sparse = torch.sparse_coo_tensor(all_indices, all_values, (matrix_dim, matrix_dim)).coalesce()
-        x_global = data.x.view(matrix_dim, 1)
-        laplacian_product = torch.sparse.mm(L_F_sparse, x_global)
-        out = x_global - laplacian_product
-        data.x = out.view(num_nodes, self.d)
-        return data
-
-
-class SheafResidualGATBlock(nn.Module):
-    def __init__(self, num_heads, hidden_dim, dropout=0.2, ablate_sheaves=False):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.dropout = dropout
-        self.ablate_sheaves = ablate_sheaves
-        self.num_heads = num_heads
-        if(not self.ablate_sheaves):
-            # 1 sheaf learner per block
-            self.sheaf_learner = SheafLearnerLowRankNormal(self.hidden_dim, self.hidden_dim, self.hidden_dim // 4) # alternatively SheafLearner(self.hidden_dim, self.hidden_dim)
-            self.apply_laplacian = SheafLaplacian(self.hidden_dim)
-        self.gat_block = GATConv(self.hidden_dim, self.hidden_dim, heads=self.num_heads, concat=False, dropout=self.dropout) # TODO check how this is implemented
-
-    def forward(self, data):
-        # in case of custom residual definition: skip = data.x
-        if(not self.ablate_sheaves):
-            data.maps = self.sheaf_learner(data.x, data.edge_index)
-
-        data.x = self.gat_block(data.x, data.edge_index)
-
-        if(not self.ablate_sheaves):
-            data = self.apply_laplacian(data)
-
-        return data
-
-
-
-class SheafResidualGAT(nn.Module):
-    def __init__(self, num_blocks, num_heads, hidden_dim, dropout=0.2, ablate_sheaves=False):
-        super().__init__()
-        self.num_blocks = num_blocks
-        self.num_heads = num_heads
-        self.hidden_dim = hidden_dim
-        self.dropout = dropout
-        self.ablate_sheaves = ablate_sheaves
-
-        self.blocks = nn.Sequential(
-            *[SheafResidualGATBlock(self.num_heads, self.hidden_dim, dropout=self.dropout, ablate_sheaves=self.ablate_sheaves) for _ in range(self.num_blocks)]
-        )
-
-    def forward(self, data):
-        return self.blocks(data)
 
 # ----------------------------------------------------------------------------------------------
 # this initial dynamics embedding will be the main thing we change when editing the input data
