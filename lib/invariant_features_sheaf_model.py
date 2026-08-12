@@ -108,7 +108,7 @@ class SheafAttentionConv(MessagePassing):
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
 
-        self.sheaf_learner = SheafLearner(self.hidden_dim, self.stalk_dim)
+        self.sheaf_learner = SheafLearnerLowRankNormal(self.hidden_dim, self.stalk_dim, self.stalk_dim//2)
 
 
     def forward(self, x, edge_index):
