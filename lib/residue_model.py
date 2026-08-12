@@ -93,11 +93,11 @@ class SheafAttentionConv(MessagePassing):
         self.dropout = dropout
         self.num_channels = self.hidden_dim // self.stalk_dim
 
-        self.W = nn.ModuleList(*[nn.Linear(self.stalk_dim, self.stalk_dim, bias=False) for _ in range(self.num_heads)])
+        self.W = nn.ModuleList([nn.Linear(self.stalk_dim, self.stalk_dim, bias=False) for _ in range(self.num_heads)])
         self.W_params = {
             "weight": torch.stack([layer.weight for layer in self.W]),
         }
-        self.att = nn.ModuleList(*[nn.Linear(2 * self.hidden_dim, 1, bias=False) for _ in range(self.num_heads)])
+        self.att = nn.ModuleList([nn.Linear(2 * self.hidden_dim, 1, bias=False) for _ in range(self.num_heads)])
         self.att_params = {
             "weight": torch.stack([layer.weight for layer in self.att]),
         }

@@ -55,7 +55,7 @@ def train_residue_classifier():
 
     features_np = np.load(os.path.join("md_data","atlas_index.npy"))
     # mask
-    df["mask"] = np_rng.random(len(df)) < masking_ratio
+    df["mask"] = np_rng.random(len(df)) > masking_ratio
 
     pdb_ids = df["pdb_id"].unique()
     num_pdbs = len(pdb_ids)
@@ -88,7 +88,7 @@ def train_residue_classifier():
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
         project="SheafProtein",
-        name="residue_classifier_training",
+        name="trajectory_based_residue_classifier_training",
         config={
             "epsilon": epsilon,
             "lr": learning_rate,
@@ -126,9 +126,9 @@ def train_residue_classifier():
     test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, variable_length=(20,50))
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False, collate_fn=train_dataset.graph_collate)
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False, collate_fn=val_dataset.graph_collate)
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=ResidueClassifierDataset.graph_collate, pin_memory=True, drop_last=False, collate_fn=test_dataset.graph_collate)
+    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, pin_memory=True, drop_last=False, collate_fn=train_dataset.graph_collate)
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, pin_memory=True, drop_last=False, collate_fn=val_dataset.graph_collate)
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, pin_memory=True, drop_last=False, collate_fn=test_dataset.graph_collate)
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
@@ -162,7 +162,7 @@ def train_residue_classifier():
 
             out_batch = model(batch)
 
-            pred_mask = batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
             loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
             run.log({"train_loss": loss.item(), "epoch": epoch})
@@ -175,19 +175,25 @@ def train_residue_classifier():
         model.eval()
         val_losses = []
 
+        global_confusion_mat = torch.zeros((num_classes, num_classes))
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
                 batch = batch.to(DEVICE)
                 batch = batch.sort() # for ConvGAT aggregation
                 out_batch = model(batch)
 
-                pred_mask = batch.node_mask.bool()
-                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
+                pred_mask = ~batch.node_mask.bool()
 
-                val_losses.append(loss.item())
-                preds = logits.argmax(dim=-1)
-                batch_conf_mat = get_confusion_matrix(targets, preds, num_classes)
+                val_logits = out_batch.x[pred_mask]
+                val_targets = out_batch.y[pred_mask]
+
+                val_loss = crit(val_logits, val_targets)
+                val_losses.append(val_loss.item())
+
+                preds = val_logits.argmax(dim=-1)
+                batch_conf_mat = get_confusion_matrix(val_targets, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
+
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         run.log({"epoch_val_loss": avg_val_loss, "epoch": epoch})
@@ -208,7 +214,7 @@ def train_residue_classifier():
 
             out_batch = model(batch)
 
-            pred_mask = batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
             test_logits = out_batch.x[pred_mask]
             test_targets = out_batch.y[pred_mask]
