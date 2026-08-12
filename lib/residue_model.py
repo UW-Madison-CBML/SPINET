@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax
 from torch.func import functional_call, vmap
+from torch.nn.utils.rnn import pack_padded_sequence
 
 # this model directly uses positions at MD timesteps instead of relative features
 # combines time-series positions with LSTM to node embedding
@@ -336,9 +337,14 @@ class NodeSheafAttentionClassifier(nn.Module):
         )
         
     def forward(self, data):
+
+        # expand from (batch_size,) to (total_nodes,)
+        # LSTM treats every node as a sequence
+        node_seq_lengths = data.length[data.batch]
+
         # take in batch of graph trajectories
         # embed based on time-series trajectories per node
-        data.x = self.dynamics_trajectory_embedding(data.x, data.seq_lengths)
+        data.x = self.dynamics_trajectory_embedding(data.x, node_seq_lengths)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
