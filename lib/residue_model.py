@@ -18,6 +18,69 @@ from torch.nn.utils.rnn import pack_padded_sequence
 #-------------------------------------------------------
 # sheaf learners
 
+class NormalizedBlockLaplacian(nn.Module):
+    def __init__(self, stalk_dim: int, eps: float = 1e-5):
+        """
+        Build symmetrically normalized block Laplacian 
+        from the restriction maps of any sheaf learner.
+        """
+        super().__init__()
+        self.d = stalk_dim
+        self.eps = eps
+
+    def forward(self, maps: torch.Tensor, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+        device = maps.device
+        row, col = edge_index
+        
+        # A_uv = W^T W (The off-diagonal blocks before normalization)
+        w_t_w = torch.matmul(maps.transpose(-1, -2), maps)
+        
+        # 1. Compute Degree matrices D_v
+        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
+        diag_values.index_add_(0, row, w_t_w)
+        
+        # 2. Compute D^{-1/2} block-wise via eigendecomposition
+        I = torch.eye(self.d, device=device).unsqueeze(0)
+        D_reg = diag_values + self.eps * I
+        
+        eigenvalues, eigenvectors = torch.linalg.eigh(D_reg)
+        eigenvalues = torch.clamp(eigenvalues, min=self.eps)
+        inv_sqrt_eigenvalues = torch.diag_embed(1.0 / torch.sqrt(eigenvalues))
+        D_inv_sqrt = eigenvectors @ inv_sqrt_eigenvalues @ eigenvectors.transpose(-1, -2)
+        
+        # 3. Normalize off-diagonal blocks: -D_v^{-1/2} A_uv D_u^{-1/2}
+        off_diag_values = -torch.bmm(D_inv_sqrt[col], torch.bmm(w_t_w, D_inv_sqrt[row]))
+        norm_diag_values = I.repeat(num_nodes, 1, 1)
+
+        # 4. Construct Sparse Matrix Indices
+        grid_x, grid_y = torch.meshgrid(
+            torch.arange(self.d, device=device), 
+            torch.arange(self.d, device=device), 
+            indexing='ij'
+        )
+        
+        # Off-diagonal indices
+        off_diag_rows = (col.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
+        off_diag_cols = (row.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
+        off_diag_indices = torch.stack([off_diag_rows, off_diag_cols], dim=0)
+
+        # Diagonal indices
+        node_indices = torch.arange(num_nodes, device=device)
+        diag_rows = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
+        diag_cols = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
+        diag_indices = torch.stack([diag_rows, diag_cols], dim=0)
+
+        # 5. Assemble Sparse Tensor
+        all_indices = torch.cat([off_diag_indices, diag_indices], dim=1)
+        all_values = torch.cat([off_diag_values.flatten(), norm_diag_values.flatten()], dim=0)
+        matrix_dim = num_nodes * self.d
+        
+        L_sym_sparse = torch.sparse_coo_tensor(
+            all_indices, all_values, (matrix_dim, matrix_dim)
+        ).coalesce()
+        
+        return L_sym_sparse
+
 class SheafLearnerLowRankNormal(nn.Module):
     def __init__(self, in_channels: int, stalk_dim: int, rank: int):
         super().__init__()
@@ -63,9 +126,8 @@ class SheafLearnerOrthogonal(nn.Module):
         return maps
 
 class SheafLearner(nn.Module):
-    def __init__(self, input_dim:int, stalk_dim:int):
+    def __init__(self, stalk_dim:int):
         super().__init__()
-        self.input_dim = input_dim
         self.stalk_dim = stalk_dim
 
         self.lin = nn.Linear(2*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
@@ -202,37 +264,73 @@ class SheafLaplacian(nn.Module):
         device = data.x.device
         
         row, col = data.edge_index
-        num_edges = data.edge_index.size(1)
         
+        # A_uv = W^T W
         w_t_w = torch.matmul(data.maps.transpose(-1, -2), data.maps)
-        off_diag_values = -w_t_w
         
-        grid_x, grid_y = torch.meshgrid(torch.arange(self.d, device=device), torch.arange(self.d, device=device), indexing='ij')
+        # Compute unnormalized diagonal blocks (Degree matrices D_v)
+        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
+        diag_values.index_add_(0, row, w_t_w)
         
+        # Compute D^{-1/2} using Eigendecomposition
+        # Add epsilon to the diagonal to ensure strict positive-definiteness
+        eps = 1e-5
+        I = torch.eye(self.d, device=device).unsqueeze(0)
+        D_reg = diag_values + eps * I
+        
+        # Symmetric matrix eigendecomposition
+        eigenvalues, eigenvectors = torch.linalg.eigh(D_reg)
+        
+        # Clamp eigenvalues to prevent NaNs during sqrt if any edge weights hit 0
+        eigenvalues = torch.clamp(eigenvalues, min=eps)
+        inv_sqrt_eigenvalues = torch.diag_embed(1.0 / torch.sqrt(eigenvalues))
+        
+        # Reconstruct D^{-1/2} = V * L^{-1/2} * V^T
+        D_inv_sqrt = eigenvectors @ inv_sqrt_eigenvalues @ eigenvectors.transpose(-1, -2)
+        
+        # Normalize off-diagonal blocks: -D_v^{-1/2} A_uv D_u^{-1/2}
+        # PyG edge_index [row, col] puts the block at matrix position [col, row]
+        # So we left-multiply by D_inv_sqrt[col] and right-multiply by D_inv_sqrt[row]
+        off_diag_values = -torch.bmm(D_inv_sqrt[col], torch.bmm(w_t_w, D_inv_sqrt[row]))
+        
+        # Normalized diagonal blocks become Identity matrices
+        norm_diag_values = I.repeat(num_nodes, 1, 1)
+
+        grid_x, grid_y = torch.meshgrid(
+            torch.arange(self.d, device=device), 
+            torch.arange(self.d, device=device), 
+            indexing='ij'
+        )
+        
+        # Off-diagonal indices
         off_diag_rows = (col.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
         off_diag_cols = (row.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
         off_diag_indices = torch.stack([off_diag_rows, off_diag_cols], dim=0)
         off_diag_flat_values = off_diag_values.flatten()
 
-        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
-        diag_values.index_add_(0, row, w_t_w)
-        
+        # Diagonal indices
         node_indices = torch.arange(num_nodes, device=device)
         diag_rows = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
         diag_cols = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
         diag_indices = torch.stack([diag_rows, diag_cols], dim=0)
-        diag_flat_values = diag_values.flatten()
+        diag_flat_values = norm_diag_values.flatten()
 
+        # Build Sparse L_sym
         all_indices = torch.cat([off_diag_indices, diag_indices], dim=1)
         all_values = torch.cat([off_diag_flat_values, diag_flat_values], dim=0)
         matrix_dim = num_nodes * self.d
-        L_F_sparse = torch.sparse_coo_tensor(all_indices, all_values, (matrix_dim, matrix_dim)).coalesce()
+        
+        L_sym_sparse = torch.sparse_coo_tensor(all_indices, all_values, (matrix_dim, matrix_dim)).coalesce()
+        
+        # Apply the graph diffusion step
         x_global = data.x.view(matrix_dim, 1)
-        laplacian_product = torch.sparse.mm(L_F_sparse, x_global)
+        laplacian_product = torch.sparse.mm(L_sym_sparse, x_global)
+        
+        # out = X - L_sym * X
         out = x_global - laplacian_product
         data.x = out.view(num_nodes, self.d)
+        
         return data
-
 
 class SheafResidualGATBlock(nn.Module):  
     def __init__(self, num_heads, hidden_dim, dropout=0.2, ablate_sheaves=False):
