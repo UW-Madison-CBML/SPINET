@@ -30,7 +30,7 @@ def train_residue_classifier(args_dict):
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 16
+    batch_size = 32
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 8

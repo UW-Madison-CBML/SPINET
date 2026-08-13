@@ -41,15 +41,15 @@ class SheafLearnerOrthogonal(nn.Module):
         self.stalk_dim = stalk_dim
 
         self.lin = nn.Linear(self.input_dim * 2, self.input_dim)
-        self.triu_learner = nn.Linear(self.input_dim, ((self.stalk_dim-1) * (self.stalk_dim-2) )// 2)
+        self.triu_learner = nn.Linear(self.input_dim, ((self.stalk_dim-1) * (self.stalk_dim) )// 2)
+
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
         row, col = edge_index
         edge_features = torch.cat([x[row], x[col]], dim=-1)
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
-        print(upper_tri.shape)
+
         maps = torch.zeros((edge_index.shape[1], self.stalk_dim, self.stalk_dim), device=x.device)
-        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim,  1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
-        print(upper_indices.shape)
+        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim,  offset=1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
         # put upper triangle values in
         batch_idx = torch.arange(edge_index.shape[1], device=x.device).unsqueeze(1)
         maps[batch_idx, upper_indices[0], upper_indices[1]] = upper_tri
@@ -157,7 +157,7 @@ class SheafAttentionConv(MessagePassing):
         att_params = {"weight": self.att_weights}
         
         edge_features = torch.cat([x_i, x_j], dim=-1) 
-        edge_features_batched = edge_features[None,:,:,:].expand(self.num_heads,-1, -1, -1) 
+        edge_features_batched = edge_features[None,None,:,:].expand(self.num_heads,-1,-1, -1) 
         
         x_stalk_j_batched = x_stalk_j[None,:,:,:].expand(self.num_heads,-1, -1, -1)
 
