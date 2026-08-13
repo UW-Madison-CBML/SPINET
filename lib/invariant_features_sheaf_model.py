@@ -42,6 +42,7 @@ class SheafLearnerOrthogonal(nn.Module):
 
         self.lin = nn.Linear(self.input_dim * 2, self.input_dim)
         self.triu_learner = nn.Linear(self.input_dim, ((self.stalk_dim-1) * (self.stalk_dim) )// 2)
+        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim,  offset=1)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
         row, col = edge_index
@@ -49,7 +50,7 @@ class SheafLearnerOrthogonal(nn.Module):
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
 
         maps = torch.zeros((edge_index.shape[1], self.stalk_dim, self.stalk_dim), device=x.device)
-        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim,  offset=1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
+        
         # put upper triangle values in
         batch_idx = torch.arange(edge_index.shape[1], device=x.device).unsqueeze(1)
         maps[batch_idx, upper_indices[0], upper_indices[1]] = upper_tri
@@ -264,11 +265,7 @@ class InitDynamicsEmbedding(MessagePassing):
         d_pos_i_angle = F.cosine_similarity(prev_pos_j - prev_pos_i, d_pos_i, dim=-1).unsqueeze(-1)
         relative_velocity_angle = F.cosine_similarity(d_pos_i, d_pos_j, dim=-1).unsqueeze(-1)
 
-        dynamics_features = torch.cat([
-            dist, speed_i, speed_j,
-            non_vel_features_x_i, non_vel_features_x_j,
-            d_pos_i_angle, d_pos_j_angle, relative_velocity_angle
-        ], dim=-1)
+        dynamics_features = torch.cat([ dist, speed_i, speed_j,non_vel_features_x_i, non_vel_features_x_j,d_pos_i_angle, d_pos_j_angle, relative_velocity_angle], dim=-1)
 
         return self.mlp(dynamics_features)
 
@@ -306,7 +303,6 @@ class NodeSheafClassifier(nn.Module):
 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
-        #self.sheaf_residual_gat = SheafResidualGAT(self.num_blocks, self.num_heads, self.hidden_dim, self.stalk_dim, dropout=self.gat_dropout, ablate_sheaves=self.ablate_sheaves)
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type)
 
         self.classifier = nn.Sequential(
