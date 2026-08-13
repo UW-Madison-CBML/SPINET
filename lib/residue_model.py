@@ -309,7 +309,7 @@ class DynamicsTrajectoryEmbedding(nn.Module):
 # -------------------------------------------------------------------------------------------
 
 class NodeSheafAttentionClassifier(nn.Module):  
-    def __init__(self, input_size, num_classes=22, hidden_dim=64, stalk_dim=16, num_lstm_layers=1, num_blocks=8, num_heads=8, ablate_sheaves=False, gat_dropout=0.2, classifier_dropout=0.2):
+    def __init__(self, input_size, num_classes=20, hidden_dim=64, stalk_dim=16, num_lstm_layers=1, num_blocks=8, num_heads=8, ablate_sheaves=False, gat_dropout=0.2, classifier_dropout=0.2):
         super().__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"

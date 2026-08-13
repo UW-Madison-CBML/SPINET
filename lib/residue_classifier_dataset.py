@@ -36,7 +36,11 @@ def build_graph(coords, feats, labels, mask, length, epsilon=5.0, add_temporal_e
     node_mask = torch.as_tensor(mask, dtype=torch.bool)
     length = torch.as_tensor(length, dtype=torch.long)
 
-    dists = torch.cdist(pos, pos, p=2.0).amin(dim=0) # min so that any two nodes that are ever connected will have an direct edge
+    pos_time_first = pos.transpose(0, 1)
+
+    dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
+
+    dists = dists_over_time.amin(dim=0)
 
     edge_index = edge_index_from_distmat(dists, epsilon=epsilon, k=32)
     edge_attr = torch.zeros(edge_index.shape[1], 1)
