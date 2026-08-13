@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax, sort_edge_index
 from torch.func import functional_call, vmap
+from torch.nn.utils.parametrizations import orthogonal
 
 #-------------------------------------------------------
 # sheaf learners
@@ -40,17 +41,36 @@ class SheafLearnerOrthogonal(nn.Module):
         self.stalk_dim = stalk_dim
 
         self.lin = nn.Linear(self.input_dim * 2, self.input_dim)
-        self.triu_learner = nn.Linear(self.input_dim, (self.stalk_dim * (self.stalk_dim-1) )// 2)
+        self.triu_learner = nn.Linear(self.input_dim, ((self.stalk_dim-1) * (self.stalk_dim-2) )// 2)
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
         row, col = edge_index
         edge_features = torch.cat([x[row], x[col]], dim=-1)
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
-        maps = torch.zeroes((len(edge_index), self.stalk_dim, self.stalk_dim), device=x.device)
-        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim, 1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
-        lower_indices = torch.tril_indices(self.stalk_dim, self.stalk_dim, -1, device=x.device)
-        maps[:, upper_indices] = upper_tri
-        maps[:, lower_indices] = -1 * upper_tri
-        maps = torch.linalg.matrix_exp(maps) # this forces it into SO(n) for whatever reason
+        print(upper_tri.shape)
+        maps = torch.zeros((edge_index.shape[1], self.stalk_dim, self.stalk_dim), device=x.device)
+        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim,  1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
+        print(upper_indices.shape)
+        # put upper triangle values in
+        batch_idx = torch.arange(edge_index.shape[1], device=x.device).unsqueeze(1)
+        maps[batch_idx, upper_indices[0], upper_indices[1]] = upper_tri
+
+        # make them skew symmetric
+        maps = maps - maps.mT
+
+        # we need to scale maps or else the Neumann series will blow up
+        # \|M\|_2 (i.e. p=2 spectral norm) <= \|M\|_F
+        fro_norm = torch.linalg.norm(maps, ord='fro', dim=(1,2), keepdim=True)
+        scale = torch.clamp(fro_norm / 0.9, min=1.0)
+        maps = maps / scale
+
+        # output needs to be (I - M)(I + M)^-1
+        I = torch.eye(self.stalk_dim, device=maps.device)
+
+        # now we use a short Neumann series approximation (I + M = I - (-M))
+        left_mat = I - maps
+        maps_squared = torch.matmul(maps, maps)
+        maps = torch.matmul(left_mat, left_mat + maps_squared - torch.matmul(maps, maps_squared))
+        
         return maps
 
 class SheafLearner(nn.Module):
@@ -74,7 +94,7 @@ class SheafLearner(nn.Module):
 
 #-----------------------------------------------------------------------------------
 class SheafAttentionConv(MessagePassing):
-    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False):
+    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank"):
         super().__init__(aggr='add', node_dim=0)
         self.hidden_dim = hidden_dim
         self.stalk_dim = stalk_dim
@@ -82,6 +102,7 @@ class SheafAttentionConv(MessagePassing):
         self.dropout = dropout
         self.num_channels = self.hidden_dim // self.stalk_dim
         self.ablate_sheaves = ablate_sheaves
+        self.restriction_map_type=restriction_map_type
 
         self.W_weights = nn.Parameter(torch.empty(self.num_heads, self.stalk_dim, self.stalk_dim))
         self.att_weights = nn.Parameter(torch.empty(self.num_heads, 1, 2 * self.hidden_dim))
@@ -103,7 +124,14 @@ class SheafAttentionConv(MessagePassing):
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
         if not self.ablate_sheaves:
-            self.sheaf_learner = SheafLearnerLowRank(self.hidden_dim, self.stalk_dim, self.stalk_dim//2)
+            if self.restriction_map_type == "low_rank":
+                self.sheaf_learner = SheafLearnerLowRank(self.hidden_dim, self.stalk_dim, self.stalk_dim//2)
+            elif self.restriction_map_type == "orthogonal":
+                self.sheaf_learner = SheafLearnerOrthogonal(self.hidden_dim, self.stalk_dim)
+            else:
+                self.sheaf_learner = SheafLearner(self.hidden_dim, self.stalk_dim)
+                
+
 
 
     def forward(self, x, edge_index):
@@ -117,7 +145,7 @@ class SheafAttentionConv(MessagePassing):
             transport_maps = torch.matmul(edge_to_node_maps, node_to_edge_maps) # now this is the sheaf generalization of the adjacency map written A_\mathcal{F}
         else:
             # set transport maps to identity to ablate sheaves
-            transport_maps = torch.eye(self.stalk_dim, device=x.device)[None, :, :].repeat(edge_index.shape[1], 1, 1)
+            transport_maps = torch.eye(self.stalk_dim, device=x.device)[None, :, :].expand(edge_index.shape[1], -1, -1)
 
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
         
@@ -129,9 +157,9 @@ class SheafAttentionConv(MessagePassing):
         att_params = {"weight": self.att_weights}
         
         edge_features = torch.cat([x_i, x_j], dim=-1) 
-        edge_features_batched = edge_features.unsqueeze(0).expand(self.num_heads,-1, -1, -1) 
+        edge_features_batched = edge_features[None,:,:,:].expand(self.num_heads,-1, -1, -1) 
         
-        x_stalk_j_batched = x_stalk_j.unsqueeze(0).expand(self.num_heads,-1, -1, -1)
+        x_stalk_j_batched = x_stalk_j[None,:,:,:].expand(self.num_heads,-1, -1, -1)
 
         alpha = self.leaky(self.apply_att(att_params, edge_features_batched))
         
@@ -139,24 +167,25 @@ class SheafAttentionConv(MessagePassing):
         
         alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2) 
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-
-        maps_expanded = maps.unsqueeze(0).expand(self.num_heads, -1, -1, -1)
-        
-        transported = torch.matmul(maps_expanded, transformed.mT)
+        if not self.ablate_sheaves: 
+            maps_expanded = maps[None,:,:,:].expand(self.num_heads, -1, -1, -1)
+            transported = torch.matmul(maps_expanded, transformed.mT)
+        else: 
+            transported = transformed
         alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
         return (alpha * transported).permute(1,0,2,3).contiguous()
     
 class SheafResidualSANBlock(nn.Module):
-    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2, ablate_sheaves=False):
+    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank"):
         super().__init__()
         self.ablate_sheaves = ablate_sheaves
         self.hidden_dim = hidden_dim
         self.stalk_dim = stalk_dim
         self.num_heads = num_heads
         self.dropout = dropout
+        self.restriction_map_type=restriction_map_type
 
-
-        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=ablate_sheaves)
+        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=ablate_sheaves, restriction_map_type=self.restriction_map_type)
         self.norm = nn.LayerNorm(self.hidden_dim)
         self.act = nn.ReLU()
 
@@ -169,7 +198,7 @@ class SheafResidualSANBlock(nn.Module):
 
 
 class SheafResidualSAN(nn.Module):
-    def __init__(self, num_blocks: int, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False):
+    def __init__(self, num_blocks: int, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank"):
         super().__init__()
         self.num_blocks = num_blocks
         self.ablate_sheaves=ablate_sheaves
@@ -177,8 +206,9 @@ class SheafResidualSAN(nn.Module):
         self.stalk_dim = stalk_dim
         self.num_heads = num_heads
         self.dropout = dropout
+        self.restriction_map_type=restriction_map_type
         self.blocks = nn.ModuleList([
-            SheafResidualSANBlock(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=self.ablate_sheaves) for _ in range(num_blocks)
+            SheafResidualSANBlock(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type) for _ in range(num_blocks)
         ])
 
     def forward(self, data):
@@ -250,7 +280,7 @@ class InitDynamicsEmbedding(MessagePassing):
 
 
 class NodeSheafClassifier(nn.Module):
-    def __init__(self, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2):
+    def __init__(self, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank"):
         super().__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -265,6 +295,7 @@ class NodeSheafClassifier(nn.Module):
         self.ablate_sheaves = ablate_sheaves
         self.gat_dropout = gat_dropout
         self.classifier_dropout = classifier_dropout
+        self.restriction_map_type=restriction_map_type
 
         self.init_dynamics_embedding = InitDynamicsEmbedding(
             hidden_dim,
@@ -276,7 +307,7 @@ class NodeSheafClassifier(nn.Module):
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
         #self.sheaf_residual_gat = SheafResidualGAT(self.num_blocks, self.num_heads, self.hidden_dim, self.stalk_dim, dropout=self.gat_dropout, ablate_sheaves=self.ablate_sheaves)
-        self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves)
+        self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type)
 
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_dim, 2 * self.hidden_dim),
@@ -295,8 +326,7 @@ class NodeSheafClassifier(nn.Module):
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
 
-        # run sheaf gat residual blocks
-        #data = self.sheaf_residual_gat(data)
+        # run sheaf attention
         data = self.san(data)
 
         data.x = self.classifier(data.x) # classify nodes

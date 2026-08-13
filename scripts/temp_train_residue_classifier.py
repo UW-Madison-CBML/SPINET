@@ -30,7 +30,7 @@ def train_residue_classifier(args_dict):
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 32
+    batch_size = 16
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 8
@@ -38,6 +38,7 @@ def train_residue_classifier(args_dict):
     masking_ratio = 0.75
     ablate_sheaves=args_dict["ablate_sheaves"]
     run_name = args_dict["run_name"]
+    restriction_map_type=args_dict["restriction_map_type"]
     seed=42
     num_timesteps = 32
     use_scheduler=False
@@ -113,7 +114,8 @@ def train_residue_classifier(args_dict):
             "seed":seed,
             "trajectory_subsequence_timesteps":num_timesteps,
             "use_scheduler":use_scheduler,
-            "scheduler_type":"cosine annealing warm restarts every epoch"
+            "scheduler_type":"cosine annealing warm restarts every epoch" if use_scheduler else "none",
+            "restriction_map_type":restriction_map_type
         },
     )
 
@@ -156,7 +158,8 @@ def train_residue_classifier(args_dict):
         num_blocks=num_blocks,
         num_heads=num_heads,
         ablate_sheaves=ablate_sheaves,
-        num_timesteps=num_timesteps 
+        num_timesteps=num_timesteps,
+        restriction_map_type=restriction_map_type
     ).to(DEVICE)
 
     # -----------------------------------------
@@ -174,7 +177,7 @@ def train_residue_classifier(args_dict):
         for batch in pbar:
             batch = batch.to(DEVICE)
 
-            batch = batch.sort() # for ConvGAT aggregation
+            batch = batch.sort()
             optimizer.zero_grad()
 
             out_batch = model(batch)
@@ -198,7 +201,7 @@ def train_residue_classifier(args_dict):
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
                 batch = batch.to(DEVICE)
-                batch = batch.sort() # for ConvGAT aggregation
+                batch = batch.sort() 
                 out_batch = model(batch)
 
                 pred_mask = ~batch.node_mask.bool()
@@ -211,7 +214,7 @@ def train_residue_classifier(args_dict):
                 batch_conf_mat = get_confusion_matrix(targets, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
 
-        # Calculate metrics based on entire test set
+        
         diag = global_confusion_mat.diag()
         recall = torch.nan_to_num(diag / global_confusion_mat.sum(dim=1), 0.0)
         precision = torch.nan_to_num(diag / global_confusion_mat.sum(dim=0), 0.0)
@@ -307,5 +310,6 @@ if __name__ == "__main__":
         description='Trains sheaf node classifier to predict nodes') 
     parser.add_argument('--run-name', type=str, default="residue_classifier")
     parser.add_argument('--ablate-sheaves', action="store_true")
+    parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
     args = parser.parse_args()
     train_residue_classifier(vars(args))
