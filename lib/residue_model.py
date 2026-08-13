@@ -120,7 +120,7 @@ class SheafLearnerOrthogonal(nn.Module):
         upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim, 1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
         lower_indices = torch.tril_indices(self.stalk_dim, self.stalk_dim, -1, device=x.device)
         maps[:, upper_indices[0], upper_indices[1]] = upper_tri
-        maps[:, lower_indices[0], upper_indices[1]] = -1 * upper_tri
+        maps[:, lower_indices[0], lower_indices[1]] = -1 * upper_tri
 
         maps = torch.linalg.matrix_exp(maps) # this forces it into SO(n) for whatever reason
         return maps
@@ -460,7 +460,7 @@ class NodeSheafAttentionClassifier(nn.Module):
         safe_y = torch.clamp(data.y, 0, self.num_classes - 1)
 
         # add the residue label embedding to unmasked nodes
-        data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
+        data.x = data.x + self.label_embedding(safe_y) * data.node_mask[:,None]
 
         # run sheaf gat residual blocks
         #data = self.sheaf_residual_gat(data)
