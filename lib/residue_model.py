@@ -95,13 +95,13 @@ class SheafAttentionConv(MessagePassing):
         self.num_channels = self.hidden_dim // self.stalk_dim
 
         self.W = nn.ModuleList([nn.Linear(self.stalk_dim, self.stalk_dim, bias=False) for _ in range(self.num_heads)])
-        self.W_params = {
-            "weight": torch.stack([layer.weight for layer in self.W]),
-        }
+        #self.W_params = {
+            #"weight": torch.stack([layer.weight for layer in self.W]),
+        #}
         self.att = nn.ModuleList([nn.Linear(2 * self.hidden_dim, 1, bias=False) for _ in range(self.num_heads)])
-        self.att_params = {
-            "weight": torch.stack([layer.weight for layer in self.att]),
-        }
+        #self.att_params = {
+            #"weight": torch.stack([layer.weight for layer in self.att]),
+        #}
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
 
@@ -120,14 +120,17 @@ class SheafAttentionConv(MessagePassing):
 
     def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
 
-        alpha = self.leaky(self.apply_att(self.att_params["weight"], torch.cat([x_i, x_j], dim=-1))) # num_heads, num_edges, 1?
+        att_weights = torch.stack([layer.weight for layer in self.att])
+        alpha = self.leaky(self.apply_att(att_weights, torch.cat([x_i, x_j], dim=-1))) # num_heads, num_edges, 1?
 
         alpha = alpha.transpose(0, 1)
         
         alpha = softmax(alpha, index, ptr, size_i)                  
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
-        transformed = self.apply_W(self.W_params["weight"], x_stalk_j) # num_heads, num_edges, num_channels, stalk_dim
+        W_weights = torch.stack([layer.weight for layer in self.W])
+
+        transformed = self.apply_W(W_weights, x_stalk_j) # num_heads, num_edges, num_channels, stalk_dim
 
         transported = torch.einsum('eab, hexb -> ehxa', maps, transformed)
 
