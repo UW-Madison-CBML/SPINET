@@ -356,6 +356,9 @@ class NodeSheafAttentionClassifier(nn.Module):
         # input data.pos for trajectories instead of data.x
         data.x = self.dynamics_trajectory_embedding(data.pos, node_seq_lengths)
 
+        # clamp y to valid indices
+        safe_y = torch.clamp(data.y, 0, self.num_classes - 1)
+
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
 
