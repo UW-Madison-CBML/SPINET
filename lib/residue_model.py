@@ -18,6 +18,69 @@ from torch.nn.utils.rnn import pack_padded_sequence
 #-------------------------------------------------------
 # sheaf learners
 
+class NormalizedBlockLaplacian(nn.Module):
+    def __init__(self, stalk_dim: int, eps: float = 1e-5):
+        """
+        Build symmetrically normalized block Laplacian 
+        from the restriction maps of any sheaf learner.
+        """
+        super().__init__()
+        self.d = stalk_dim
+        self.eps = eps
+
+    def forward(self, maps: torch.Tensor, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+        device = maps.device
+        row, col = edge_index
+        
+        # A_uv = W^T W (The off-diagonal blocks before normalization)
+        w_t_w = torch.matmul(maps.transpose(-1, -2), maps)
+        
+        # 1. Compute Degree matrices D_v
+        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
+        diag_values.index_add_(0, row, w_t_w)
+        
+        # 2. Compute D^{-1/2} block-wise via eigendecomposition
+        I = torch.eye(self.d, device=device).unsqueeze(0)
+        D_reg = diag_values + self.eps * I
+        
+        eigenvalues, eigenvectors = torch.linalg.eigh(D_reg)
+        eigenvalues = torch.clamp(eigenvalues, min=self.eps)
+        inv_sqrt_eigenvalues = torch.diag_embed(1.0 / torch.sqrt(eigenvalues))
+        D_inv_sqrt = eigenvectors @ inv_sqrt_eigenvalues @ eigenvectors.transpose(-1, -2)
+        
+        # 3. Normalize off-diagonal blocks: -D_v^{-1/2} A_uv D_u^{-1/2}
+        off_diag_values = -torch.bmm(D_inv_sqrt[col], torch.bmm(w_t_w, D_inv_sqrt[row]))
+        norm_diag_values = I.repeat(num_nodes, 1, 1)
+
+        # 4. Construct Sparse Matrix Indices
+        grid_x, grid_y = torch.meshgrid(
+            torch.arange(self.d, device=device), 
+            torch.arange(self.d, device=device), 
+            indexing='ij'
+        )
+        
+        # Off-diagonal indices
+        off_diag_rows = (col.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
+        off_diag_cols = (row.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
+        off_diag_indices = torch.stack([off_diag_rows, off_diag_cols], dim=0)
+
+        # Diagonal indices
+        node_indices = torch.arange(num_nodes, device=device)
+        diag_rows = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
+        diag_cols = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
+        diag_indices = torch.stack([diag_rows, diag_cols], dim=0)
+
+        # 5. Assemble Sparse Tensor
+        all_indices = torch.cat([off_diag_indices, diag_indices], dim=1)
+        all_values = torch.cat([off_diag_values.flatten(), norm_diag_values.flatten()], dim=0)
+        matrix_dim = num_nodes * self.d
+        
+        L_sym_sparse = torch.sparse_coo_tensor(
+            all_indices, all_values, (matrix_dim, matrix_dim)
+        ).coalesce()
+        
+        return L_sym_sparse
+
 class SheafLearnerLowRankNormal(nn.Module):
     def __init__(self, in_channels: int, stalk_dim: int, rank: int):
         super().__init__()
@@ -50,22 +113,24 @@ class SheafLearnerOrthogonal(nn.Module):
         self.triu_learner = nn.Linear(self.input_dim, (self.stalk_dim * (self.stalk_dim-1) )// 2)
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
         row, col = edge_index
+        num_edges = edge_index.size(1)
         edge_features = torch.cat([x[row], x[col]], dim=-1)
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
-        maps = torch.zeros((len(edge_index), self.stalk_dim, self.stalk_dim), device=x.device) 
+        maps = torch.zeros((num_edges, self.stalk_dim, self.stalk_dim), device=x.device) 
         upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim, 1, device=x.device)# [None,:,:].repeat(len(edge_index), 1, 1)
         lower_indices = torch.tril_indices(self.stalk_dim, self.stalk_dim, -1, device=x.device)
-        maps[:, upper_indices] = upper_tri
-        maps[:, lower_indices] = -1 * upper_tri
+        maps[:, upper_indices[0], upper_indices[1]] = upper_tri
+        maps[:, lower_indices[0], upper_indices[1]] = -1 * upper_tri
+
         maps = torch.linalg.matrix_exp(maps) # this forces it into SO(n) for whatever reason
         return maps
 
 class SheafLearner(nn.Module):
-    def __init__(self, input_dim:int, stalk_dim:int):
+    def __init__(self, stalk_dim:int):
         super().__init__()
-        self.input_dim = input_dim
         self.stalk_dim = stalk_dim
-        self.lin = nn.Linear(2*self.stalk_dim, 2*self.stalk_dim) # TODO is this too much?
+
+        self.lin = nn.Linear(2*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
         self.map_learner = nn.Linear(2*self.stalk_dim, self.stalk_dim ** 2)
         self.act = F.relu
 
@@ -75,7 +140,7 @@ class SheafLearner(nn.Module):
         x_row = x[row]
         x_col = x[col]
 
-        maps = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(len(edge_index), self.stalk_dim, self.stalk_dim)
+        maps = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(len(row), self.stalk_dim, self.stalk_dim)
 
         return maps
 
@@ -94,38 +159,46 @@ class SheafAttentionConv(MessagePassing):
         self.num_channels = self.hidden_dim // self.stalk_dim
 
         self.W = nn.ModuleList([nn.Linear(self.stalk_dim, self.stalk_dim, bias=False) for _ in range(self.num_heads)])
-        self.W_params = {
-            "weight": torch.stack([layer.weight for layer in self.W]),
-        }
+        #self.W_params = {
+            #"weight": torch.stack([layer.weight for layer in self.W]),
+        #}
         self.att = nn.ModuleList([nn.Linear(2 * self.hidden_dim, 1, bias=False) for _ in range(self.num_heads)])
-        self.att_params = {
-            "weight": torch.stack([layer.weight for layer in self.att]),
-        }
+        #self.att_params = {
+            #"weight": torch.stack([layer.weight for layer in self.att]),
+        #}
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
 
-        self.sheaf_learner = SheafLearner(self.hidden_dim, self.stalk_dim)
+        self.sheaf_learner = SheafLearnerOrthogonal(self.hidden_dim, self.stalk_dim)
         
-        self.apply_W = vmap(lambda tensor: functional_call(nn.Linear(self.stalk_dim, self.stalk_dim, bias=False), self.W_params, tensor), in_dims=(0, None))
-        self.apply_att = vmap(lambda tensor: functional_call(nn.Linear(2 * hidden_dim, 1, bias=False), self.att_params, tensor), in_dims=(0, None))
+        self.apply_W = vmap(lambda weight, tensor: F.linear(tensor, weight), in_dims=(0, None))
+        self.apply_att = vmap(lambda weight, tensor: F.linear(tensor, weight), in_dims=(0, None))
 
     def forward(self, x, edge_index):
         maps = self.sheaf_learner(x, edge_index)      
-        x_stalk = x.view(edge_index, self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
+
+        x_stalk = x.view(-1, self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
         out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps)
-        return self.project_concat(torch.cat(out, dim=-1))
+
+        return self.project_concat(out.view(-1, self.num_heads * self.hidden_dim))
 
     def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
 
-        alpha = self.leaky(self.apply_att(torch.cat([x_i, x_j], dim=-1))) # num_heads, num_edges, 1?
+        att_weights = torch.stack([layer.weight for layer in self.att])
+        alpha = self.leaky(self.apply_att(att_weights, torch.cat([x_i, x_j], dim=-1))) # num_heads, num_edges, 1?
+
+        alpha = alpha.transpose(0, 1)
         
         alpha = softmax(alpha, index, ptr, size_i)                  
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
-        transformed = self.apply_W(x_stalk_j) # num_heads, num_edges, stalk_dim
-        transported = torch.bmm(maps, transformed.unsqueeze(-1)).squeeze(-1)
+        W_weights = torch.stack([layer.weight for layer in self.W])
 
-        return alpha * transported
+        transformed = self.apply_W(W_weights, x_stalk_j) # num_heads, num_edges, num_channels, stalk_dim
+
+        transported = torch.einsum('eab, hexb -> ehxa', maps, transformed)
+
+        return alpha.unsqueeze(-1) * transported
 
 
 class SheafResidualSANBlock(nn.Module):
@@ -191,37 +264,73 @@ class SheafLaplacian(nn.Module):
         device = data.x.device
         
         row, col = data.edge_index
-        num_edges = data.edge_index.size(1)
         
+        # A_uv = W^T W
         w_t_w = torch.matmul(data.maps.transpose(-1, -2), data.maps)
-        off_diag_values = -w_t_w
         
-        grid_x, grid_y = torch.meshgrid(torch.arange(self.d, device=device), torch.arange(self.d, device=device), indexing='ij')
+        # Compute unnormalized diagonal blocks (Degree matrices D_v)
+        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
+        diag_values.index_add_(0, row, w_t_w)
         
+        # Compute D^{-1/2} using Eigendecomposition
+        # Add epsilon to the diagonal to ensure strict positive-definiteness
+        eps = 1e-5
+        I = torch.eye(self.d, device=device).unsqueeze(0)
+        D_reg = diag_values + eps * I
+        
+        # Symmetric matrix eigendecomposition
+        eigenvalues, eigenvectors = torch.linalg.eigh(D_reg)
+        
+        # Clamp eigenvalues to prevent NaNs during sqrt if any edge weights hit 0
+        eigenvalues = torch.clamp(eigenvalues, min=eps)
+        inv_sqrt_eigenvalues = torch.diag_embed(1.0 / torch.sqrt(eigenvalues))
+        
+        # Reconstruct D^{-1/2} = V * L^{-1/2} * V^T
+        D_inv_sqrt = eigenvectors @ inv_sqrt_eigenvalues @ eigenvectors.transpose(-1, -2)
+        
+        # Normalize off-diagonal blocks: -D_v^{-1/2} A_uv D_u^{-1/2}
+        # PyG edge_index [row, col] puts the block at matrix position [col, row]
+        # So we left-multiply by D_inv_sqrt[col] and right-multiply by D_inv_sqrt[row]
+        off_diag_values = -torch.bmm(D_inv_sqrt[col], torch.bmm(w_t_w, D_inv_sqrt[row]))
+        
+        # Normalized diagonal blocks become Identity matrices
+        norm_diag_values = I.repeat(num_nodes, 1, 1)
+
+        grid_x, grid_y = torch.meshgrid(
+            torch.arange(self.d, device=device), 
+            torch.arange(self.d, device=device), 
+            indexing='ij'
+        )
+        
+        # Off-diagonal indices
         off_diag_rows = (col.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
         off_diag_cols = (row.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
         off_diag_indices = torch.stack([off_diag_rows, off_diag_cols], dim=0)
         off_diag_flat_values = off_diag_values.flatten()
 
-        diag_values = torch.zeros(num_nodes, self.d, self.d, device=device)
-        diag_values.index_add_(0, row, w_t_w)
-        
+        # Diagonal indices
         node_indices = torch.arange(num_nodes, device=device)
         diag_rows = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_x).flatten()
         diag_cols = (node_indices.unsqueeze(1).unsqueeze(2) * self.d + grid_y).flatten()
         diag_indices = torch.stack([diag_rows, diag_cols], dim=0)
-        diag_flat_values = diag_values.flatten()
+        diag_flat_values = norm_diag_values.flatten()
 
+        # Build Sparse L_sym
         all_indices = torch.cat([off_diag_indices, diag_indices], dim=1)
         all_values = torch.cat([off_diag_flat_values, diag_flat_values], dim=0)
         matrix_dim = num_nodes * self.d
-        L_F_sparse = torch.sparse_coo_tensor(all_indices, all_values, (matrix_dim, matrix_dim)).coalesce()
+        
+        L_sym_sparse = torch.sparse_coo_tensor(all_indices, all_values, (matrix_dim, matrix_dim)).coalesce()
+        
+        # Apply the graph diffusion step
         x_global = data.x.view(matrix_dim, 1)
-        laplacian_product = torch.sparse.mm(L_F_sparse, x_global)
+        laplacian_product = torch.sparse.mm(L_sym_sparse, x_global)
+        
+        # out = X - L_sym * X
         out = x_global - laplacian_product
         data.x = out.view(num_nodes, self.d)
+        
         return data
-
 
 class SheafResidualGATBlock(nn.Module):  
     def __init__(self, num_heads, hidden_dim, dropout=0.2, ablate_sheaves=False):
@@ -300,7 +409,7 @@ class DynamicsTrajectoryEmbedding(nn.Module):
 # -------------------------------------------------------------------------------------------
 
 class NodeSheafAttentionClassifier(nn.Module):  
-    def __init__(self, input_size, num_classes=22, hidden_dim=64, stalk_dim=16, num_lstm_layers=1, num_blocks=8, num_heads=8, ablate_sheaves=False, gat_dropout=0.2, classifier_dropout=0.2):
+    def __init__(self, input_size, num_classes=20, hidden_dim=64, stalk_dim=16, num_lstm_layers=1, num_blocks=8, num_heads=8, ablate_sheaves=False, gat_dropout=0.2, classifier_dropout=0.2):
         super().__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -346,6 +455,9 @@ class NodeSheafAttentionClassifier(nn.Module):
         # embed based on time-series trajectories per node
         # input data.pos for trajectories instead of data.x
         data.x = self.dynamics_trajectory_embedding(data.pos, node_seq_lengths)
+
+        # clamp y to valid indices
+        safe_y = torch.clamp(data.y, 0, self.num_classes - 1)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

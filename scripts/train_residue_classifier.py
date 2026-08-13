@@ -160,6 +160,10 @@ def train_residue_classifier():
             batch = batch.sort() # for ConvGAT aggregation
             optimizer.zero_grad()
 
+            # check for out-of-bounds.
+            assert batch.y.min() >= 0, f"Found negative label in batch.y: {batch.y.min()}"
+            assert batch.y.max() < num_classes, f"Found label >= num_classes in batch.y: {batch.y.max()}"
+
             out_batch = model(batch)
 
             pred_mask = ~batch.node_mask.bool()
