@@ -65,7 +65,8 @@ class SheafLearner(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.stalk_dim = stalk_dim
-        self.lin = nn.Linear(2*self.stalk_dim, 2*self.stalk_dim) # TODO is this too much?
+
+        self.lin = nn.Linear(2*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
         self.map_learner = nn.Linear(2*self.stalk_dim, self.stalk_dim ** 2)
         self.act = F.relu
 
@@ -75,7 +76,7 @@ class SheafLearner(nn.Module):
         x_row = x[row]
         x_col = x[col]
 
-        maps = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(len(edge_index), self.stalk_dim, self.stalk_dim)
+        maps = self.map_learner(self.act(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(len(row), self.stalk_dim, self.stalk_dim)
 
         return maps
 
@@ -106,26 +107,31 @@ class SheafAttentionConv(MessagePassing):
 
         self.sheaf_learner = SheafLearner(self.hidden_dim, self.stalk_dim)
         
-        self.apply_W = vmap(lambda tensor: functional_call(nn.Linear(self.stalk_dim, self.stalk_dim, bias=False), self.W_params, tensor), in_dims=(0, None))
-        self.apply_att = vmap(lambda tensor: functional_call(nn.Linear(2 * hidden_dim, 1, bias=False), self.att_params, tensor), in_dims=(0, None))
+        self.apply_W = vmap(lambda weight, tensor: F.linear(tensor, weight), in_dims=(0, None))
+        self.apply_att = vmap(lambda weight, tensor: F.linear(tensor, weight), in_dims=(0, None))
 
     def forward(self, x, edge_index):
         maps = self.sheaf_learner(x, edge_index)      
-        x_stalk = x.view(edge_index, self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
+
+        x_stalk = x.view(-1, self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
         out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps)
-        return self.project_concat(torch.cat(out, dim=-1))
+
+        return self.project_concat(out.view(-1, self.num_heads * self.hidden_dim))
 
     def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
 
-        alpha = self.leaky(self.apply_att(torch.cat([x_i, x_j], dim=-1))) # num_heads, num_edges, 1?
+        alpha = self.leaky(self.apply_att(self.att_params["weight"], torch.cat([x_i, x_j], dim=-1))) # num_heads, num_edges, 1?
+
+        alpha = alpha.transpose(0, 1)
         
         alpha = softmax(alpha, index, ptr, size_i)                  
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
-        transformed = self.apply_W(x_stalk_j) # num_heads, num_edges, stalk_dim
-        transported = torch.bmm(maps, transformed.unsqueeze(-1)).squeeze(-1)
+        transformed = self.apply_W(self.W_params["weight"], x_stalk_j) # num_heads, num_edges, num_channels, stalk_dim
 
-        return alpha * transported
+        transported = torch.einsum('eab, hexb -> ehxa', maps, transformed)
+
+        return alpha.unsqueeze(-1) * transported
 
 
 class SheafResidualSANBlock(nn.Module):
