@@ -156,9 +156,7 @@ class SheafResidualSANBlock(nn.Module):
         self.dropout = dropout
 
 
-
-
-        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout)
+        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=ablate_sheaves)
         self.norm = nn.LayerNorm(self.hidden_dim)
         self.act = nn.ReLU()
 
