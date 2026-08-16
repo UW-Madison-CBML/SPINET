@@ -67,7 +67,7 @@ def test_full_architecture():
     # 3. Run Forward Pass
     print("Running forward pass...\n")
     with torch.no_grad():
-        try:
+        #try:
             out_batch = model(dummy_batch)
             
             print("Forward pass successful!")
@@ -89,8 +89,8 @@ def test_full_architecture():
             loss = crit(test_logits, test_targets)
             print(f"-> Dummy Loss Value: {loss.item():.4f}")
             
-        except Exception as e:
-            print(f"Forward pass failed with error:\n{e}")
+        #except Exception as e:
+            #print(f"Forward pass failed with error:\n{e}")
 
 if __name__ == "__main__":
     test_full_architecture()
