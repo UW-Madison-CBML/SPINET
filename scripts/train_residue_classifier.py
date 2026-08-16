@@ -30,7 +30,8 @@ def train_residue_classifier():
     epochs = 8
     val_ratio = 0.1
     test_ratio = 0.1
-    batch_size = 8
+    batch_size = 32
+    num_workers = 16
     hidden_dim = 64
     stalk_dim = 16
     num_blocks = 4
@@ -126,9 +127,9 @@ def train_residue_classifier():
     test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, variable_length=(20,50))
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, pin_memory=True, drop_last=False, collate_fn=train_dataset.graph_collate)
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, pin_memory=True, drop_last=False, collate_fn=val_dataset.graph_collate)
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, pin_memory=True, drop_last=False, collate_fn=test_dataset.graph_collate)
+    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=num_workers, pin_memory=True, drop_last=False, collate_fn=train_dataset.graph_collate)
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=num_workers, pin_memory=True, drop_last=False, collate_fn=val_dataset.graph_collate)
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=num_workers, pin_memory=True, drop_last=False, collate_fn=test_dataset.graph_collate)
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 

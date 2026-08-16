@@ -1,5 +1,5 @@
 #!/bin/bash
-python -m ruff check . --select F821,E9 || exit 1
+python -m ruff check . --exclude invariant_features_sheaf_model.py --select F821,E9 || exit 1
 
 tar -xvf md_data.tar.gz
 

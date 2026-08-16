@@ -165,18 +165,6 @@ class SheafAttentionConv(MessagePassing):
         self.att_weights = nn.Parameter(torch.empty(self.num_heads, 1, 2 * self.hidden_dim))
         nn.init.xavier_uniform_(self.W_weights)
         nn.init.xavier_uniform_(self.att_weights)
-        self._stateless_W = nn.Linear(self.stalk_dim, self.stalk_dim, bias=False)
-        self._stateless_att = nn.Linear(2 * self.hidden_dim, 1, bias=False)
-
-        self.apply_W = vmap(
-                lambda params, tensor: functional_call(self._stateless_W, params, tensor),
-                in_dims = ({"weight": 0}, 0)
-        )
-
-        self.apply_att = vmap(
-                lambda params, tensor: functional_call(self._stateless_att, params, tensor),
-                in_dims = ({"weight": 0}, 0)
-        )
 
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
@@ -207,26 +195,27 @@ class SheafAttentionConv(MessagePassing):
         return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
 
     def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
-        W_params = {"weight": self.W_weights}
-        att_params = {"weight": self.att_weights}
-        
-        edge_features = torch.cat([x_i, x_j], dim=-1) 
-        edge_features_batched = edge_features[None,:,:].expand(self.num_heads,-1, -1) 
-        
-        x_stalk_j_batched = x_stalk_j[None,:,:,:].expand(self.num_heads,-1, -1,-1)
+        edge_features = torch.cat([x_i, x_j], dim=-1) # num_edges, 2 * hidden_dim
 
-        alpha = self.leaky(self.apply_att(att_params, edge_features_batched))
+        # calculate attention
+        raw_alpha = torch.einsum('h i d, e d -> h e i', self.att_weights, edge_features)
+        alpha = self.leaky(raw_alpha)
         
-        transformed = self.apply_W(W_params, x_stalk_j_batched)
+        # apply attention
+        transformed = torch.einsum('h s t, e c t -> h e c s', self.W_weights, x_stalk_j)
         
+        # softmax over edges
         alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=1) 
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+
         if not self.ablate_sheaves: 
             maps_expanded = maps[None,:,:,:].expand(self.num_heads, -1, -1, -1)
             transported = torch.matmul(maps_expanded, transformed.mT)
         else: 
             transported = transformed
-        alpha = alpha.unsqueeze(-1).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
+
+        alpha = alpha.unsqueeze(-1) # this will end up with num_heads, num_edges, 1, 1 which will broadcast
+
         return (alpha * transported).permute(1,0,2,3).contiguous()
     
 
@@ -273,33 +262,47 @@ class SheafResidualSAN(nn.Module):
         return data
 
 # ----------------------------------------------------------------------------------------------
-# LSTM that encodes MD trajectories
+# 1D-CNN that encodes MD trajectories
 class DynamicsTrajectoryEmbedding(nn.Module):  
-    def __init__(self, input_size, hidden_size, num_layers=1, embedding_dim = 16):
+    def __init__(self, input_size, hidden_size, kernel_size=3, padding=1, embedding_dim=16):
         super().__init__() 
         
-        self.lstm = nn.LSTM(
-            input_size = input_size,
-            hidden_size = hidden_size,
-            num_layers = num_layers,
-            batch_first = True
+        self.conv1 = nn.Conv1d(
+            in_channels = input_size,
+            out_channels = hidden_size,
+            kernel_size = kernel_size,
+            padding = padding
         )
+        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.conv2 = nn.Conv1d(
+                in_channels = hidden_size,
+                out_channels = hidden_size,
+                kernel_size = kernel_size,
+                padding = padding
+                )
+        self.bn2 = nn.BatchNorm1d(hidden_size)
         
         self.fc = nn.Linear(hidden_size, embedding_dim)
+        self.act = nn.ReLU()
 
     def forward(self, x, seq_lengths):
         # x shape: (num_nodes, max_seq_len, features)
         # seq_lengths shape: (num_nodes,) - true integer lengths
 
-        packed_input = pack_padded_sequence(
-                x, lengths=seq_lengths.cpu(), batch_first=True, enforce_sorted=False
-            )
+        x = x.permute(0, 2, 1) # batch, channels, length
 
-        packed_output, (h_n, c_n) = self.lstm(packed_input)
+        x = self.act(self.bn1(self.conv1(x)))
+        x = self.act(self.bn2(self.conv2(x)))
 
-        final_hidden_state = h_n[-1]
+        max_len = x.size(2)
+        node_indices = torch.arange(max_len, device=x.device).unsqueeze(0)
+        mask = node_indices >= seq_lengths.unsqueeze(1)
 
-        embedding = self.fc(final_hidden_state)
+        x = x.masked_fill(mask.unsqueeze(1), float('-inf'))
+
+        x_pooled, _ = torch.max(x, dim=2)
+
+        embedding = self.fc(x_pooled)
 
         return embedding
 
