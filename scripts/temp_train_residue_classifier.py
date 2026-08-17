@@ -198,6 +198,10 @@ def train_residue_classifier(args_dict):
         val_losses = []
 
         global_confusion_mat = torch.zeros((num_classes, num_classes))
+
+        pos_correct = torch.zeros(0, dtype=torch.long)
+        pos_total = torch.zeros(0, dtype=torch.long)
+
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
                 batch = batch.to(DEVICE)
@@ -205,14 +209,40 @@ def train_residue_classifier(args_dict):
                 out_batch = model(batch)
 
                 pred_mask = ~batch.node_mask.bool()
-                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
-                logits = out_batch.x[pred_mask].cpu()
-                targets = out_batch.y[pred_mask].cpu()
 
+                targets = batch.y[pred_mask]
+                logits = out_batch.x[pred_mask]
+
+                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
                 val_losses.append(loss.item())
-                preds = logits.argmax(dim=-1)
+
+                preds = logits.argmax(dim=-1).cpu()
+                targets_cpu = targets.cpu()
+
                 batch_conf_mat = get_confusion_matrix(targets, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
+
+                # sequence position
+                if hasattr(batch, 'batch') and batch.batch is not None:
+                    nodes_per_protein = torch.bincount(batch.batch)
+                    all_positions = torch.cat([torch.arange(n) for n in nodes_per_protein])
+                else:
+                    all_positions = torch.arange(batch.num_noes, device=DEVICE)
+
+                # filter pos to only nodes predicted
+                positions = all_positions[pred_mask].cpu()
+                correct_mask = (preds == targets_cpu).float()
+
+                # expand tracking tensors if encounter longer sequences
+                current_max_pos = positions.max().item() + 1 if len(positions) > 0 else 0
+                if current_max_pos > len(pos_total):
+                    pad_size = current_max_pos - len(pos_total)
+                    pos_correct = torch.cat([pos_correct, torch.zeros(pad_size, dtype=torch.long)])
+                    pos_total = torch.cat([pos_total, torch.zeros(pad_size, dtype=torch.long)])
+
+                if len(positions) > 0:
+                    pos_total += torch.bincount(positions, minlength=current_max_pos)
+                    pos_correct += torch.bincount(positions, weights=correct_mask, min_length=current_max_pos).long()
 
         
         diag = global_confusion_mat.diag()
@@ -220,13 +250,17 @@ def train_residue_classifier(args_dict):
         precision = torch.nan_to_num(diag / global_confusion_mat.sum(dim=0), 0.0)
         f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
 
+        # Residue sequence position
+
+        # Evaluate amino acids
         prf_dict = {}
-        for k, residue in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
-            prf_dict[f"val_{residue}_precision"] = precision[k].item()
-            prf_dict[f"val_{residue}_recall"] = recall[k].item()
-            prf_dict[f"val_{residue}_f1"] = f1[k].item()
+        for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
+            prf_dict[f"val_{amino_acid}_precision"] = precision[k].item()
+            prf_dict[f"val_{amino_acid}_recall"] = recall[k].item()
+            prf_dict[f"val_{amino_acid}_f1"] = f1[k].item()
         prf_dict["val_top_1_acc"] = diag.sum().item() / global_confusion_mat.sum().item()
 
+        # Confusion matrix
         fig, ax = plt.subplots(figsize=(12, 12))
         disp = ConfusionMatrixDisplay(
             confusion_matrix=global_confusion_mat.numpy().astype(int),
@@ -234,10 +268,28 @@ def train_residue_classifier(args_dict):
         )
         disp.plot(cmap='Blues', ax=ax, values_format='d')
         plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-        plt.title("Val Set Confusion Matrix")
+        plt.title("Val Set Amino Acid Confusion Matrix")
 
-        prf_dict["val_confusion_matrix"] = wandb.Image(fig)
+        prf_dict["val_aa_confusion_matrix"] = wandb.Image(fig)
+        plt.close(fig)
 
+        # Sequence positon accuracy
+        valid_pos_mask = pos_total > 0
+        if valid_pos_mask.any():
+            valid_positions = torch.arange(len(pos_total))[valid_pos_mask]
+            pos_accuracies = (pos_correct[valid_pos_mask] / pos_total[valid_pos_mask])
+
+            fig_pos, ax_pos = plt.subplots(figsize=(12, 5))
+            ax_pos.plot(valid_positions.numpy(), pos_accuracies, marker='.', linestyle='-', alpha=0.7)
+            ax_pos.set_xlabel("Amino Acid Sequence Position (N-terminus -> C-terminus)")
+            ax_pos.set_ylabel("Accuracy")
+            ax_pos.set_title(f"Validation Accuracy vs. Sequence Position (Epoch {epoch+1})")
+            ax_pos.grid(True, linestyle='--', alpha=0.6)
+            
+            prf_dict["val_position_accuracy_plot"] = wandb.Image(fig_pos)
+            plt.close(fig_pos)
+
+        # overall loss
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
         run.log(prf_dict | {"epoch_val_loss": avg_val_loss, "epoch": epoch})
 

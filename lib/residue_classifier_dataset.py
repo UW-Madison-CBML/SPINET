@@ -138,7 +138,8 @@ class ResidueClassifierDataset(Dataset):
 
     def graph_collate(self, batch):
         if self.fixed_length is not None:
-            return Batch.from_data_list(batch)
+            out_data = Batch.from_data_list(batch)
+            return out_data.sort()
         else:
             lengths = torch.cat([data.lengths for data in batch])
             max_len = lengths.amax().item()  
@@ -153,7 +154,8 @@ class ResidueClassifierDataset(Dataset):
 
             out_data = Batch.from_data_list(batch)
             out_data.lengths = lengths
-            return out_data
+
+            return out_data.sort()
 
     @staticmethod   
     def worker_init_fn(worker_id):

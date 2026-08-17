@@ -39,6 +39,7 @@ def train_residue_classifier():
     masking_ratio = 0.75
     ablate_sheaves=True
     seed=42
+    restriction_map_type="NA"
 
 
 
@@ -102,7 +103,8 @@ def train_residue_classifier():
             "task":"predicting residues from motions",
             "ablate_sheaves":ablate_sheaves,
             "stalk_dim": stalk_dim,
-            "seed":seed
+            "seed":seed,
+            "restriction_map_type":restriction_map_type
         },
     )
 
@@ -142,7 +144,8 @@ def train_residue_classifier():
         stalk_dim=stalk_dim,
         num_blocks=num_blocks,
         num_heads=num_heads,
-        ablate_sheaves=ablate_sheaves
+        ablate_sheaves=ablate_sheaves,
+        restriction_map_type=restriction_map_type
     ).to(DEVICE)
 
     # -----------------------------------------
@@ -158,7 +161,7 @@ def train_residue_classifier():
         for batch in pbar:
             batch = batch.to(DEVICE)
 
-            batch = batch.sort() # for ConvGAT aggregation
+            #batch = batch.sort() # for ConvGAT aggregation
             optimizer.zero_grad()
 
             # check for out-of-bounds.
@@ -184,7 +187,7 @@ def train_residue_classifier():
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
                 batch = batch.to(DEVICE)
-                batch = batch.sort() # for ConvGAT aggregation
+                #batch = batch.sort() # for ConvGAT aggregation
                 out_batch = model(batch)
 
                 pred_mask = ~batch.node_mask.bool()
@@ -215,7 +218,7 @@ def train_residue_classifier():
         for batch in tqdm(test_loader, desc="Testing"):
             batch = batch.to(DEVICE)
 
-            batch = batch.sort() # for ConvGAT aggregation
+            #batch = batch.sort() # for ConvGAT aggregation
 
             out_batch = model(batch)
 

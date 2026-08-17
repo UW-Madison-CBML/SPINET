@@ -24,6 +24,9 @@ def test_full_architecture():
     ).to(device)
     model.eval() 
 
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total num params: {total_params}")
+
     # 2. Construct a Dummy Batch
     print("Constructing dummy PyG Batch...")
     # Simulating a batch of 2 graphs (proteins)
@@ -90,7 +93,7 @@ def test_full_architecture():
             print(f"-> Dummy Loss Value: {loss.item():.4f}")
             
         #except Exception as e:
-            #print(f"Forward pass failed with error:\n{e}")
+            #print(f"Forward pass failed with error:\n{e}"
 
 if __name__ == "__main__":
     test_full_architecture()
