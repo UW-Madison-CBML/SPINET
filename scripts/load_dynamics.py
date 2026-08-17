@@ -21,16 +21,16 @@ def process_traj(traj):
     for i, res_idx in enumerate(res_indices):
         residue_atoms = []
         for atom in backbone_atoms:
-            residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')])
-        all_atoms.append(np.stack(residue_atoms, dim=0))
-    all_atoms = np.stack(all_atoms, dim=0)
-    _, phi   = md.compute_phi(traj)
-    _, psi  = md.compute_psi(traj)
-    _, omega = md.compute_omega(traj) 
-    print(phi.shape)
-    print(psi.shape)
-    print(omega.shape)
-            
+            residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')]) # n_frames
+        all_atoms.append(np.stack(residue_atoms, axis=1)) # n_frames, 4
+    all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 4
+    _, phi   = mdtraj.compute_phi(traj)
+    _, psi   = mdtraj.compute_psi(traj)
+    _, omega = mdtraj.compute_omega(traj) 
+    print(phi.shape, psi.shape, omega.shape) 
+    angles_features = np.stack([phi,psi,omega], axis=2) # n_frames?, n_residues, 3
+    features = np.concatenate([all_atoms, angles_features], axis=2)
+     
     df = pd.DataFrame({"residue":res_targets})
     df.insert(0, "timestep", timesteps)
     
