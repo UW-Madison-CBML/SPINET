@@ -225,7 +225,7 @@ def train_residue_classifier(args_dict):
             prf_dict[f"val_{residue}_precision"] = precision[k].item()
             prf_dict[f"val_{residue}_recall"] = recall[k].item()
             prf_dict[f"val_{residue}_f1"] = f1[k].item()
-
+        prf_dict["val_top_1_acc"] = diag.sum().item() / global_confusion_mat.sum().item()
 
         fig, ax = plt.subplots(figsize=(12, 12))
         disp = ConfusionMatrixDisplay(
@@ -284,6 +284,7 @@ def train_residue_classifier(args_dict):
         prf_dict[f"test_{residue}_recall"] = recall[k].item()
         prf_dict[f"test_{residue}_f1"] = f1[k].item()
 
+    prf_dict["test_top_1_acc"] = diag.sum().item() / confusion_mat_cpu.sum().item()
     # generate and log test confusion matrix
 
     # Hopefully plot will be big enough for 22 classes

@@ -49,7 +49,7 @@ class SheafLearnerOrthogonal(nn.Module):
         indices = indices[0] + (self.stalk_dim * indices[1])
         assert self.tri_dim == indices.shape[0], "indices shape isn't the same as triangle dim"
         upper_indices_matrix = torch.zeros(self.stalk_dim**2, self.tri_dim) 
-        upper_indices_matrix[indices[:,None], torch.arange(tri_dim)] = 1
+        upper_indices_matrix[indices[:,None], torch.arange(self.tri_dim)] = 1
         self.register_buffer("upper_indices_matrix",upper_indices_matrix)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
