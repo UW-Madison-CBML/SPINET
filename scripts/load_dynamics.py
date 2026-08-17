@@ -8,8 +8,10 @@ from zipfile import ZipFile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import traceback
-FEATURE_COLUMNS=["x","y","z","psi","phi","bond_len", "bond_ang"]
-backbone_atoms = ["CA", "N", "C", "O"]
+from itertools import product
+
+BACKBONE_ATOMS = ["CA", "N", "C", "O"]
+FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","phi","omega"]
 
 def process_traj(traj):
     top = traj.topology
@@ -20,17 +22,23 @@ def process_traj(traj):
     all_atoms = [] 
     for i, res_idx in enumerate(res_indices):
         residue_atoms = []
-        for atom in backbone_atoms:
-            residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')]) # n_frames
-        all_atoms.append(np.stack(residue_atoms, axis=1)) # n_frames, 4
-    all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 4
+        for atom in BACKBONE_ATOMS:
+            residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')]) # n_frames,3
+        all_atoms.append(np.cat(residue_atoms, axis=1)) # n_frames, 12
+    all_atoms = np.stack(all_atoms, axis=1).squeeze(2) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
+     
     _, phi   = mdtraj.compute_phi(traj)
     _, psi   = mdtraj.compute_psi(traj)
     _, omega = mdtraj.compute_omega(traj) 
-    print(phi.shape, psi.shape, omega.shape) 
-    angles_features = np.stack([phi,psi,omega], axis=2) # n_frames?, n_residues, 3
+    angles_features = np.stack([phi,psi,omega], axis=2) # n_frames, n_residues-1, 3
+    angles_features = np.pad(angles_features, ((0,0), (0,1), (0,0)), mode="edge") # n_frames, n_residues, 3
+    
     features = np.concatenate([all_atoms, angles_features], axis=2)
-     
+    timesteps = np.broadcast_to(np.arange(n_frames)[:,None], features.shape[:2])
+    features = features.reshape(n_frames * n_res, -1, order="C") # C means right most columns will change the quickest
+
+    timesteps = timesteps.flatten(order="C")
+      
     df = pd.DataFrame({"residue":res_targets})
     df.insert(0, "timestep", timesteps)
     
