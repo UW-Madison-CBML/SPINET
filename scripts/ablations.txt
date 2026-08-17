@@ -1,1 +1,1 @@
---run-name residue_model --restriction-map-type low_rank
+--run-name orthogonal_model --restriction-map-type orthogonal

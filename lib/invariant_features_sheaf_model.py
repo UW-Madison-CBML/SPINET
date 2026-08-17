@@ -41,19 +41,27 @@ class SheafLearnerOrthogonal(nn.Module):
         self.stalk_dim = stalk_dim
 
         self.lin = nn.Linear(self.input_dim * 2, self.input_dim)
-        self.triu_learner = nn.Linear(self.input_dim, ((self.stalk_dim-1) * (self.stalk_dim) )// 2)
-        upper_indices = torch.triu_indices(self.stalk_dim, self.stalk_dim,  offset=1)
+        self.tri_dim = ((self.stalk_dim-1) * (self.stalk_dim) )// 2
+        self.triu_learner = nn.Linear(self.input_dim, self.tri_dim)
+
+        # now we need to build a matrix that will enter in each learned value and then unflatten the matrix
+        indices = torch.triu_indices(self.stalk_dim, self.stalk_dim, offset=1)
+        indices = indices[0] + (self.stalk_dim * indices[1])
+        assert self.tri_dim == indices.shape[0], "indices shape isn't the same as triangle dim"
+        upper_indices_matrix = torch.zeros(self.stalk_dim**2, self.tri_dim) 
+        upper_indices_matrix[indices[:,None], torch.arange(tri_dim)] = 1
+        self.register_buffer("upper_indices_matrix",upper_indices_matrix)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor):
         row, col = edge_index
         edge_features = torch.cat([x[row], x[col]], dim=-1)
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
 
-        maps = torch.zeros((edge_index.shape[1], self.stalk_dim, self.stalk_dim), device=x.device)
-        
         # put upper triangle values in
-        batch_idx = torch.arange(edge_index.shape[1], device=x.device).unsqueeze(1)
-        maps[batch_idx, upper_indices[0], upper_indices[1]] = upper_tri
+        maps_flat = torch.matmul(self.upper_indices_matrix, upper_tri[:,None,:])
+
+        # make then square
+        maps = maps_flat.view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
 
         # make them skew symmetric
         maps = maps - maps.mT
@@ -237,13 +245,14 @@ class InitDynamicsEmbedding(MessagePassing):
         )
 
         self.update_linear = nn.Linear(input_dim + output_dim, output_dim)
-        self.project_features = nn.Linear(self.num_timesteps * self.output_dim, self.output_dim)
+        #self.project_features = nn.Linear(self.num_timesteps * self.output_dim, self.output_dim)
         #self.gru = nn.GRU(self.output_dim, self.output_dim) # alternatively use an RNN for time summarization
 
     def forward(self, x, pos, edge_index):
 
         agg = self.propagate(edge_index, x=x, pos=pos)
-        return self.project_features(agg.view(agg.shape[0],self.num_timesteps*self.output_dim))
+        #return self.project_features(
+        return agg.mean(dim=1)
 
     def message(self, x_i, x_j, pos_i, pos_j):
         relative_pos = pos_j - pos_i
