@@ -8,8 +8,8 @@ from zipfile import ZipFile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import traceback
-FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
-
+FEATURE_COLUMNS=["x","y","z","psi","phi","bond_len", "bond_ang"]
+backbone_atoms = ["CA", "N", "C", "O"]
 
 def process_traj(traj):
     top = traj.topology
@@ -17,44 +17,20 @@ def process_traj(traj):
     n_res = top.n_residues
     res_names = [res.name for res in top.residues]    
     res_indices = np.array([r.index for r in top.residues])
-    
-    heavy_atoms = top.select("not element H")
-    heavy_res_ids = np.array([top.atom(idx).residue.index for idx in heavy_atoms])
-    heavy_masses = np.array([top.atom(idx).element.mass for idx in heavy_atoms])
-    
-    centroids = np.empty((n_frames, n_res, 3), dtype=np.float32)
-    
+    all_atoms = [] 
     for i, res_idx in enumerate(res_indices):
-        mask = (heavy_res_ids == res_idx)
-        if not np.any(mask):
-            centroids[:, i, :] = 0.0
-            continue
-        sub_xyz = traj.xyz[:, heavy_atoms[mask], :]
-        masses_sub = heavy_masses[mask]
-        centroids[:, i, :] = np.sum(sub_xyz * masses_sub[None, :, None], axis=1) / masses_sub.sum()
-
-    sequence_differences = np.diff(centroids, axis=1)
-    bond_len = np.linalg.norm(sequence_differences, axis=2)
-    bond_len = np.pad(bond_len, ((0,0),(0,1)), mode="edge")
-    
-    v1 = centroids[:, 1:-1] - centroids[:, :-2]
-    v2 = centroids[:, 2:] - centroids[:, 1:-1]
-    
-    cosang = np.einsum('tij,tij->ti', v1, v2) / (np.linalg.norm(v1, axis=2) * np.linalg.norm(v2, axis=2) + 1e-8)
-    bond_ang = np.pad(np.arccos(np.clip(cosang, -1.0, 1.0)), ((0,0),(1,1)), mode="edge")
-    
-    time_differences = np.diff(centroids, axis=0)
-    
-    features = np.concatenate([
-        centroids[1:], 
-        time_differences, 
-        bond_len[1:, :, None], 
-        bond_ang[1:, :, None]
-    ], axis=2).reshape(-1, 8)
-    
-    timesteps = np.broadcast_to(np.arange(n_frames - 1)[:, None], (n_frames - 1, n_res)).flatten()
-    res_targets = np.broadcast_to(np.array(res_names)[None, :], (n_frames - 1, n_res)).flatten()
-    
+        residue_atoms = []
+        for atom in backbone_atoms:
+            residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')])
+        all_atoms.append(np.stack(residue_atoms, dim=0))
+    all_atoms = np.stack(all_atoms, dim=0)
+    _, phi   = md.compute_phi(traj)
+    _, psi  = md.compute_psi(traj)
+    _, omega = md.compute_omega(traj) 
+    print(phi.shape)
+    print(psi.shape)
+    print(omega.shape)
+            
     df = pd.DataFrame({"residue":res_targets})
     df.insert(0, "timestep", timesteps)
     

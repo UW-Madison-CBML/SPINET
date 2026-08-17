@@ -58,6 +58,7 @@ class SheafLearnerOrthogonal(nn.Module):
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
 
         # put upper triangle values in
+        print(self.upper_indices_matrix.shape, upper_tri.shape)
         maps_flat = torch.matmul(self.upper_indices_matrix, upper_tri[:,None,:])
 
         # make then square
