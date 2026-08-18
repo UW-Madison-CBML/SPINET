@@ -14,6 +14,8 @@ from torch_geometric.data import Data
 from residue_classifier_dataset import ResidueClassifierDataset
 from invariant_features_sheaf_model import NodeSheafClassifier
 
+from load_dynamics import BACKBONE_ATOMS
+
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
     gt_one_hot = F.one_hot(gt_indices, num_classes=num_classes).float()
@@ -159,7 +161,8 @@ def train_residue_classifier(args_dict):
         num_heads=num_heads,
         ablate_sheaves=ablate_sheaves,
         num_timesteps=num_timesteps,
-        restriction_map_type=restriction_map_type
+        restriction_map_type=restriction_map_type,
+        backbone_atoms=BACKBONE_ATOMS
     ).to(DEVICE)
 
     # -----------------------------------------

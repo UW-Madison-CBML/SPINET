@@ -231,63 +231,98 @@ class SheafResidualSAN(nn.Module):
 # ----------------------------------------------------------------------------------------------
 # this initial dynamics embedding will be the main thing we change when editing the input data
 # it will be harder to not hard code some of this stuff
+# the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
-    def __init__(self, output_dim, input_dim = 5, velocity_range = (0,3), num_timesteps=16):
+    def __init__(self, node_dim, edge_dim, output_dim, num_timesteps=16):
         super().__init__(aggr='mean', node_dim=0)
+        self.node_dim = node_dim
+        self.edge_dim = edge_dim
         self.output_dim = output_dim
-        self.input_dim = input_dim
-        self.velocity_range = velocity_range
         self.num_timesteps = num_timesteps
 
         self.mlp = nn.Sequential(
-            nn.Linear(10, 64), # TODO don't hard code this, tho it is super specific to the data
+            nn.Linear(edge_dim + ???, 64), # TODO don't hard code this, tho it is super specific to the data
             nn.ReLU(),
             nn.Linear(64, output_dim)
         )
 
         self.update_linear = nn.Linear(input_dim + output_dim, output_dim)
-        #self.project_features = nn.Linear(self.num_timesteps * self.output_dim, self.output_dim)
-        #self.gru = nn.GRU(self.output_dim, self.output_dim) # alternatively use an RNN for time summarization
+        self.distribution_embedding = nn.Sequential(
+            nn.Linear(output_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim)
+        )
 
-    def forward(self, x, pos, edge_index):
+    def forward(self, x, pos, edge_index, edge_attr):
 
-        agg = self.propagate(edge_index, x=x, pos=pos)
-        #return self.project_features(
-        return agg.mean(dim=1)
+        agg = self.propagate(edge_index, x=x, pos=pos, edge_attr=edge_attr)
+        return self.distribution_embedding(agg.mean(dim=1))
 
-    def message(self, x_i, x_j, pos_i, pos_j):
+    def message(self, x_i, x_j, pos_i, pos_j, edge_attr):
         relative_pos = pos_j - pos_i
         dist = relative_pos.norm(dim=-1, keepdim=True)
+        
 
-        non_vel_features_x_i = x_i[:,:, self.velocity_range[1]:]
-        non_vel_features_x_j = x_j[:,:, self.velocity_range[1]:]
-
-        d_pos_i = x_i[:,:, self.velocity_range[0]:self.velocity_range[1]]
-        d_pos_j = x_j[:,:, self.velocity_range[0]:self.velocity_range[1]]
-
-        speed_i = d_pos_i.norm(dim=-1, keepdim=True)
-        speed_j = d_pos_j.norm(dim=-1, keepdim=True)
-
-        prev_pos_i = pos_i - d_pos_i
-        prev_pos_j = pos_j - d_pos_j
-
-        d_pos_j_angle = F.cosine_similarity(prev_pos_j - prev_pos_i, d_pos_j, dim=-1).unsqueeze(-1)
-        d_pos_i_angle = F.cosine_similarity(prev_pos_j - prev_pos_i, d_pos_i, dim=-1).unsqueeze(-1)
-        relative_velocity_angle = F.cosine_similarity(d_pos_i, d_pos_j, dim=-1).unsqueeze(-1)
-
-        dynamics_features = torch.cat([ dist, speed_i, speed_j,non_vel_features_x_i, non_vel_features_x_j,d_pos_i_angle, d_pos_j_angle, relative_velocity_angle], dim=-1)
+        dynamics_features = torch.cat([ edge_attr], dim=-1)
 
         return self.mlp(dynamics_features)
 
     def update(self, aggr_out, x):
         return self.update_linear(torch.cat([x, aggr_out], dim=-1))
+
+
+# the relative frame in this class is inspired by that of PiFold by Gao et al.
+class AtomicFrame(nn.Module):
+    def __init__(self, atom_indices, frame_origin="CA"):
+        super().__init__()
+        self.atoms = atom_indices.keys()
+        self.atom_indices = atom_indices
+        assert frame_origin in self.atoms, f"frame origin: {frame_origin} is not in atoms"
+        self.frame_origin = frame_origin
+        self.register_buffer("not_frame_origin_mask", torch.tensor([atom != self.frame_origin for atom in self.atoms], dtype=torch.bool))
+        
+        
+    def forward(self, x, edge_index, edge_attr):
+        carbon_alphas = x[:,:,self.atom_indices[self.frame_origin]]
+        u,v = carbon_alphas - x[:,:,self.atom_indices["C"]], x[:,:,self.atom_indices[self.frame_origin]] - carbon_alphas
+
+        x_basis = u - v
+        # normalize
+        x_basis = x_basis / torch.clamp(torch.norm(x_basis, dim = -1, keepdim=True), min=0.01)
+
+        y = torch.cross(u, v, dim = -1) 
+        # normalize
+        y = y / torch.clamp(torch.norm(y, dim=-1, keepdim=True), min=0.01)
+        
+        # get final orthonormal basis vector:
+        z = torch.cross(x,y, dim=-1) # will be normal since other two vectors are normal 
+        
+        raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-2) # num_res, n_frames, 3, 3
+
+        # now let's build edge features given by pairwise distances between atoms
+        edges = torch.stack([x[edge_index[0]], x[edge_index[1]]], axis=1) # E, 2, n_frames, n_features
+        edges = edges[:,:,:,:3*len(self.atom_indices)]
+        edges = edges.view(edge_index.shape[1],2, x.shape[1], len(self.atom_indices), 3)
+        dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(self.atom_indices), len(self.atom_indices)
+        edge_features = torch.cat([dist_feature.view(edge_index[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].repeat(1,x.shape[1], 1)], dim=2)
+        
+        # positions will contain the atomic coordinate
+        positions = x[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
+
+        # features will be certain positions in the coordinate frame
+        relative_features = positions[:,:,self.not_frame_origin_mask,:] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
+        in_frame_features = torch.matmul(raw_to_basis_matrix.mT, positions).view(x.shape[0], x.shape[1], 3*(len(self.num_atoms)-1)) # num_res, n_frames, (num_atoms-1) * 3
+        features = torch.cat([in_frame_features, x[:,:,len(self.atom_indices):]], dim=-1)
+        
+        return features, edge_features, positions, raw_to_basis_matrix # converts from standard I, J, K basis to atomic frame, M^T does the opposite (by definition of orthogonal maps)
+        
 # -------------------------------------------------------------------------------------------
 
 
 
 
 class NodeSheafClassifier(nn.Module):
-    def __init__(self, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank"):
+    def __init__(self, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", backbone_atoms=["CA", "N", "C", "O"]):
         super().__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -302,12 +337,12 @@ class NodeSheafClassifier(nn.Module):
         self.ablate_sheaves = ablate_sheaves
         self.gat_dropout = gat_dropout
         self.classifier_dropout = classifier_dropout
-        self.restriction_map_type=restriction_map_type
+        self.restriction_map_type = restriction_map_type
+        
+        self.atomic_frame_embedding = AtomicFrameEmbedding(backbone_atoms, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(backbone_atoms)}) # atoms are packed left, with dihedral phi, psi and omega on righ
 
         self.init_dynamics_embedding = InitDynamicsEmbedding(
             hidden_dim,
-            input_dim = 5,
-            velocity_range = (0,3), # exclusive on right, other features will be already egocentric
             num_timesteps=self.num_timesteps
         )
 
@@ -327,7 +362,11 @@ class NodeSheafClassifier(nn.Module):
     def forward(self, data):
         # take in batch of graphs
         # embed based on egocentric features, since positions are raw and absolute
+
+        data.x, data.edge_attr, data.basis_matrices = self.atomic_frame(data.x, data.edge_index, data.edge_attr)
         data.x = self.init_dynamics_embedding(data.x, data.pos, data.edge_index)
+
+        # skip the above if you just want to train on precalced features:
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

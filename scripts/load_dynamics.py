@@ -26,11 +26,10 @@ def process_traj(traj):
             residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')].squeeze(1)) # n_frames,3
         all_atoms.append(np.concatenate(residue_atoms, axis=1)) # n_frames, 12
     all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
-    _, phi   = mdtraj.compute_phi(traj)
-    _, psi   = mdtraj.compute_psi(traj)
-    _, omega = mdtraj.compute_omega(traj) 
+    _, phi   = np.pad(mdtraj.compute_phi(traj), ((0,0),(1,0)), mode="constant", constant_value=0.0)
+    _, psi   = np.pad(mdtraj.compute_psi(traj), ((0,0),(0,1)), mode="constant", constant_value=0.0)
+    _, omega = np.pad(mdtraj.compute_omega(traj), ((0,0),(0,1)), mode="constant", constant_value=0.0)
     angles_features = np.stack([phi,psi,omega], axis=2) # n_frames, n_residues-1, 3
-    angles_features = np.pad(angles_features, ((0,0), (0,1), (0,0)), mode="edge") # n_frames, n_residues, 3
     
     features = np.concatenate([all_atoms, angles_features], axis=2)
     timesteps = np.broadcast_to(np.arange(n_frames)[:,None], features.shape[:2])
