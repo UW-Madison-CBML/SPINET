@@ -241,29 +241,27 @@ class InitDynamicsEmbedding(MessagePassing):
         self.num_timesteps = num_timesteps
 
         self.mlp = nn.Sequential(
-            nn.Linear(edge_dim + ???, 64), # TODO don't hard code this, tho it is super specific to the data
+            nn.Linear(edge_dim + 2*node_dim, 64), # TODO don't hard code this, tho it is super specific to the data
             nn.ReLU(),
             nn.Linear(64, output_dim)
         )
 
-        self.update_linear = nn.Linear(input_dim + output_dim, output_dim)
+        self.update_linear = nn.Linear(node_dim + output_dim, output_dim)
         self.distribution_embedding = nn.Sequential(
             nn.Linear(output_dim, 64),
             nn.ReLU(),
             nn.Linear(64, output_dim)
         )
+        self.lin_out = nn.Linear(output_dim, output_dim)
 
     def forward(self, x, pos, edge_index, edge_attr):
 
         agg = self.propagate(edge_index, x=x, pos=pos, edge_attr=edge_attr)
-        return self.distribution_embedding(agg.mean(dim=1))
+        return self.lin_out(self.distribution_embedding(agg).mean(dim=1)) # take a mean of this as a representation of the distribution
 
     def message(self, x_i, x_j, pos_i, pos_j, edge_attr):
-        relative_pos = pos_j - pos_i
-        dist = relative_pos.norm(dim=-1, keepdim=True)
         
-
-        dynamics_features = torch.cat([ edge_attr], dim=-1)
+        dynamics_features = torch.cat([x_i, x_j, edge_attr], dim=-1)
 
         return self.mlp(dynamics_features)
 
@@ -342,6 +340,8 @@ class NodeSheafClassifier(nn.Module):
         self.atomic_frame_embedding = AtomicFrameEmbedding(backbone_atoms, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(backbone_atoms)}) # atoms are packed left, with dihedral phi, psi and omega on righ
 
         self.init_dynamics_embedding = InitDynamicsEmbedding(
+            12, # 3 componnets of O, C, N's positions in frame space relative to CA
+            17, # 16 for pairwise distances + 1 for bond_edge/not bond_edge
             hidden_dim,
             num_timesteps=self.num_timesteps
         )
