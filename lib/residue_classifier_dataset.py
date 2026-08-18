@@ -8,6 +8,7 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.utils import dense_to_sparse
 import numpy as np
 from typing import Union, Tuple
+from load_dynamics import FEATURE_COLUMNS as features
 # this is a combination k-NN and distance threshold, generalized to use arbitrary dist mats
 def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32):
     assert dist_matrix.shape[0] == dist_matrix.shape[1], f"dist_matrix is not square: {dist_matrix.shape}"
@@ -63,8 +64,8 @@ class ResidueClassifierDataset(Dataset):
 
     # ground truth order of amino acid indices. they must be capitalized
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()]
-    FEATURE_COLS = ["dx", "dy", "dz", "bond_ang", "bond_len"]
-    POS_COLS = ["x","y","z"]
+    FEATURE_COLS = features
+    POS_COLS = ["CA_x","CA_y","CA_z"]
     
 
     #--------------------------------------------------
@@ -104,9 +105,6 @@ class ResidueClassifierDataset(Dataset):
                     for j in range(length-(seq_len - 1)):
                         self.index.append((i,j,j+seq_len))
             self.index = np.array(self.index)
-        
-
-
 
     def __len__(self):
         return len(self.index) 
@@ -117,7 +115,7 @@ class ResidueClassifierDataset(Dataset):
         frame_idxs = range(frame_idx_start, frame_idx_end) # not inclusive
 
         if(self.traj_len is not None):
-            assert len(traj) == self.traj_len, "TRAJ LEN does not match length of trajectory"
+            assert len(traj) == self.traj_len, "traj len does not match length of trajectory"
 
         frames = [traj.get_group(i) for i in frame_idxs]
         

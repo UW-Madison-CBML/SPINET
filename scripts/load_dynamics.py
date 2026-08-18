@@ -23,10 +23,9 @@ def process_traj(traj):
     for i, res_idx in enumerate(res_indices):
         residue_atoms = []
         for atom in BACKBONE_ATOMS:
-            residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')]) # n_frames,3
-        all_atoms.append(np.cat(residue_atoms, axis=1)) # n_frames, 12
-    all_atoms = np.stack(all_atoms, axis=1).squeeze(2) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
-     
+            residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')].squeeze(1)) # n_frames,3
+        all_atoms.append(np.concatenate(residue_atoms, axis=1)) # n_frames, 12
+    all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
     _, phi   = mdtraj.compute_phi(traj)
     _, psi   = mdtraj.compute_psi(traj)
     _, omega = mdtraj.compute_omega(traj) 
@@ -38,7 +37,7 @@ def process_traj(traj):
     features = features.reshape(n_frames * n_res, -1, order="C") # C means right most columns will change the quickest
 
     timesteps = timesteps.flatten(order="C")
-      
+    res_targets = res_names * n_frames  
     df = pd.DataFrame({"residue":res_targets})
     df.insert(0, "timestep", timesteps)
     
@@ -91,7 +90,6 @@ def download_and_process_file(url, pdb_id):
         trajectories_df["pdb_id"] = pdb_id
         features_np = np.concatenate(features, axis=0)
         
-        # Return the DataFrame directly to main memory
         return trajectories_df, features_np
         
     except Exception as e:
@@ -126,15 +124,13 @@ def main(atlas_df, out_csv_name):
                 print(f"Worker generated an exception: {e}")
                 
     if out_data:
-        print("Saving final concatenated dataset...")
         out_dfs, out_nps = zip(*out_data)
         
         final_df = pd.concat(out_dfs, axis=0, ignore_index=True)
         print(final_df.head())
-        final_np = np.concat(out_nps, axis=0)
+        final_np = np.concatenate(out_nps, axis=0)
         final_df.to_csv(os.path.join("md_data", f"{out_csv_name}.csv"), index=False)
         np.save( os.path.join("md_data", f"{out_csv_name}.npy"), final_np)
-        print("Done!")
     else:
         print("No data processed successfully.")
 
