@@ -1,1 +1,1 @@
---run-name orthogonal_model --restriction-map-type orthogonal
+--run-name low_rank_classifier --restriction-map-type low_rank

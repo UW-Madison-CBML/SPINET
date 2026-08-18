@@ -235,7 +235,7 @@ class SheafResidualSAN(nn.Module):
 class InitDynamicsEmbedding(MessagePassing):
     def __init__(self, node_dim, edge_dim, output_dim, num_timesteps=16):
         super().__init__(aggr='mean', node_dim=0)
-        self.node_dim = node_dim
+        self.input_dim = node_dim
         self.edge_dim = edge_dim
         self.output_dim = output_dim
         self.num_timesteps = num_timesteps
@@ -247,11 +247,13 @@ class InitDynamicsEmbedding(MessagePassing):
         )
 
         self.update_linear = nn.Linear(node_dim + output_dim, output_dim)
+
         self.distribution_embedding = nn.Sequential(
             nn.Linear(output_dim, 64),
             nn.ReLU(),
             nn.Linear(64, output_dim)
         )
+
         self.lin_out = nn.Linear(output_dim, output_dim)
 
     def forward(self, x, pos, edge_index, edge_attr):
@@ -293,7 +295,7 @@ class AtomicFrame(nn.Module):
         y = y / torch.clamp(torch.norm(y, dim=-1, keepdim=True), min=0.01)
         
         # get final orthonormal basis vector:
-        z = torch.cross(x,y, dim=-1) # will be normal since other two vectors are normal 
+        z = torch.cross(x_basis,y, dim=-1) # will be normal since other two vectors are normal 
         
         raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-2) # num_res, n_frames, 3, 3
 
@@ -302,14 +304,14 @@ class AtomicFrame(nn.Module):
         edges = edges[:,:,:,:3*len(self.atom_indices)]
         edges = edges.view(edge_index.shape[1],2, x.shape[1], len(self.atom_indices), 3)
         dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(self.atom_indices), len(self.atom_indices)
-        edge_features = torch.cat([dist_feature.view(edge_index[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].repeat(1,x.shape[1], 1)], dim=2)
+        edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].repeat(1,x.shape[1], 1)], dim=2)
         
         # positions will contain the atomic coordinate
         positions = x[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
 
         # features will be certain positions in the coordinate frame
         relative_features = positions[:,:,self.not_frame_origin_mask,:] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-        in_frame_features = torch.matmul(raw_to_basis_matrix.mT, positions).view(x.shape[0], x.shape[1], 3*(len(self.num_atoms)-1)) # num_res, n_frames, (num_atoms-1) * 3
+        in_frame_features = torch.matmul(raw_to_basis_matrix.mT, relative_features).view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
         features = torch.cat([in_frame_features, x[:,:,len(self.atom_indices):]], dim=-1)
         
         return features, edge_features, positions, raw_to_basis_matrix # converts from standard I, J, K basis to atomic frame, M^T does the opposite (by definition of orthogonal maps)
@@ -337,10 +339,10 @@ class NodeSheafClassifier(nn.Module):
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
         
-        self.atomic_frame_embedding = AtomicFrameEmbedding(backbone_atoms, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(backbone_atoms)}) # atoms are packed left, with dihedral phi, psi and omega on righ
+        self.atomic_frame = AtomicFrame({atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(backbone_atoms)}, frame_origin="CA") # atoms are packed left, with dihedral phi, psi and omega on righ
 
         self.init_dynamics_embedding = InitDynamicsEmbedding(
-            12, # 3 componnets of O, C, N's positions in frame space relative to CA
+            22, # 3 componnets of O, C, N's positions in frame space relative to CA, 10 for what?
             17, # 16 for pairwise distances + 1 for bond_edge/not bond_edge
             hidden_dim,
             num_timesteps=self.num_timesteps
@@ -363,8 +365,9 @@ class NodeSheafClassifier(nn.Module):
         # take in batch of graphs
         # embed based on egocentric features, since positions are raw and absolute
 
-        data.x, data.edge_attr, data.basis_matrices = self.atomic_frame(data.x, data.edge_index, data.edge_attr)
-        data.x = self.init_dynamics_embedding(data.x, data.pos, data.edge_index)
+        data.x, data.edge_attr, data.pos, data.basis_matrices = self.atomic_frame(data.x, data.edge_index, data.edge_attr)
+
+        data.x = self.init_dynamics_embedding(data.x, data.pos, data.edge_index, data.edge_attr)
 
         # skip the above if you just want to train on precalced features:
 

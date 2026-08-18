@@ -26,6 +26,8 @@ def process_traj(traj):
             residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')].squeeze(1)) # n_frames,3
         all_atoms.append(np.concatenate(residue_atoms, axis=1)) # n_frames, 12
     all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
+
+    print(mdtraj.compute_phi(traj).shape) 
     _, phi   = np.pad(mdtraj.compute_phi(traj), ((0,0),(1,0)), mode="constant", constant_value=0.0)
     _, psi   = np.pad(mdtraj.compute_psi(traj), ((0,0),(0,1)), mode="constant", constant_value=0.0)
     _, omega = np.pad(mdtraj.compute_omega(traj), ((0,0),(0,1)), mode="constant", constant_value=0.0)

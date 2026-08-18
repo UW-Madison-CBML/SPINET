@@ -13,8 +13,11 @@ from torch_geometric.data import Data
 
 from residue_classifier_dataset import ResidueClassifierDataset
 from invariant_features_sheaf_model import NodeSheafClassifier
+from itertools import product
 
 from load_dynamics import BACKBONE_ATOMS
+
+FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","phi","omega"]
 
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
@@ -54,10 +57,6 @@ def train_residue_classifier(args_dict):
 
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
-
-    # CAUTION: this is based on the order of features defined in load_dynamics.py and is used to label the columns of the npy features file and is liable to change
-    # ensure load_dynamics is correctly implemented w.r.t the below
-    FEATURE_COLUMNS=["x","y","z","dx","dy","dz","bond_len", "bond_ang"]
 
     # set up device
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
