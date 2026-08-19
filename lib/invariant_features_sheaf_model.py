@@ -311,7 +311,7 @@ class AtomicFrame(nn.Module):
 
         # features will be certain positions in the coordinate frame
         relative_features = positions[:,:,self.not_frame_origin_mask,:] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-        in_frame_features = torch.matmul(raw_to_basis_matrix, relative_features).view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
+        in_frame_features = torch.matmul(relative_features, raw_to_basis_matrix).view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
         features = torch.cat([in_frame_features, x[:,:,len(self.atom_indices):]], dim=-1)
         
         return features, edge_features, positions, raw_to_basis_matrix # converts from standard I, J, K basis to atomic frame, M^T does the opposite (by definition of orthogonal maps)

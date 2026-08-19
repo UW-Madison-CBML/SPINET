@@ -13,6 +13,7 @@ from torch_geometric.data import Data
 
 from residue_classifier_dataset import ResidueClassifierDataset
 from invariant_features_sheaf_model import NodeSheafClassifier
+import itertools
 from itertools import product
 
 from load_dynamics import BACKBONE_ATOMS
@@ -35,7 +36,7 @@ def train_residue_classifier(args_dict):
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 32
+    batch_size = 64
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 8
@@ -221,32 +222,29 @@ def train_residue_classifier(args_dict):
                 preds = logits.argmax(dim=-1).cpu()
                 targets_cpu = targets.cpu()
 
-                batch_conf_mat = get_confusion_matrix(targets, preds, num_classes)
+                batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
 
-                # sequence position
-                if hasattr(batch, 'batch') and batch.batch is not None:
+                if hasattr(batch, "batch") and batch.batch is not None:
                     nodes_per_protein = torch.bincount(batch.batch)
-                    all_positions = torch.cat([torch.arange(n) for n in nodes_per_protein])
+                    all_positions = torch.cat([torch.arange(n.item(), device=DEVICE) for n in nodes_per_protein])
                 else:
-                    all_positions = torch.arange(batch.num_noes, device=DEVICE)
-
-                # filter pos to only nodes predicted
+                    all_positions = torch.arange(batch.num_nodes, device=DEVICE)
+                
                 positions = all_positions[pred_mask].cpu()
-                correct_mask = (preds == targets_cpu).float()
-
-                # expand tracking tensors if encounter longer sequences
-                current_max_pos = positions.max().item() + 1 if len(positions) > 0 else 0
-                if current_max_pos > len(pos_total):
-                    pad_size = current_max_pos - len(pos_total)
-                    pos_correct = torch.cat([pos_correct, torch.zeros(pad_size, dtype=torch.long)])
-                    pos_total = torch.cat([pos_total, torch.zeros(pad_size, dtype=torch.long)])
-
+                correct_mask = (preds == targets_cpu).long()
+                
                 if len(positions) > 0:
-                    pos_total += torch.bincount(positions, minlength=current_max_pos)
-                    pos_correct += torch.bincount(positions, weights=correct_mask, min_length=current_max_pos).long()
-
-        
+                    current_max_pos = positions.max().item() + 1
+                    
+                    if current_max_pos > len(pos_total):
+                        pad_size = current_max_pos - len(pos_total)
+                        pos_correct = torch.cat([pos_correct, torch.zeros(pad_size, dtype=torch.long)])
+                        pos_total = torch.cat([pos_total, torch.zeros(pad_size, dtype=torch.long)])
+                    
+                    pos_total += torch.bincount(positions, minlength=len(pos_total))
+                    pos_correct += torch.bincount(positions, weights=correct_mask, minlength=len(pos_correct)).long()
+                        
         diag = global_confusion_mat.diag()
         recall = torch.nan_to_num(diag / global_confusion_mat.sum(dim=1), 0.0)
         precision = torch.nan_to_num(diag / global_confusion_mat.sum(dim=0), 0.0)
