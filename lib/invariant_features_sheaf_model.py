@@ -273,9 +273,9 @@ class InitDynamicsEmbedding(MessagePassing):
 
 # the relative frame in this class is inspired by that of PiFold by Gao et al.
 class AtomicFrame(nn.Module):
-    def __init__(self, atom_indices, frame_origin="CA"):
+    def __init__(self, atoms, atom_indices, frame_origin="CA"):
         super().__init__()
-        self.atoms = atom_indices.keys()
+        self.atoms = atoms
         self.atom_indices = atom_indices
         assert frame_origin in self.atoms, f"frame origin: {frame_origin} is not in atoms"
         self.frame_origin = frame_origin
@@ -284,7 +284,7 @@ class AtomicFrame(nn.Module):
         
     def forward(self, x, edge_index, edge_attr):
         carbon_alphas = x[:,:,self.atom_indices[self.frame_origin]]
-        u,v = carbon_alphas - x[:,:,self.atom_indices["C"]], x[:,:,self.atom_indices[self.frame_origin]] - carbon_alphas
+        u,v = carbon_alphas - x[:,:,self.atom_indices["C"]], x[:,:,self.atom_indices["N"]] - carbon_alphas
 
         x_basis = u - v
         # normalize
@@ -300,18 +300,18 @@ class AtomicFrame(nn.Module):
         raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-2) # num_res, n_frames, 3, 3
 
         # now let's build edge features given by pairwise distances between atoms
-        edges = torch.stack([x[edge_index[0]], x[edge_index[1]]], axis=1) # E, 2, n_frames, n_features
-        edges = edges[:,:,:,:3*len(self.atom_indices)]
-        edges = edges.view(edge_index.shape[1],2, x.shape[1], len(self.atom_indices), 3)
+        pos_feats = x[:, :, :3*len(self.atom_indices)]          # num_res, n_frames, 3*num_atoms
+        edges = torch.stack([pos_feats[edge_index[0]], pos_feats[edge_index[1]]], dim=1)
+        edges = edges.view(edge_index.shape[1], 2, x.shape[1], len(self.atom_indices), 3)
         dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(self.atom_indices), len(self.atom_indices)
-        edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].repeat(1,x.shape[1], 1)], dim=2)
+        edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].expand(-1,x.shape[1], -1)], dim=2)
         
         # positions will contain the atomic coordinate
-        positions = x[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
+        positions = pos_feats[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
 
         # features will be certain positions in the coordinate frame
         relative_features = positions[:,:,self.not_frame_origin_mask,:] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-        in_frame_features = torch.matmul(raw_to_basis_matrix.mT, relative_features).view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
+        in_frame_features = torch.matmul(raw_to_basis_matrix, relative_features).view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
         features = torch.cat([in_frame_features, x[:,:,len(self.atom_indices):]], dim=-1)
         
         return features, edge_features, positions, raw_to_basis_matrix # converts from standard I, J, K basis to atomic frame, M^T does the opposite (by definition of orthogonal maps)
@@ -339,7 +339,7 @@ class NodeSheafClassifier(nn.Module):
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
         
-        self.atomic_frame = AtomicFrame({atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(backbone_atoms)}, frame_origin="CA") # atoms are packed left, with dihedral phi, psi and omega on righ
+        self.atomic_frame = AtomicFrame(backbone_atoms, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(backbone_atoms)}, frame_origin="CA") # atoms are packed left, with dihedral phi, psi and omega on righ
 
         self.init_dynamics_embedding = InitDynamicsEmbedding(
             22, # 3 componnets of O, C, N's positions in frame space relative to CA, 10 for what?
