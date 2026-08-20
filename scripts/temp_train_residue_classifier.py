@@ -137,9 +137,9 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
-    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
-    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    train_dataset = ResidueClassifierDataset(train_df, BACKBONE_ATOMS, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(BACKBONE_ATOMS)}, frame_origin="CA", epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    val_dataset = ResidueClassifierDataset(val_df, BACKBONE_ATOMS, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(BACKBONE_ATOMS)}, frame_origin="CA", epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    test_dataset = ResidueClassifierDataset(test_df, BACKBONE_ATOMS, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(BACKBONE_ATOMS)}, frame_origin="CA", epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
@@ -162,7 +162,6 @@ def train_residue_classifier(args_dict):
         ablate_sheaves=ablate_sheaves,
         num_timesteps=num_timesteps,
         restriction_map_type=restriction_map_type,
-        backbone_atoms=BACKBONE_ATOMS
     ).to(DEVICE)
 
     # -----------------------------------------

@@ -256,13 +256,13 @@ class InitDynamicsEmbedding(MessagePassing):
         self.lin_out = nn.Linear(output_dim, output_dim)
         self.gru = nn.GRU(output_dim, output_dim, batch_first=True)
 
-    def forward(self, x, pos, edge_index, edge_attr):
+    def forward(self, x, edge_index, edge_attr):
 
-        agg = self.propagate(edge_index, x=x, pos=pos, edge_attr=edge_attr)
+        agg = self.propagate(edge_index, x=x, edge_attr=edge_attr)
         _, h = self.gru(agg)
         return self.lin_out(F.relu(h.squeeze(0))) # use a gru as the overall representation
 
-    def message(self, x_i, x_j, pos_i, pos_j, edge_attr):
+    def message(self, x_i, x_j, edge_attr):
         
         dynamics_features = torch.cat([x_i, x_j, edge_attr], dim=-1)
 
@@ -327,13 +327,14 @@ class AtomicFrame(nn.Module):
         
         return features, edge_features # converts from standard I, J, K basis to atomic frame, M^T does the opposite (by definition of orthogonal maps)
         
-# -------------------------------------------------------------------------------------------
+
+        # -------------------------------------------------------------------------------------------
 
 
 
 
 class NodeSheafClassifier(nn.Module):
-    def __init__(self, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", backbone_atoms=["CA", "N", "C", "O"]):
+    def __init__(self, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank"):
         super().__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -350,7 +351,6 @@ class NodeSheafClassifier(nn.Module):
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
         
-        self.atomic_frame = AtomicFrame(backbone_atoms, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(backbone_atoms)}, frame_origin="CA") # atoms are packed left, with dihedral phi, psi and omega on righ
 
         self.init_dynamics_embedding = InitDynamicsEmbedding(
             25, # 3 componnets of O, C, N's positions in frame space relative to CA, 10 for what?
@@ -376,9 +376,7 @@ class NodeSheafClassifier(nn.Module):
         # take in batch of graphs
         # embed based on egocentric features, since positions are raw and absolute
 
-        data.x, data.edge_attr = self.atomic_frame(data.x, data.edge_index, data.edge_attr)
-
-        data.x = self.init_dynamics_embedding(data.x, data.pos, data.edge_index, data.edge_attr)
+        data.x = self.init_dynamics_embedding(data.x, data.edge_index, data.edge_attr)
 
         # skip the above if you just want to train on precalced features:
 
