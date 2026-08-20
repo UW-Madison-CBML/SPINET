@@ -36,11 +36,11 @@ def train_residue_classifier(args_dict):
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 64
+    batch_size = 16
     hidden_dim = 16
     stalk_dim = 8
-    num_blocks = 8
-    num_heads = 8
+    num_blocks = 4
+    num_heads = 4
     masking_ratio = 0.75
     ablate_sheaves=args_dict["ablate_sheaves"]
     run_name = args_dict["run_name"]
@@ -171,30 +171,48 @@ def train_residue_classifier(args_dict):
     crit = torch.nn.CrossEntropyLoss() # TODO replace this with a properly masked loss, if it exists
     if use_scheduler:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
-
+    # profiler stuff
+    table_path = os.path.abspath("table.txt")
+    trace_path = os.path.abspath("trace.json")
+    schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
     # training loop
     for epoch in range(epochs):
         model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        pbar = tqdm(itertools.islice(train_loader, 100), desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,  # the cpu activities
+                torch.profiler.ProfilerActivity.CUDA, # the gpu activities
+            ],
+            schedule=schedule,
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+            ) as prof: 
+            for batch in pbar:
+                batch = batch.to(DEVICE)
 
-        for batch in pbar:
-            batch = batch.to(DEVICE)
+                batch = batch.sort()
+                optimizer.zero_grad()
 
-            batch = batch.sort()
-            optimizer.zero_grad()
+                out_batch = model(batch)
 
-            out_batch = model(batch)
+                pred_mask = ~batch.node_mask.bool()
 
-            pred_mask = ~batch.node_mask.bool()
+                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
+                run.log({"train_loss": loss.item(), "epoch": epoch})
 
-            loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
-            run.log({"train_loss": loss.item(), "epoch": epoch})
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                if use_scheduler:
+                    scheduler.step()
+                prof.step()
+        prof.export_chrome_trace(trace_path)
 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            if use_scheduler:
-                scheduler.step()
+        with open(table_path, "w") as f:
+            f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
+
 
         # Validation Check
         model.eval()
