@@ -11,7 +11,7 @@ import traceback
 from itertools import product
 
 BACKBONE_ATOMS = ["CA", "N", "C", "O"]
-FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","phi","omega"]
+FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS + ["centroid"], ["x","y","z"])] + [ "phi","phi","omega"]
 
 def process_traj(traj):
     top = traj.topology
@@ -22,9 +22,10 @@ def process_traj(traj):
     all_atoms = [] 
     for i, res_idx in enumerate(res_indices):
         residue_atoms = []
+        centroid = traj.xyz[:, top.select(f'resid {res_idx} and backbone')].mean(dim=1)
         for atom in BACKBONE_ATOMS:
             residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')].squeeze(1)) # n_frames,3
-        all_atoms.append(np.concatenate(residue_atoms, axis=1)) # n_frames, 12
+        all_atoms.append(np.concatenate(residue_atoms + [centroid], axis=1)) # n_frames, 12
     all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
 
     phi   = np.pad(mdtraj.compute_phi(traj)[1], ((0,0),(1,0)), mode="constant", constant_values=0.0)
