@@ -177,7 +177,7 @@ def train_residue_classifier(args_dict):
     # training loop
     for epoch in range(epochs):
         model.train()
-        pbar = tqdm(itertools.islice(train_loader, 100), desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,  # the cpu activities

@@ -9,7 +9,7 @@ from torch_geometric.utils import dense_to_sparse
 import numpy as np
 from typing import Union, Tuple
 from load_dynamics import FEATURE_COLUMNS as features
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import os
 
@@ -33,32 +33,14 @@ def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32)
     edge_index, _ = dense_to_sparse(adj)
     return edge_index
 
-def build_graph(coords, feats, labels, mask, length, atom_indices, frame_origin, not_frame_origin_mask, epsilon=5.0, add_temporal_edges=True):
+
+def calculate_node_features(coords, feats, labels, mask, atom_indices, frame_origin, not_frame_origin_mask, epsilon=5.0, add_temporal_edges=True):
 
     pos = torch.as_tensor(coords, dtype=torch.float32)
     x = torch.as_tensor(feats, dtype=torch.float32)
     y = torch.as_tensor(labels, dtype=torch.long)
     node_mask = torch.as_tensor(mask, dtype=torch.bool)
-    length = torch.as_tensor(length, dtype=torch.long)
 
-    pos_time_first = pos.transpose(0, 1)
-
-    dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
-
-    dists = dists_over_time.amin(dim=0)
-
-    edge_index = edge_index_from_distmat(dists, epsilon=epsilon, k=32)
-    edge_attr = torch.zeros(edge_index.shape[1], 1)
-
-    if pos.shape[0] > 1: # check that protein isn't a monomer
-        idx = torch.arange(pos.shape[0] - 1)
-        temporal = torch.stack([
-            torch.cat([idx, idx + 1]),
-            torch.cat([idx + 1, idx]),
-        ])
-        temporal_attr = torch.ones(temporal.shape[1], 1)
-        edge_index = torch.cat([edge_index, temporal], dim=1)
-        edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
 
     carbon_alphas = x[:,:,atom_indices[frame_origin]]
 
@@ -68,31 +50,24 @@ def build_graph(coords, feats, labels, mask, length, atom_indices, frame_origin,
     # normalize
     x_basis = x_basis / torch.clamp(torch.norm(x_basis, dim = -1, keepdim=True), min=0.01)
 
-    y = torch.cross(u, v, dim = -1) 
+    y_basis = torch.cross(u, v, dim = -1) 
     # normalize
-    y = y / torch.clamp(torch.norm(y, dim=-1, keepdim=True), min=0.01)
+    y_basis = y_basis / torch.clamp(torch.norm(y_basis, dim=-1, keepdim=True), min=0.01)
     
     # get final orthonormal basis vector:
-    z = torch.cross(x_basis,y, dim=-1) # will be normal since other two vectors are normal 
+    z = torch.cross(x_basis,y_basis, dim=-1) # will be normal since other two vectors are normal 
     
-    raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-2) # num_res, n_frames, 3, 3
+    raw_to_basis_matrix = torch.stack([x_basis,y_basis,z], dim=-2) # num_res, n_frames, 3, 3
 
-    # now let's build edge features given by pairwise distances between atoms
-    pos_feats = x[:, :, :3*len(atom_indices)]          # num_res, n_frames, 3*num_atoms
-    edges = torch.stack([pos_feats[edge_index[0]], pos_feats[edge_index[1]]], dim=1)
-    edges = edges.view(edge_index.shape[1], 2, x.shape[1], len(atom_indices), 3)
-    dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(atom_indices), len(atom_indices)
-    
     # positions will contain the atomic coordinate
+
+    pos_feats = x[:, :, :3*len(atom_indices)]          # num_res, n_frames, 3*num_atoms
     positions = pos_feats[:,:,:len(atom_indices)*3].view(x.shape[0], x.shape[1],len(atom_indices), 3)
 
     backbone_centroids = positions.mean(dim=2)
     unpadded = backbone_centroids.diff(dim=1)
     velocities = torch.cat([unpadded[:,:1,:], unpadded],dim=1)
 
-    pair_wise_velocities = F.cosine_similarity(velocities[edge_index[0]], velocities[edge_index[1]], dim=-1).unsqueeze(-1)
-
-    edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(atom_indices)**2), edge_attr[:,None,:].expand(-1,x.shape[1], -1), pair_wise_velocities], dim=2)
 
     # features will be certain positions in the coordinate frame
     relative_features = positions[:, :, not_frame_origin_mask, :] - positions[:, :, ~not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
@@ -101,29 +76,21 @@ def build_graph(coords, feats, labels, mask, length, atom_indices, frame_origin,
     
     features = torch.cat([in_frame_features, x[:,:,len(atom_indices):], in_frame_velocities], dim=-1)
 
-    return Data(x=features, pos=pos, y=y, node_mask=node_mask, edge_index=edge_index, edge_attr=edge_attr, lengths=length.unsqueeze(0))
+    return {"x":x, "features":features, "velocities":velocities, "frame_mats":raw_to_basis_matrix, "pos":pos, "y":y, "node_mask":node_mask}
+    
 
+def get_node_features(traj, pos_cols, feature_cols, amino_acids, epsilon, atom_indices, frame_origin, not_frame_origin_mask):
 
-def get_graph(traj, traj_len, pos_cols, feature_cols, amino_acids, epsilon, atom_indices, frame_origin, not_frame_origin_mask, group_idx, frame_idx_start, frame_idx_end):
-
-    frame_idxs = range(frame_idx_start, frame_idx_end) # not inclusive
-
-    if(traj_len is not None):
-        assert len(traj) == traj_len, "traj len does not match length of trajectory"
-
-    frames = [traj.get_group(i) for i in frame_idxs]
+    frames = [group for name,group in list(traj)]
     
     pos = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
 
-    # I'm just using the first frame's mask as the mask, that way GT mask in the df remains
 
-    length = len(frames)
-    return build_graph(
+    return calculate_node_features(
             pos,
             np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1),
             torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
             frames[0]["mask"].to_numpy(),
-            length,
             atom_indices, 
             frame_origin, 
             not_frame_origin_mask,
@@ -187,27 +154,64 @@ class ResidueClassifierDataset(Dataset):
                     for j in range(length-(seq_len - 1)):
                         self.index.append((i,j,j+seq_len))
             self.index = np.array(self.index)
-        self.batches = []
+        self.trajs = []
         max_workers = os.cpu_count()
         
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(get_graph, self.groups[group_idx], self.traj_len, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.AMINO_ACIDS, self.epsilon, self.atom_indices, self.frame_origin, self.not_frame_origin_mask, group_idx, frame_idx_start, frame_idx_end) for group_idx, frame_idx_start, frame_idx_end in self.index]
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.AMINO_ACIDS, self.epsilon, self.atom_indices, self.frame_origin, self.not_frame_origin_mask) for traj in self.groups]
             
             kwargs = {"total": len(futures), "desc": "Processing Training Data Seqs", "unit": "job"}
             for future in tqdm(as_completed(futures), **kwargs):
                 try:
                     data = future.result()
-                    self.batches.append(data)
+                    self.trajs.append(data)
                 except Exception as e:
                     print(f"Worker generated an exception: {e}")
      
             
 
     def __len__(self):
-        return len(self.batches) 
+        return len(self.index) 
 
     def __getitem__(self, idx):
-        return self.batches[idx]
+        traj_idx, frame_index_start, frame_index_end = self.index[idx]
+        idxs = slice(frame_index_start, frame_index_end)
+        traj = self.trajs[traj_idx]
+        length = torch.as_tensor(frame_index_end-frame_index_start, dtype=torch.long)
+        
+        x, features, pos, velocities, y, node_mask = traj["x"][:,idxs], traj["features"][:,idxs], traj["pos"][:,idxs], traj["velocities"][:,idxs], traj["y"],traj["node_mask"]
+        pos_time_first = pos.permute(1,0,2).contiguous()
+        dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
+
+        dists = dists_over_time.amin(dim=0)
+
+        edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
+        edge_attr = torch.zeros(edge_index.shape[1], 1)
+
+        if pos.shape[0] > 1: # check that protein isn't a monomer
+            idx = torch.arange(pos.shape[0] - 1)
+            temporal = torch.stack([
+                torch.cat([idx, idx + 1]),
+                torch.cat([idx + 1, idx]),
+            ])
+            temporal_attr = torch.ones(temporal.shape[1], 1)
+            edge_index = torch.cat([edge_index, temporal], dim=1)
+            edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
+
+
+        # now let's build edge features given by pairwise distances between atoms
+        pos_feats = x[:, :, :3*len(self.atom_indices)]          # num_res, n_frames, 3*num_atoms
+        edges = torch.stack([pos_feats[edge_index[0]], pos_feats[edge_index[1]]], dim=1)
+        edges = edges.view(edge_index.shape[1], 2, x.shape[1], len(self.atom_indices), 3)
+        dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(atom_indices), len(atom_indices)
+         
+
+        pair_wise_velocities = F.cosine_similarity(velocities[edge_index[0]], velocities[edge_index[1]], dim=-1).unsqueeze(-1)
+        edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].expand(-1,x.shape[1], -1), pair_wise_velocities], dim=2)
+
+        return Data(x=features, y=y, pos=pos,edge_index=edge_index, edge_attr =edge_features, node_mask=node_mask, lengths=length.unsqueeze(0)) # need to add single dim so that concat works properly
+
         
 
 
