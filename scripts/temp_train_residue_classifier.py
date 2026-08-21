@@ -18,7 +18,7 @@ from itertools import product
 
 from load_dynamics import BACKBONE_ATOMS
 
-FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","phi","omega"]
+FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","psi","omega"]
 
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
@@ -137,9 +137,9 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df, BACKBONE_ATOMS, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(BACKBONE_ATOMS)}, frame_origin="CA", epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
-    val_dataset = ResidueClassifierDataset(val_df, BACKBONE_ATOMS, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(BACKBONE_ATOMS)}, frame_origin="CA", epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
-    test_dataset = ResidueClassifierDataset(test_df, BACKBONE_ATOMS, {atom : slice(3 * i, 3 * (i+1)) for i, atom in enumerate(BACKBONE_ATOMS)}, frame_origin="CA", epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    train_dataset = ResidueClassifierDataset(train_df,  epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
@@ -173,44 +173,31 @@ def train_residue_classifier(args_dict):
     # profiler stuff
     table_path = os.path.abspath("table.txt")
     trace_path = os.path.abspath("trace.json")
-    schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
+
+
     # training loop
     for epoch in range(epochs):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,  # the cpu activities
-                torch.profiler.ProfilerActivity.CUDA, # the gpu activities
-            ],
-            schedule=schedule,
-            record_shapes=False,
-            profile_memory=False,
-            with_stack=False,
-            ) as prof: 
-            for batch in pbar:
-                batch = batch.to(DEVICE)
+        for batch in pbar:
+            batch = batch.to(DEVICE)
 
-                batch = batch.sort()
-                optimizer.zero_grad()
+            batch = batch.sort()
+            optimizer.zero_grad()
 
-                out_batch = model(batch)
+            out_batch = model(batch)
 
-                pred_mask = ~batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()
 
-                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
-                run.log({"train_loss": loss.item(), "epoch": epoch})
+            loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
+            run.log({"train_loss": loss.item(), "epoch": epoch})
 
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                if use_scheduler:
-                    scheduler.step()
-                prof.step()
-        prof.export_chrome_trace(trace_path)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            if use_scheduler:
+                scheduler.step()
 
-        with open(table_path, "w") as f:
-            f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
 
 
         # Validation Check

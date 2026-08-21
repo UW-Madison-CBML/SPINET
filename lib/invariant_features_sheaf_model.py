@@ -350,14 +350,8 @@ class NodeSheafClassifier(nn.Module):
         self.gat_dropout = gat_dropout
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
-        
 
-        self.init_dynamics_embedding = InitDynamicsEmbedding(
-            25, # 3 componnets of O, C, N's positions in frame space relative to CA, 10 for what?
-            18, # 16 for pairwise distances + 1 for bond_edge/not bond_edge
-            hidden_dim,
-            num_timesteps=self.num_timesteps
-        )
+        self.mlp_embedding = nn.Sequential(nn.Linear(12, 2*self.hidden_dim), nn.ReLU(), nn.Linear(2*self.hidden_dim, self.hidden_dim))
 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
@@ -373,12 +367,8 @@ class NodeSheafClassifier(nn.Module):
         )
 
     def forward(self, data):
-        # take in batch of graphs
-        # embed based on egocentric features, since positions are raw and absolute
 
-        data.x = self.init_dynamics_embedding(data.x, data.edge_index, data.edge_attr)
-
-        # skip the above if you just want to train on precalced features:
+        data.x = self.mlp_embedding(data.x)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

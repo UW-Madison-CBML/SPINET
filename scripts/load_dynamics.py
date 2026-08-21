@@ -11,7 +11,7 @@ import traceback
 from itertools import product
 
 BACKBONE_ATOMS = ["CA", "N", "C", "O"]
-FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS, ["x","y","z"])] + [ "phi","phi","omega"]
+FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS, ["x","y","z"])] + [ "phi","psi","omega"]
 
 def process_traj(traj):
     top = traj.topology
