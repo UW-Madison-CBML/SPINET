@@ -164,7 +164,7 @@ class ResidueClassifierDataset(Dataset):
             edge_index = torch.cat([edge_index, temporal], dim=1)
             edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
 
-        return Data(x=x, y=y, pos=pos,edge_index=edge_index, node_mask=node_mask) # need to add single dim so that concat works properly
+        return Data(x=x, y=y, pos=pos, edge_index=edge_index, node_mask=node_mask, index=torch.tensor([self.index[idx]])) # need to add single dim so that concat works properly
 
         
 

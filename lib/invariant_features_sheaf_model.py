@@ -143,7 +143,7 @@ class SheafAttentionConv(MessagePassing):
 
 
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, return_sheaves=False):
         if not self.ablate_sheaves: 
             node_to_edge_maps = self.sheaf_learner(x, edge_index)
             # we need to get a map from the index of edge (a,b) to the index of edge (b,a) to learn the transport maps F_{b \unlhd e_{a,b}}^T @ F_{a \unlhd e_{a,b}} 
@@ -157,9 +157,12 @@ class SheafAttentionConv(MessagePassing):
             transport_maps = torch.eye(self.stalk_dim, device=x.device)[None, :, :].expand(edge_index.shape[1], -1, -1)
 
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
-        
+         
         out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=transport_maps)
-        return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
+        if return_sheaves and not self.ablate_sheaves:
+            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
+        else:
+            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
 
     def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
         W_params = {"weight": self.W_weights}
@@ -366,7 +369,7 @@ class NodeSheafClassifier(nn.Module):
             nn.Linear(self.hidden_dim, self.num_classes)
         )
 
-    def forward(self, data):
+    def forward(self, data, return_sheaf=False):
 
         data.x = self.mlp_embedding(data.x)
 
@@ -374,7 +377,7 @@ class NodeSheafClassifier(nn.Module):
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
 
         # run sheaf attention
-        data = self.san(data)
+        data = self.san(data, return_sheaf=return_sheaf)
 
         data.x = self.classifier(data.x) # classify nodes
 

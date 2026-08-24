@@ -20,6 +20,30 @@ from load_dynamics import BACKBONE_ATOMS
 
 FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","psi","omega"]
 
+import json
+import subprocess
+def scrmsd_af2(novel_seqs, gt_trajs):
+    novel_designs = {
+        "design_1": "MVRSTAAALLLIPPPVWARST",
+        "design_2": "MVRSTGGGGGGIPPPVWARST"
+    }
+
+    fasta_path = "batch_input.fasta"
+    with open(fasta_path, "w") as f:
+        for name, seq in novel_designs.items():
+            f.write(f">{name}\n{seq}\n")
+
+    output_dir = "./af2_results"
+    command = [
+        "colabfold_batch",
+        fasta_path,
+        output_dir,
+        "--num-recycle", "3",
+        "--use-amber",
+    ]
+
+    subprocess.run(command, check=True)
+
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
     gt_one_hot = F.one_hot(gt_indices, num_classes=num_classes).float()
@@ -28,6 +52,18 @@ def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     confusion_mat = torch.einsum("bi, bj->ij", gt_one_hot, pred_one_hot)
     return confusion_mat
 
+def top_k_acc(logits:torch.Tensor, targets:torch.Tensor, k:int):
+    """
+    logits: B, num_classes
+    targets: B, type=int/long > 0 
+    """
+    assert k > 0, "k must be >0"
+    hot_logits = torch.zeros_like(logits) 
+    indices = torch.topk(logits, k, dim=-1).indices
+    hot_logits = hot_logits.scatter_(1, indices, 1)
+    correct_mask = torch.einsum("bi,bi->b", hot_logits, F.one_hot(target, num_classes=logits.shape[1]))
+    return correct_mask.sum().item() / correct_mask.shape[0] 
+    
 
 def train_residue_classifier(args_dict):
     # hyperparameters
@@ -202,15 +238,23 @@ def train_residue_classifier(args_dict):
 
         # Validation Check
         model.eval()
-        val_losses = []
 
         global_confusion_mat = torch.zeros((num_classes, num_classes))
+        val_acc_top_1_stats = []
+        val_acc_top_5_stats = []
+        val_acc_top_10_stats = []
 
         pos_correct = torch.zeros(0, dtype=torch.long)
         pos_total = torch.zeros(0, dtype=torch.long)
 
+        val_losses = []
+        f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+        precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+        recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+        
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+
                 batch = batch.to(DEVICE)
                 batch = batch.sort() 
                 out_batch = model(batch)
@@ -249,21 +293,37 @@ def train_residue_classifier(args_dict):
                     pos_total += torch.bincount(positions, minlength=len(pos_total))
                     pos_correct += torch.bincount(positions, weights=correct_mask, minlength=len(pos_correct)).long()
                         
-        diag = global_confusion_mat.diag()
-        recall = torch.nan_to_num(diag / global_confusion_mat.sum(dim=1), 0.0)
-        precision = torch.nan_to_num(diag / global_confusion_mat.sum(dim=0), 0.0)
-        f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
+                diag = global_confusion_mat.diag()
+                recall = torch.nan_to_num(diag / global_confusion_mat.sum(dim=1), 0.0)
+                precision = torch.nan_to_num(diag / global_confusion_mat.sum(dim=0), 0.0)
+                f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
 
-        # Residue sequence position
+                # Residue sequence position
 
-        # Evaluate amino acids
-        prf_dict = {}
+                # Evaluate amino acids
+                prf_dict = {}
+                for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
+                     precisions[amino_acid].append(precision[k].item())
+                     recalls[amino_acid].append(recall[k].item())
+                     f1s[amino_acid].append(f1[k].item())
+        precisions = {key: torch.tensor(value) for key, value in precisions.items()}
+        recalls = {key: torch.tensor(value) for key, value in recalls.items()}
+        f1s = {key: torch.tensor(value) for key, value in f1s.items()}
         for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
-            prf_dict[f"val_{amino_acid}_precision"] = precision[k].item()
-            prf_dict[f"val_{amino_acid}_recall"] = recall[k].item()
-            prf_dict[f"val_{amino_acid}_f1"] = f1[k].item()
-        prf_dict["val_top_1_acc"] = diag.sum().item() / global_confusion_mat.sum().item()
+            prf_dict[f"val_{amino_acid}_f1_mean"] = f1s[amino_acid].mean().item()
+            prf_dict[f"val_{amino_acid}_precision_mean"] = precisions[amino_acid].mean().item()
+            prf_dict[f"val_{amino_acid}_recall_mean"] = recalls[amino_acid].mean().item()
+            prf_dict[f"val_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
+            prf_dict[f"val_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
+            prf_dict[f"val_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
 
+        # perplexity score
+        val_perplexities = torch.exp(torch.tensor(val_losses))
+        prf_dict["val_perp_mean"] = val_perplexities.mean().item()
+        prf_dict["val_perp_std"] = val_perplexities.std().item()
+
+            
+        
         # Confusion matrix
         fig, ax = plt.subplots(figsize=(12, 12))
         disp = ConfusionMatrixDisplay(
