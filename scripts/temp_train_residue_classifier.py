@@ -84,6 +84,7 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 32
     use_scheduler=False
+    test_val = False
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -214,14 +215,22 @@ def train_residue_classifier(args_dict):
     # training loop
     for epoch in range(epochs):
         model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        pbar = tqdm(train_loader if not test_val else itertools.islice(train_loader,100), desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        times1 = []
+        times2 = []
+        times3 = []
+        times4 = []
         for batch in pbar:
+            times1.append(time.perf_counter())
             batch = batch.to(DEVICE)
 
             batch = batch.sort()
+            times2.append(time.perf_counter())
             optimizer.zero_grad()
-
+            
             out_batch = model(batch)
+
+            times3.append(time.perf_counter())
 
             pred_mask = ~batch.node_mask.bool()
 
@@ -231,10 +240,15 @@ def train_residue_classifier(args_dict):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            times4.append(time.perf_counter())
             if use_scheduler:
                 scheduler.step()
 
-
+        times1 = torch.tensor(times2) - torch.tensor(times1)
+        times2 = torch.tensor(times3) - torch.tensor(times2)
+        times3 = torch.tensor(times4) - torch.tensor(times3)
+        batch_cycle_times = times.diff()
+        run.log({"to_gpu_time":times1.mean().item(), "forward_pass_time":times2.mean().item(), "backpass_time":times3.mean().item(), "cycle_time":batch_cycles_times.mean().item()}) 
 
         # Validation Check
         model.eval()
@@ -266,9 +280,17 @@ def train_residue_classifier(args_dict):
 
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
                 val_losses.append(loss.item())
-
+                data_list = out_batch.cpu().data_list()
+                pred_seqs = [data.x.argmax(dim=-1) for data in data_list]
+                for i, gt_data in enumerate(batch.cpu().data_list()):
+                    pred_seqs[i][~pred_mask] = gt_data.y[~pred_mask]
+                
+                pred_seqs = ["".join([ResidueClassifierDataset.AMINO_ACIDS[acid_idx] for acid_idx in seq]) for seq in pred_seqs]
                 preds = logits.argmax(dim=-1).cpu()
                 targets_cpu = targets.cpu()
+                val_acc_top_1_stats.append(topk_acc(logits.cpu(), targets_cpu,1))
+                val_acc_top_5_stats.append(topk_acc(logits.cpu(), targets_cpu,5))
+                val_acc_top_10_stats.append(topk_acc(logits.cpu(), targets_cpu,10))
 
                 batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
@@ -293,9 +315,9 @@ def train_residue_classifier(args_dict):
                     pos_total += torch.bincount(positions, minlength=len(pos_total))
                     pos_correct += torch.bincount(positions, weights=correct_mask, minlength=len(pos_correct)).long()
                         
-                diag = global_confusion_mat.diag()
-                recall = torch.nan_to_num(diag / global_confusion_mat.sum(dim=1), 0.0)
-                precision = torch.nan_to_num(diag / global_confusion_mat.sum(dim=0), 0.0)
+                diag = batch_conf_mat.diag()
+                recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)
+                precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)
                 f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
 
                 # Residue sequence position
@@ -321,6 +343,18 @@ def train_residue_classifier(args_dict):
         val_perplexities = torch.exp(torch.tensor(val_losses))
         prf_dict["val_perp_mean"] = val_perplexities.mean().item()
         prf_dict["val_perp_std"] = val_perplexities.std().item()
+        
+        val_acc_top1_stats = torch.tensor(val_acc_top_1_stats)
+        val_acc_top5_stats = torch.tensor(val_acc_top_5_stats)
+        val_acc_top10_stats = torch.tensor(val_acc_top_10_stats)
+
+        prf_dict["val_top1_acc_mean"] = val_acc_top_1_stats.mean().item()
+        prf_dict["val_top5_acc_mean"] = val_acc_top_5_stats.mean().item()
+        prf_dict["val_top10_acc_mean"] = val_acc_top_10_stats.mean().item()
+        prf_dict["val_top1_acc_std"] = val_acc_top_1_stats.std().item()
+        prf_dict["val_top5_acc_std"] = val_acc_top_5_stats.std().item()
+        prf_dict["val_top10_acc_std"] = val_acc_top_10_stats.std().item()
+        
 
             
         

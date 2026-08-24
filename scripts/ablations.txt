@@ -1,1 +1,2 @@
---run-name low_rank_classifier --restriction-map-type low_rank
+--run-name our_model --restriction-map-type orthogonal
+--run-name no_sheaves --restriction-map-type orthogonal --ablate-sheaves
