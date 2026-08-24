@@ -1,2 +1,2 @@
 --run-name our_model --restriction-map-type orthogonal
---run-name no_sheaves --restriction-map-type orthogonal --ablate-sheaves
+--run-name no_sheaves --ablate-sheaves

@@ -34,7 +34,7 @@ def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32)
     return edge_index
 
 
-def calculate_node_features(coords, feats, labels, mask, epsilon=5.0):
+def calculate_node_features(coords, feats, labels, mask, name, epsilon=5.0):
 
     pos = torch.as_tensor(coords, dtype=torch.float32)
     x = torch.as_tensor(feats, dtype=torch.float32)
@@ -42,10 +42,10 @@ def calculate_node_features(coords, feats, labels, mask, epsilon=5.0):
     node_mask = torch.as_tensor(mask, dtype=torch.bool)
 
 
-    return {"x":x, "pos":pos, "y":y, "node_mask":node_mask}
+    return {"x":x, "pos":pos, "y":y, "node_mask":node_mask, "traj_id":name}
     
 
-def get_node_features(traj, pos_cols, feature_cols, amino_acids, epsilon):
+def get_node_features(traj, pos_cols, feature_cols, amino_acids, epsilon, name):
 
     frames = [group for name,group in list(traj)]
     
@@ -57,6 +57,7 @@ def get_node_features(traj, pos_cols, feature_cols, amino_acids, epsilon):
             np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1),
             torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
             frames[0]["mask"].to_numpy(),
+            name,
             epsilon = epsilon
     )
 
@@ -86,7 +87,7 @@ class ResidueClassifierDataset(Dataset):
         epsilon: tolerance to build edge between nodes, i.e. if during the trajectory the edges ever get within epsilon from eachother
         """
         self.df = df
-        self.groups = [group.groupby('timestep') for _, group in list(df.groupby("traj_id"))]
+        self.groups = [(name, group.groupby('timestep')) for name, group in list(df.groupby("traj_id"))]
         self.epsilon = epsilon
         assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
         self.fixed_length = fixed_length
@@ -115,7 +116,7 @@ class ResidueClassifierDataset(Dataset):
         max_workers = os.cpu_count()
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.AMINO_ACIDS, self.epsilon) for traj in self.groups]
+            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.AMINO_ACIDS, self.epsilon, name) for name, traj in self.groups]
             
             kwargs = {"total": len(futures), "desc": "Processing Training Data Seqs", "unit": "job"}
             for future in tqdm(as_completed(futures), **kwargs):
@@ -135,7 +136,7 @@ class ResidueClassifierDataset(Dataset):
         idxs = slice(frame_index_start, frame_index_end)
         traj = self.trajs[traj_idx]
         
-        x, pos, y, node_mask = traj["x"][:,idxs], traj["pos"][:,idxs], traj["y"], traj["node_mask"]
+        x, pos, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["y"], traj["node_mask"], traj["traj_id"]
 
         x_time_first = x.permute(1,0,2).contiguous()
         
@@ -164,7 +165,7 @@ class ResidueClassifierDataset(Dataset):
             edge_index = torch.cat([edge_index, temporal], dim=1)
             edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
 
-        return Data(x=x, y=y, pos=pos, edge_index=edge_index, node_mask=node_mask, index=torch.tensor([self.index[idx]])) # need to add single dim so that concat works properly
+        return Data(x=x, y=y, pos=pos, edge_index=edge_index, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
 
         
 

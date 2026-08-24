@@ -58,7 +58,7 @@ class SheafLearnerOrthogonal(nn.Module):
         upper_tri = self.triu_learner(F.relu(self.lin(edge_features)))
 
         # put upper triangle values in
-        maps_flat = torch.matmul(self.upper_indices_matrix, upper_tri[:,None,:])
+        maps_flat = torch.matmul(self.upper_indices_matrix, upper_tri[:,:,None])
 
         # make then square
         maps = maps_flat.view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
@@ -143,7 +143,7 @@ class SheafAttentionConv(MessagePassing):
 
 
 
-    def forward(self, x, edge_index, return_sheaves=False):
+    def forward(self, x, edge_index, return_sheaf=False):
         if not self.ablate_sheaves: 
             node_to_edge_maps = self.sheaf_learner(x, edge_index)
             # we need to get a map from the index of edge (a,b) to the index of edge (b,a) to learn the transport maps F_{b \unlhd e_{a,b}}^T @ F_{a \unlhd e_{a,b}} 
@@ -159,8 +159,8 @@ class SheafAttentionConv(MessagePassing):
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
          
         out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=transport_maps)
-        if return_sheaves and not self.ablate_sheaves:
-            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
+        if return_sheaf and not self.ablate_sheaves:
+            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim)), node_to_edge_maps
         else:
             return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
 
@@ -201,11 +201,17 @@ class SheafResidualSANBlock(nn.Module):
         self.norm = nn.LayerNorm(self.hidden_dim)
         self.act = nn.ReLU()
 
-    def forward(self, data):
+    def forward(self, data, return_sheaf=False):
         residual = data.x
-        out = self.san(data.x, data.edge_index)
+        if return_sheaf:
+            out, sheaf = self.san(data.x, data.edge_index, return_sheaf=return_sheaf)
+        else:
+            out = self.san(data.x, data.edge_index)
         data.x = self.norm(residual + self.act(out))
-        return data
+        if return_sheaf:
+            return data, sheaf
+        else:
+            return data
 
 
 
@@ -223,10 +229,21 @@ class SheafResidualSAN(nn.Module):
             SheafResidualSANBlock(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type) for _ in range(num_blocks)
         ])
 
-    def forward(self, data):
-        for block in self.blocks:
-            data = block(data)
-        return data
+    def forward(self, data, return_sheaf=False):
+        first_sheaf, last_sheaf = None,None 
+        for i, block in enumerate(self.blocks):
+            if return_sheaf and i == 0:
+                data, first_sheaf = block(data, return_sheaf=return_sheaf)
+            elif return_sheaf and i == len(self.blocks)-1:
+                data, last_sheaf = block(data, return_sheaf=return_sheaf)
+            elif return_sheaf:
+                data, _ = block(data, return_sheaf=return_sheaf)
+            else:
+                data = block(data)
+        if return_sheaf:
+            return data, first_sheaf, last_sheaf
+        else:
+            return data
 
 
 
@@ -377,11 +394,17 @@ class NodeSheafClassifier(nn.Module):
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
 
         # run sheaf attention
-        data = self.san(data, return_sheaf=return_sheaf)
+        if return_sheaf:
+            data, first_sheaf, last_sheaf = self.san(data, return_sheaf=return_sheaf)
+        else:
+            data = self.san(data)
 
         data.x = self.classifier(data.x) # classify nodes
 
-        return data
+        if return_sheaf:
+            return data, first_sheaf, last_sheaf
+        else:
+            return data
 
 
 

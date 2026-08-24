@@ -17,16 +17,15 @@ import itertools
 from itertools import product
 
 from load_dynamics import BACKBONE_ATOMS
+from Bio.SeqUtils import seq1
+
 
 FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","psi","omega"]
+import time
 
 import json
 import subprocess
-def scrmsd_af2(novel_seqs, gt_trajs):
-    novel_designs = {
-        "design_1": "MVRSTAAALLLIPPPVWARST",
-        "design_2": "MVRSTGGGGGGIPPPVWARST"
-    }
+def scrmsd_af2(novel_designs, gt_trajs):
 
     fasta_path = "batch_input.fasta"
     with open(fasta_path, "w") as f:
@@ -34,6 +33,7 @@ def scrmsd_af2(novel_seqs, gt_trajs):
             f.write(f">{name}\n{seq}\n")
 
     output_dir = "./af2_results"
+    os.makedirs(output_dir, exist_ok=True)
     command = [
         "colabfold_batch",
         fasta_path,
@@ -60,8 +60,8 @@ def top_k_acc(logits:torch.Tensor, targets:torch.Tensor, k:int):
     assert k > 0, "k must be >0"
     hot_logits = torch.zeros_like(logits) 
     indices = torch.topk(logits, k, dim=-1).indices
-    hot_logits = hot_logits.scatter_(1, indices, 1)
-    correct_mask = torch.einsum("bi,bi->b", hot_logits, F.one_hot(target, num_classes=logits.shape[1]))
+    hot_logits = hot_logits.scatter_(1, indices, 1).float()
+    correct_mask = torch.einsum("bi,bi->b", hot_logits, F.one_hot(targets, num_classes=logits.shape[1]).float())
     return correct_mask.sum().item() / correct_mask.shape[0] 
     
 
@@ -84,7 +84,7 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 32
     use_scheduler=False
-    test_val = False
+    test_val = True
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -183,11 +183,11 @@ def train_residue_classifier(args_dict):
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
     test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:test_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
 
+    single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=False, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
     # set up new diffusion model # TODO fix all this
-    # do we need this dummy data initialization?
     # ---------------------------------------------
 
     model = NodeSheafClassifier(
@@ -247,8 +247,8 @@ def train_residue_classifier(args_dict):
         times1 = torch.tensor(times2) - torch.tensor(times1)
         times2 = torch.tensor(times3) - torch.tensor(times2)
         times3 = torch.tensor(times4) - torch.tensor(times3)
-        batch_cycle_times = times.diff()
-        run.log({"to_gpu_time":times1.mean().item(), "forward_pass_time":times2.mean().item(), "backpass_time":times3.mean().item(), "cycle_time":batch_cycles_times.mean().item()}) 
+        batch_cycle_times = times1.diff()
+        run.log({"to_gpu_time":times1.mean().item(), "forward_pass_time":times2.mean().item(), "backpass_time":times3.mean().item(), "cycle_time":batch_cycle_times.mean().item()}) 
 
         # Validation Check
         model.eval()
@@ -267,7 +267,7 @@ def train_residue_classifier(args_dict):
         recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
         
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+            for batch in tqdm(val_loader if not test_val else itertools.islice(val_loader,100), desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
 
                 batch = batch.to(DEVICE)
                 batch = batch.sort() 
@@ -280,17 +280,31 @@ def train_residue_classifier(args_dict):
 
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
                 val_losses.append(loss.item())
-                data_list = out_batch.cpu().data_list()
-                pred_seqs = [data.x.argmax(dim=-1) for data in data_list]
-                for i, gt_data in enumerate(batch.cpu().data_list()):
-                    pred_seqs[i][~pred_mask] = gt_data.y[~pred_mask]
-                
-                pred_seqs = ["".join([ResidueClassifierDataset.AMINO_ACIDS[acid_idx] for acid_idx in seq]) for seq in pred_seqs]
+
+                out_batch = out_batch.cpu()
+                batch = batch.cpu()
+                data_list = out_batch.to_data_list()
+                gt_list = batch.to_data_list()
+
+                pred_seqs = {}
+                for i, gt_data in enumerate(gt_list):
+                    pred_data = data_list[i]
+    
+                    pred_idx = pred_data.x.argmax(dim=-1)
+                    
+                    graph_mask = ~gt_data.node_mask.bool()
+                    
+                    pred_idx[~graph_mask] = gt_data.y[~graph_mask]
+                    
+                    seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
+                    pred_seqs[gt_data.traj_id] = seq_str
+
+                scrmsd_af2(pred_seqs, None)
                 preds = logits.argmax(dim=-1).cpu()
                 targets_cpu = targets.cpu()
-                val_acc_top_1_stats.append(topk_acc(logits.cpu(), targets_cpu,1))
-                val_acc_top_5_stats.append(topk_acc(logits.cpu(), targets_cpu,5))
-                val_acc_top_10_stats.append(topk_acc(logits.cpu(), targets_cpu,10))
+                val_acc_top_1_stats.append(top_k_acc(logits.cpu(), targets_cpu,1))
+                val_acc_top_5_stats.append(top_k_acc(logits.cpu(), targets_cpu,5))
+                val_acc_top_10_stats.append(top_k_acc(logits.cpu(), targets_cpu,10))
 
                 batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
@@ -344,9 +358,9 @@ def train_residue_classifier(args_dict):
         prf_dict["val_perp_mean"] = val_perplexities.mean().item()
         prf_dict["val_perp_std"] = val_perplexities.std().item()
         
-        val_acc_top1_stats = torch.tensor(val_acc_top_1_stats)
-        val_acc_top5_stats = torch.tensor(val_acc_top_5_stats)
-        val_acc_top10_stats = torch.tensor(val_acc_top_10_stats)
+        val_acc_top_1_stats = torch.tensor(val_acc_top_1_stats)
+        val_acc_top_5_stats = torch.tensor(val_acc_top_5_stats)
+        val_acc_top_10_stats = torch.tensor(val_acc_top_10_stats)
 
         prf_dict["val_top1_acc_mean"] = val_acc_top_1_stats.mean().item()
         prf_dict["val_top5_acc_mean"] = val_acc_top_5_stats.mean().item()
@@ -387,8 +401,25 @@ def train_residue_classifier(args_dict):
             prf_dict["val_position_accuracy_plot"] = wandb.Image(fig_pos)
             plt.close(fig_pos)
 
-        # overall loss
+        # now let's qualitatively analyze sheaves
+        if not ablate_sheaves:
+            with torch.no_grad():
+                for batch in tqdm(single_graph_val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+
+                    data = batch.to_data_list()[0].to(DEVICE)
+                    data = data.sort() 
+                    _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
+                    first_sheaf = first_sheaf.cpu()
+                    last_sheaf = last_sheaf.cpu()
+                    data = data.cpu()
+                    traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
+
+                    print(traj_id)
+
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+
+                
+         
         run.log(prf_dict | {"epoch_val_loss": avg_val_loss, "epoch": epoch})
 
 
