@@ -72,7 +72,7 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 32
     use_scheduler=False
-    test_val = True
+    test_val = False
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
     # login on HF
@@ -280,7 +280,7 @@ def train_residue_classifier(args_dict):
         precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
         recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
         
-        scRMSDs = [] 
+        #scRMSDs = [] 
         with torch.no_grad():
             for batch in tqdm(val_loader if not test_val else itertools.islice(val_loader,100), desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
 
@@ -314,7 +314,6 @@ def train_residue_classifier(args_dict):
                     
                     seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
                     pred_seqs[gt_data.traj_id] = seq_str
-                print(set("".join(pred_seqs))) 
                 trajs = [[val_dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
                 traj_tensors = []
                 for traj in trajs:
@@ -330,9 +329,9 @@ def train_residue_classifier(args_dict):
                 traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
                 backbone_tensor = torch.stack(traj_tensors, dim=0)
                 mask = lengths[:,None] < torch.arange(pad_size)[None,:]
-                scRMSD_results = evaluate_batch_rmsd(pred_seqs, backbone_tensor, mask, colabfold_model)
+                #scRMSD_results = evaluate_batch_rmsd(pred_seqs.values(), backbone_tensor, mask, colabfold_model)
                 
-                scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
+                #scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
                 
                 
                 preds = logits.argmax(dim=-1).cpu()
@@ -406,8 +405,8 @@ def train_residue_classifier(args_dict):
         prf_dict["val_top10_acc_std"] = val_acc_top_10_stats.std().item()
         
 
-        prf_dict["rmsd_mean"] = torch.tensor(scRMSDs).mean().item()
-        prf_dict["rmsd_std_dev"] = torch.tensor(scRMSDs).std().item()
+        #prf_dict["rmsd_mean"] = torch.tensor(scRMSDs).mean().item()
+        #prf_dict["rmsd_std_dev"] = torch.tensor(scRMSDs).std().item()
 
         
         # Confusion matrix

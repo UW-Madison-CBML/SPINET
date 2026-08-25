@@ -14,6 +14,8 @@ BACKBONE_ATOMS = ["CA", "N", "C", "O"]
 FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS, ["x","y","z"])] + [ "phi","psi","omega"]
 
 def process_traj(traj):
+
+
     top = traj.topology
     n_frames = traj.n_frames
     n_res = top.n_residues
@@ -46,7 +48,9 @@ def process_traj(traj):
     df = df[timestep_mask]
     features = features[timestep_mask]
 
-    return df, features 
+
+ 
+   return df, features, traj[0]
 
 def download_and_process_file(url, pdb_id):
     base_md_dir = "md_data"
@@ -79,7 +83,8 @@ def download_and_process_file(url, pdb_id):
                 continue
                 
             traj = mdtraj.load_xtc(xtc_path, top=pdb_path)
-            df, features = process_traj(traj)
+            df, features, first_frame = process_traj(traj)
+            first_frame.save_pdb(os.path.join(base_md_dir, f"{pdb_id}.pdb"))
             df["traj_id"] = eye_d
             data.append((df, features))
             
