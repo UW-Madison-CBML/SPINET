@@ -145,26 +145,25 @@ class SheafAttentionConv(MessagePassing):
 
     def forward(self, x, edge_index, return_sheaf=False):
         if not self.ablate_sheaves: 
-            node_to_edge_maps = self.sheaf_learner(x, edge_index)
-            # we need to get a map from the index of edge (a,b) to the index of edge (b,a) to learn the transport maps F_{b \unlhd e_{a,b}}^T @ F_{a \unlhd e_{a,b}} 
-            # edge_index comes in sorted so we sort again and keep track of the map by sorting an arange
+            maps = self.sheaf_learner(x, edge_index)
+
             _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
-            edge_to_node_maps = node_to_edge_maps[reverse_edge_indices].mT # get transpose as to "invert" the map
+            neighbor_maps = maps[reverse_edge_indices] # get transpose as to "invert" the map
+            maps = torch.stack([maps, neighbor_maps], dim=1)
             
-            transport_maps = torch.matmul(edge_to_node_maps, node_to_edge_maps) # now this is the sheaf generalization of the adjacency map written A_\mathcal{F}
         else:
             # set transport maps to identity to ablate sheaves
-            transport_maps = torch.eye(self.stalk_dim, device=x.device)[None, :, :].expand(edge_index.shape[1], -1, -1)
+            maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(edge_index.shape[1], 2, -1, -1)
 
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
          
-        out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=transport_maps)
+        out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps)
         if return_sheaf and not self.ablate_sheaves:
-            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim)), node_to_edge_maps
+            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim)), maps[:,0,:,:]
         else:
             return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
 
-    def message(self, x_i, x_j, x_stalk_j, maps, index, ptr, size_i):
+    def message(self, x_i, x_j, x_stalk_i, x_stalk_j, maps, index, ptr, size_i):
         W_params = {"weight": self.W_weights}
         att_params = {"weight": self.att_weights}
         
@@ -173,17 +172,26 @@ class SheafAttentionConv(MessagePassing):
         
         x_stalk_j_batched = x_stalk_j[None,:,:,:].expand(self.num_heads,-1, -1, -1)
 
+        x_stalk_i_batched = x_stalk_i[None,:,:,:].expand(self.num_heads,-1, -1, -1)
+
         alpha = self.leaky(self.apply_att(att_params, edge_features_batched))
         
-        transformed = self.apply_W(W_params, x_stalk_j_batched)
+        transformed_j = self.apply_W(W_params, x_stalk_j_batched)
+
+        transformed_i = self.apply_W(W_params, x_stalk_i_batched)
         
         alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2) 
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         if not self.ablate_sheaves: 
-            maps_expanded = maps[None,:,:,:].expand(self.num_heads, -1, -1, -1)
-            transported = torch.matmul(maps_expanded, transformed.mT)
+            i_maps_expanded = maps[None,:,0,:,:].expand(self.num_heads, -1, -1, -1)
+
+            j_maps_expanded = maps[None,:,1,:,:].expand(self.num_heads, -1, -1, -1)
+            i_to_edge = torch.matmul(i_maps_expanded, transformed_i.mT)
+            j_to_edge = torch.matmul(j_maps_expanded, transformed_j.mT)
+            edge_value = j_to_edge - i_to_edge 
+            transported = torch.matmul(i_maps_expanded.mT, edge_value)
         else: 
-            transported = transformed
+            transported = transformed_j
         alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
         return (alpha * transported).permute(1,0,2,3).contiguous()
     
