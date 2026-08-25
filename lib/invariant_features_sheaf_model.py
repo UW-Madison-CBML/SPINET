@@ -10,6 +10,7 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import softmax, sort_edge_index
 from torch.func import functional_call, vmap
 from torch.nn.utils.parametrizations import orthogonal
+from huggingface_hub import PyTorchModelHubMixin
 
 #-------------------------------------------------------
 # sheaf learners
@@ -361,9 +362,9 @@ class AtomicFrame(nn.Module):
 
 
 
-class NodeSheafClassifier(nn.Module):
-    def __init__(self, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank"):
-        super().__init__()
+class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
+    def __init__(self, config=None, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank"):
+        super(NodeSheafClassifier, self).__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
 
@@ -379,6 +380,37 @@ class NodeSheafClassifier(nn.Module):
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
 
+
+        if(config != None):
+            if isinstance(config, dict):
+                config.get('use_classifier', use_classifier)
+                self.hidden_dim = config.get("hidden_dim", hidden_dim)
+                self.stalk_dim = config.get("stalk_dim", stalk_dim)
+                self.num_blocks = config.get("num_blocks", num_blocks)
+                self.num_heads = config.get("num_heads", num_heads)
+                self.num_timesteps = config.get("num_timesteps", num_timesteps)
+                self.gat_dropout = config.get("gat_dropout", gat_dropout)
+                self.num_classes = config.get("num_classes", num_classes)
+                self.ablate_sheaves = config.get("ablate_sheaves", ablate_sheaves)
+                self.gat_dropout = config.get("gat_dropout", gat_dropout)
+                self.classifier_dropout = config.get("classifier_dropout", classifier_dropout)
+                self.restriction_map_type = config.get("restriction_map_type", restriction_map_type)
+
+            else:
+                self.hidden_dim = config.hidden_dim
+                self.stalk_dim = config.stalk_dim
+                self.num_blocks= config.num_blocks
+                self.num_heads= config.num_heads
+                self.num_timesteps= config.num_timesteps
+                self.gat_dropout = config.gat_dropout
+                self.num_classes = config.num_classes
+                self.ablate_sheaves = config.ablate_sheaves
+                self.gat_dropout = config.gat_dropout
+                self.classifier_dropout = config.classifier_dropout
+                self.restriction_map_type = config.restriction_map_type
+
+
+                
         self.mlp_embedding = nn.Sequential(nn.Linear(12, 2*self.hidden_dim), nn.ReLU(), nn.Linear(2*self.hidden_dim, self.hidden_dim))
 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)

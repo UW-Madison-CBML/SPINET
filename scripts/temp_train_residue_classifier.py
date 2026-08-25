@@ -19,30 +19,16 @@ from itertools import product
 from load_dynamics import BACKBONE_ATOMS
 from Bio.SeqUtils import seq1
 
+from colabfold.batch import get_queries
+from alphafold.common import residue_constants
 
 FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","psi","omega"]
 import time
 
 import json
 import subprocess
-def scrmsd_af2(novel_designs, gt_trajs):
 
-    fasta_path = "batch_input.fasta"
-    with open(fasta_path, "w") as f:
-        for name, seq in novel_designs.items():
-            f.write(f">{name}\n{seq}\n")
-
-    output_dir = "./af2_results"
-    os.makedirs(output_dir, exist_ok=True)
-    command = [
-        "colabfold_batch",
-        fasta_path,
-        output_dir,
-        "--num-recycle", "3",
-        "--use-amber",
-    ]
-
-    subprocess.run(command, check=True)
+from scrmsd import evaluate_batch_rmsd
 
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
@@ -84,7 +70,7 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 32
     use_scheduler=False
-    test_val = False
+    test_val = True
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -202,9 +188,10 @@ def train_residue_classifier(args_dict):
     ).to(DEVICE)
 
     # -----------------------------------------
+    colabfold_model = ColabFoldValidationEngine(BACKBONE_ATOMS, device=DEVICE)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    crit = torch.nn.CrossEntropyLoss() # TODO replace this with a properly masked loss, if it exists
+    crit = torch.nn.CrossEntropyLoss() 
     if use_scheduler:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
     # profiler stuff
@@ -287,6 +274,7 @@ def train_residue_classifier(args_dict):
                 gt_list = batch.to_data_list()
 
                 pred_seqs = {}
+                
                 for i, gt_data in enumerate(gt_list):
                     pred_data = data_list[i]
     
@@ -298,7 +286,25 @@ def train_residue_classifier(args_dict):
                     
                     seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
                     pred_seqs[gt_data.traj_id] = seq_str
-
+                
+                trajs = [[val_dataset.groups[prot.index[0]].get_group(idx) for idx in range(prot.index[1], prot.index[2])] for prot in gt_list]
+                traj_tensors = []
+                for traj in trajs:
+                    traj_atoms = []
+                    for atom in BACKBONE_ATOMS:
+                        cols = [atom + "_" + coord for coord in ["x","y","z"]]
+                        traj_atoms.append(torch.stack([torch.from_numpy(conf[cols].to_numpy()) for conf in traj ], dim=0)) # T, R, 3
+                        
+                    traj_tensor = torch.stack(traj_atoms, dim=2) # T, R, A, 3
+                    traj_tensors.append(traj_tensor)
+                lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])
+                pad_size = max(lengths)
+                traj_tensors = [F.pad(traj_tensor, ((0,0),(0,pad_size-traj_tensor.shape[1]),(0,0),(0,0)), mode="constant", constant_values=0.0) for traj_tensor in traj_tensors]
+                backbone_tensor = torch.stack(traj_tensors, dim=0)
+                mask = lengths[:,None] < torch.arange(pad_size)[None,:]
+                scRMSD_results = evaluate_batch_rmsd(pred_seqs, backbone_tensor, mask, colabfold_model)
+                   
+                
                 preds = logits.argmax(dim=-1).cpu()
                 targets_cpu = targets.cpu()
                 val_acc_top_1_stats.append(top_k_acc(logits.cpu(), targets_cpu,1))
