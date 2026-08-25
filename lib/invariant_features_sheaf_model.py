@@ -383,7 +383,6 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
 
         if(config != None):
             if isinstance(config, dict):
-                config.get('use_classifier', use_classifier)
                 self.hidden_dim = config.get("hidden_dim", hidden_dim)
                 self.stalk_dim = config.get("stalk_dim", stalk_dim)
                 self.num_blocks = config.get("num_blocks", num_blocks)

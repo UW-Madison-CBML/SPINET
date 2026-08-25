@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from alphafold.common import residue_constants
 from alphafold.data import pipeline
 from alphafold.model import config, model

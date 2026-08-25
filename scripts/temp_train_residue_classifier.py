@@ -28,7 +28,9 @@ import time
 import json
 import subprocess
 
-from scrmsd import evaluate_batch_rmsd
+from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
+from huggingface_hub import login, HfApi
+
 
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
@@ -73,7 +75,8 @@ def train_residue_classifier(args_dict):
     test_val = True
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
-
+    # login on HF
+    login(token=os.environ["HF_TOKEN"])
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
@@ -188,6 +191,13 @@ def train_residue_classifier(args_dict):
     ).to(DEVICE)
 
     # -----------------------------------------
+
+    local_dir = f"./{run_name}"
+    os.makedirs(local_dir, exist_ok=True)
+
+    api = HfApi()
+
+
     colabfold_model = ColabFoldValidationEngine(BACKBONE_ATOMS, device=DEVICE)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -236,7 +246,24 @@ def train_residue_classifier(args_dict):
         times3 = torch.tensor(times4) - torch.tensor(times3)
         batch_cycle_times = times1.diff()
         run.log({"to_gpu_time":times1.mean().item(), "forward_pass_time":times2.mean().item(), "backpass_time":times3.mean().item(), "cycle_time":batch_cycle_times.mean().item()}) 
+        # push to hub
 
+        #model.save_pretrained(local_dir, safe_serialization=False) # TODO fix this is bugged
+        torch.save(model.state_dict(), os.path.join(local_dir, "pytorch_model.bin"))
+
+        if hasattr(model, "config") and model.config is not None:
+            config_path = os.path.join(local_dir, "config.json")
+            with open(config_path, "w") as f:
+                if hasattr(model.config, "to_dict"):
+                    json.dump(model.config.to_dict(), f, indent=2)
+                else:
+                    json.dump(model.config, f, indent=2)
+        api.upload_folder(
+            folder_path=local_dir,
+            repo_id=f"JensLundsgaard/{run_name}",
+            repo_type="model"
+        )
+        
         # Validation Check
         model.eval()
 
@@ -253,6 +280,7 @@ def train_residue_classifier(args_dict):
         precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
         recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
         
+        scRMSDs = [] 
         with torch.no_grad():
             for batch in tqdm(val_loader if not test_val else itertools.islice(val_loader,100), desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
 
@@ -286,8 +314,8 @@ def train_residue_classifier(args_dict):
                     
                     seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
                     pred_seqs[gt_data.traj_id] = seq_str
-                
-                trajs = [[val_dataset.groups[prot.index[0]].get_group(idx) for idx in range(prot.index[1], prot.index[2])] for prot in gt_list]
+                print(set("".join(pred_seqs))) 
+                trajs = [[val_dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
                 traj_tensors = []
                 for traj in trajs:
                     traj_atoms = []
@@ -299,11 +327,13 @@ def train_residue_classifier(args_dict):
                     traj_tensors.append(traj_tensor)
                 lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])
                 pad_size = max(lengths)
-                traj_tensors = [F.pad(traj_tensor, ((0,0),(0,pad_size-traj_tensor.shape[1]),(0,0),(0,0)), mode="constant", constant_values=0.0) for traj_tensor in traj_tensors]
+                traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
                 backbone_tensor = torch.stack(traj_tensors, dim=0)
                 mask = lengths[:,None] < torch.arange(pad_size)[None,:]
                 scRMSD_results = evaluate_batch_rmsd(pred_seqs, backbone_tensor, mask, colabfold_model)
-                   
+                
+                scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
+                
                 
                 preds = logits.argmax(dim=-1).cpu()
                 targets_cpu = targets.cpu()
@@ -342,11 +372,12 @@ def train_residue_classifier(args_dict):
                 # Residue sequence position
 
                 # Evaluate amino acids
-                prf_dict = {}
                 for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
                      precisions[amino_acid].append(precision[k].item())
                      recalls[amino_acid].append(recall[k].item())
                      f1s[amino_acid].append(f1[k].item())
+
+        prf_dict = {}
         precisions = {key: torch.tensor(value) for key, value in precisions.items()}
         recalls = {key: torch.tensor(value) for key, value in recalls.items()}
         f1s = {key: torch.tensor(value) for key, value in f1s.items()}
@@ -375,7 +406,9 @@ def train_residue_classifier(args_dict):
         prf_dict["val_top10_acc_std"] = val_acc_top_10_stats.std().item()
         
 
-            
+        prf_dict["rmsd_mean"] = torch.tensor(scRMSDs).mean().item()
+        prf_dict["rmsd_std_dev"] = torch.tensor(scRMSDs).std().item()
+
         
         # Confusion matrix
         fig, ax = plt.subplots(figsize=(12, 12))
