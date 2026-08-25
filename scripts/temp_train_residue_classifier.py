@@ -72,7 +72,7 @@ def train_residue_classifier(args_dict):
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 16
+    batch_size = 4
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 4
@@ -84,7 +84,7 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 32
     use_scheduler=False
-    test_val = True
+    test_val = False
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -299,7 +299,6 @@ def train_residue_classifier(args_dict):
                     seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
                     pred_seqs[gt_data.traj_id] = seq_str
 
-                scrmsd_af2(pred_seqs, None)
                 preds = logits.argmax(dim=-1).cpu()
                 targets_cpu = targets.cpu()
                 val_acc_top_1_stats.append(top_k_acc(logits.cpu(), targets_cpu,1))

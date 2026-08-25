@@ -17,11 +17,10 @@ output = train_residue_classifier_$(Cluster)_$(Process).out
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
-requirements = (CUDADeviceName == "NVIDIA H200")
 
 transfer_input_files = temp_train_residue_classifier.sh, temp_train_residue_classifier.py, ../api_keys.txt, ../lib/, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz, load_dynamics.py
 #pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
-
+gpus_minimum_capability = 8.0
 
 
 request_cpus = 16
