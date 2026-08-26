@@ -172,7 +172,7 @@ def train_residue_classifier(args_dict):
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
     test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:test_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
 
-    single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=False, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
+    single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
@@ -296,7 +296,7 @@ def train_residue_classifier(args_dict):
                 loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
                 val_losses.append(loss.item())
 
-                out_batch = out_batch.cpu()
+                """out_batch = out_batch.cpu()
                 batch = batch.cpu()
                 data_list = out_batch.to_data_list()
                 gt_list = batch.to_data_list()
@@ -333,7 +333,7 @@ def train_residue_classifier(args_dict):
                 
                 #scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
                 
-                
+                """ 
                 preds = logits.argmax(dim=-1).cpu()
                 targets_cpu = targets.cpu()
                 val_acc_top_1_stats.append(top_k_acc(logits.cpu(), targets_cpu,1))
