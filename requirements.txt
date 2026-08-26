@@ -10,3 +10,4 @@ wandb
 huggingface_hub
 tqdm
 mdtraj
+collabfold[alphafold]

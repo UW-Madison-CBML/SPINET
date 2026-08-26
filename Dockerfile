@@ -7,6 +7,8 @@ COPY requirements.txt .
 RUN echo "numpy<2" > /tmp/constraints.txt
 RUN pip install --no-cache-dir -c /tmp/constraints.txt -r requirements.txt
 
+RUN pip install "colabfold[alphafold]"
+
 RUN python -c "import torch; print('POST-REQS TORCH:', torch.__version__)"
 
 ENV FORCE_CUDA=1

@@ -1,6 +1,6 @@
 # train_residue_classifier.sub
 
-docker_image = jenslundsgaard/sheaf_training:v2.7
+docker_image = cmikulski4/sheaf_training:v2.8
 #docker_image = pytorch/pytorch:2.9.0-cuda12.8-cudnn9-runtime
 #docker_image = pytorch/pytorch:1.1.0-cuda10.0-cudnn7.5-runtime
 universe = docker
@@ -8,12 +8,8 @@ universe = docker
 #  commands) and arguments to be passed to jobs.
 #  $(Process) will be a integer number for each job, starting with "0"
 #  and increasing for the relevant number of jobs.
-shell = ./train_residue_classifier.sh 
-#$(args)
-#$(ablation)
+shell = ./train_residue_classifier.sh $(ablation)
 
-# Specify the name of the log, standard error, and standard output (or
-# "screen output") files. Wherever you see $(Cluster), HTCondor will insert the
 #  queue number assigned to this set of jobs at the time of submission.
 log = train_residue_classifier_$(Cluster)_$(Process).log
 error = train_residue_classifier_$(Cluster)_$(Process).err
@@ -21,25 +17,18 @@ output = train_residue_classifier_$(Cluster)_$(Process).out
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
-#require_gpus = (DriverVersion >= 10.1)
-# Transfer our executable script
-transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../api_keys.txt, ../lib/, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz 
+
+transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../api_keys.txt, ../lib/, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz, load_dynamics.py
 #pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz
+gpus_minimum_capability = 8.0
 
 
-
-#+GPUModel = "NVIDIA H200"
-# Requirements (e.g., operating system) your job needs, what amount of
-# compute resources each job will need on the computer where it runs.
 request_cpus = 16
 request_memory = 128GB
 request_disk = 128GB
 request_gpus = 1
 
-#TODO add ablations
-#queue ablation from ablation.txt
+queue ablation from ablations.txt
 
-queue 1
-#queue args from (
+#queue 1
 
-#)
