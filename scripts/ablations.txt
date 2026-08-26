@@ -1,2 +1,2 @@
---run-name our_model --restriction-map-type orthogonal
---run-name no_sheaves --ablate-sheaves
+--run-name our_model --restriction-map-type arbitrary --ablate-attention
+--run-name no_sheaves --ablate-sheaves --ablate-attention

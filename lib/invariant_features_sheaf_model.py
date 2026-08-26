@@ -104,7 +104,7 @@ class SheafLearner(nn.Module):
 
 #-----------------------------------------------------------------------------------
 class SheafAttentionConv(MessagePassing):
-    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank"):
+    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):
         super().__init__(aggr='add', node_dim=0)
         self.hidden_dim = hidden_dim
         self.stalk_dim = stalk_dim
@@ -113,6 +113,7 @@ class SheafAttentionConv(MessagePassing):
         self.num_channels = self.hidden_dim // self.stalk_dim
         self.ablate_sheaves = ablate_sheaves
         self.restriction_map_type=restriction_map_type
+        self.use_attention = use_attention # this still applies the sheaf across the features channel-wise, it just doesn't calculate alpha
 
         self.W_weights = nn.Parameter(torch.empty(self.num_heads, self.stalk_dim, self.stalk_dim))
         self.att_weights = nn.Parameter(torch.empty(self.num_heads, 1, 2 * self.hidden_dim))
@@ -125,11 +126,11 @@ class SheafAttentionConv(MessagePassing):
             lambda params, tensor: functional_call(self._stateless_W, params, tensor),
             in_dims=({"weight": 0}, 0)
         )
-
-        self.apply_att = vmap(
-            lambda params, tensor: functional_call(self._stateless_att, params, tensor),
-            in_dims=({"weight": 0}, 0)
-        )
+        if self.use_attention:
+            self.apply_att = vmap(
+                lambda params, tensor: functional_call(self._stateless_att, params, tensor),
+                in_dims=({"weight": 0}, 0)
+            )
 
         self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
         self.leaky = nn.LeakyReLU(0.2)
@@ -166,7 +167,8 @@ class SheafAttentionConv(MessagePassing):
 
     def message(self, x_i, x_j, x_stalk_i, x_stalk_j, maps, index, ptr, size_i):
         W_params = {"weight": self.W_weights}
-        att_params = {"weight": self.att_weights}
+        if self.use_attention:
+            att_params = {"weight": self.att_weights}
         
         edge_features = torch.cat([x_i, x_j], dim=-1) 
         edge_features_batched = edge_features[None,None,:,:].expand(self.num_heads,-1,-1, -1) 
@@ -174,15 +176,17 @@ class SheafAttentionConv(MessagePassing):
         x_stalk_j_batched = x_stalk_j[None,:,:,:].expand(self.num_heads,-1, -1, -1)
 
         x_stalk_i_batched = x_stalk_i[None,:,:,:].expand(self.num_heads,-1, -1, -1)
-
-        alpha = self.leaky(self.apply_att(att_params, edge_features_batched))
+        if self.use_attention:
+            alpha = self.leaky(self.apply_att(att_params, edge_features_batched))
+        else:
+            alpha = torch.ones(self.num_heads, 1, x_i.shape[0], 2* x_i.shape[1])
         
         transformed_j = self.apply_W(W_params, x_stalk_j_batched)
 
         transformed_i = self.apply_W(W_params, x_stalk_i_batched)
-        
-        alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2) 
-        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+        if self.use_attention: 
+            alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2) 
+            alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         if not self.ablate_sheaves: 
             i_maps_expanded = maps[None,:,0,:,:].expand(self.num_heads, -1, -1, -1)
 
@@ -193,11 +197,12 @@ class SheafAttentionConv(MessagePassing):
             transported = torch.matmul(i_maps_expanded.mT, edge_value)
         else: 
             transported = transformed_j
-        alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
-        return (alpha * transported).permute(1,0,2,3).contiguous()
+        if self.use_attention:
+            alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
+        return (alpha * transported).permute(1,0,2,3).contiguous() if self.use_attention else transported.permute(1,0,2,3).contiguous()
     
 class SheafResidualSANBlock(nn.Module):
-    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank"):
+    def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):
         super().__init__()
         self.ablate_sheaves = ablate_sheaves
         self.hidden_dim = hidden_dim
@@ -205,8 +210,9 @@ class SheafResidualSANBlock(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.restriction_map_type=restriction_map_type
+        self.use_attention = use_attention
 
-        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=ablate_sheaves, restriction_map_type=self.restriction_map_type)
+        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=ablate_sheaves, restriction_map_type=self.restriction_map_type, self.use_attention=use_attention)
         self.norm = nn.LayerNorm(self.hidden_dim)
         self.act = nn.ReLU()
 
@@ -225,7 +231,7 @@ class SheafResidualSANBlock(nn.Module):
 
 
 class SheafResidualSAN(nn.Module):
-    def __init__(self, num_blocks: int, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank"):
+    def __init__(self, num_blocks: int, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):
         super().__init__()
         self.num_blocks = num_blocks
         self.ablate_sheaves=ablate_sheaves
@@ -234,8 +240,9 @@ class SheafResidualSAN(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.restriction_map_type=restriction_map_type
+        self.use_attention = use_attention
         self.blocks = nn.ModuleList([
-            SheafResidualSANBlock(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type) for _ in range(num_blocks)
+            SheafResidualSANBlock(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention) for _ in range(num_blocks)
         ])
 
     def forward(self, data, return_sheaf=False):
@@ -363,7 +370,7 @@ class AtomicFrame(nn.Module):
 
 
 class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, config=None, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank"):
+    def __init__(self, config=None, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True):
         super(NodeSheafClassifier, self).__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -379,6 +386,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         self.gat_dropout = gat_dropout
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
+        self.use_attention = use_attention
 
 
         if(config != None):
@@ -394,6 +402,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.gat_dropout = config.get("gat_dropout", gat_dropout)
                 self.classifier_dropout = config.get("classifier_dropout", classifier_dropout)
                 self.restriction_map_type = config.get("restriction_map_type", restriction_map_type)
+                self.use_attention = config.get("use_attention", use_attention)
 
             else:
                 self.hidden_dim = config.hidden_dim
@@ -407,6 +416,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.gat_dropout = config.gat_dropout
                 self.classifier_dropout = config.classifier_dropout
                 self.restriction_map_type = config.restriction_map_type
+                self.use_attention = config.use_attention
 
 
                 
@@ -414,7 +424,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
-        self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type)
+        self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
 
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_dim, 2 * self.hidden_dim),

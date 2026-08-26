@@ -60,13 +60,14 @@ def train_residue_classifier(args_dict):
     epochs = 8
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 4
+    batch_size = 16
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 4
     num_heads = 4
     masking_ratio = 0.75
     ablate_sheaves=args_dict["ablate_sheaves"]
+    use_attention = not args_dict["ablate_attention"]
     run_name = args_dict["run_name"]
     restriction_map_type=args_dict["restriction_map_type"]
     seed=42
@@ -172,7 +173,7 @@ def train_residue_classifier(args_dict):
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
     test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:test_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
 
-    single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
+    single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, generator=torch_rng, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
@@ -188,6 +189,7 @@ def train_residue_classifier(args_dict):
         ablate_sheaves=ablate_sheaves,
         num_timesteps=num_timesteps,
         restriction_map_type=restriction_map_type,
+        use_attention=use_attention
     ).to(DEVICE)
 
     # -----------------------------------------
@@ -455,8 +457,6 @@ def train_residue_classifier(args_dict):
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
 
-                
-         
         run.log(prf_dict | {"epoch_val_loss": avg_val_loss, "epoch": epoch})
 
 
@@ -529,6 +529,7 @@ if __name__ == "__main__":
         description='Trains sheaf node classifier to predict nodes') 
     parser.add_argument('--run-name', type=str, default="residue_classifier")
     parser.add_argument('--ablate-sheaves', action="store_true")
+    parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
     args = parser.parse_args()
     train_residue_classifier(vars(args))
