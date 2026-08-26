@@ -50,7 +50,7 @@ def process_traj(traj):
 
 
  
-    return df, features, traj[0]
+    return df, features, traj[0], traj[199]
 
 def download_and_process_file(url, pdb_id):
     base_md_dir = "md_data"
@@ -83,8 +83,11 @@ def download_and_process_file(url, pdb_id):
                 continue
                 
             traj = mdtraj.load_xtc(xtc_path, top=pdb_path)
-            df, features, first_frame = process_traj(traj)
+            df, features, first_frame,last_frame = process_traj(traj)
+
             first_frame.save_pdb(os.path.join(base_md_dir, f"{pdb_id}.pdb"))
+            last_frame.save_pdb(os.path.join(base_md_dir, f"{pdb_id}_1.pdb"))
+
             df["traj_id"] = eye_d
             data.append((df, features))
             

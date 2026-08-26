@@ -115,25 +115,16 @@ class SheafAttentionConv(MessagePassing):
         self.restriction_map_type=restriction_map_type
         self.use_attention = use_attention # this still applies the sheaf across the features channel-wise, it just doesn't calculate alpha
 
-        self.W_weights = nn.Parameter(torch.empty(self.num_heads, self.stalk_dim, self.stalk_dim))
-        self.att_weights = nn.Parameter(torch.empty(self.num_heads, 1, 2 * self.hidden_dim))
-        nn.init.xavier_uniform_(self.W_weights)
-        nn.init.xavier_uniform_(self.att_weights)
-        self._stateless_W = nn.Linear(self.stalk_dim, self.stalk_dim, bias=False)
-        self._stateless_att = nn.Linear(2 * self.hidden_dim, 1, bias=False)
+        self.W = nn.Parameter(torch.empty(self.num_heads, self.stalk_dim, self.stalk_dim))
+        nn.init.xavier_uniform_(self.W)
+        
 
-        self.apply_W = vmap(
-            lambda params, tensor: functional_call(self._stateless_W, params, tensor),
-            in_dims=({"weight": 0}, 0)
-        )
         if self.use_attention:
-            self.apply_att = vmap(
-                lambda params, tensor: functional_call(self._stateless_att, params, tensor),
-                in_dims=({"weight": 0}, 0)
-            )
-
-        self.project_concat = nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim)
+            self.att = nn.Parameter(torch.empty(self.num_heads, 1, 2 * self.hidden_dim))
+            nn.init.xavier_uniform_(self.att)
         self.leaky = nn.LeakyReLU(0.2)
+
+        self.project_concat = nn.Sequential(nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
         if not self.ablate_sheaves:
             if self.restriction_map_type == "low_rank":
                 self.sheaf_learner = SheafLearnerLowRank(self.hidden_dim, self.stalk_dim, self.stalk_dim//2)
@@ -150,7 +141,7 @@ class SheafAttentionConv(MessagePassing):
             maps = self.sheaf_learner(x, edge_index)
 
             _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
-            neighbor_maps = maps[reverse_edge_indices] # get transpose as to "invert" the map
+            neighbor_maps = maps[reverse_edge_indices] 
             maps = torch.stack([maps, neighbor_maps], dim=1)
             
         else:
@@ -159,47 +150,45 @@ class SheafAttentionConv(MessagePassing):
 
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
          
-        out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps)
+        out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps) # num_edges, num_heads, c, d
         if return_sheaf and not self.ablate_sheaves:
             return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim)), maps[:,0,:,:]
         else:
             return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
 
     def message(self, x_i, x_j, x_stalk_i, x_stalk_j, maps, index, ptr, size_i):
-        W_params = {"weight": self.W_weights}
-        if self.use_attention:
-            att_params = {"weight": self.att_weights}
         
         edge_features = torch.cat([x_i, x_j], dim=-1) 
-        edge_features_batched = edge_features[None,None,:,:].expand(self.num_heads,-1,-1, -1) 
+        edge_features_batched = edge_features[None,:,:].expand(self.num_heads,-1, -1) 
         
         x_stalk_j_batched = x_stalk_j[None,:,:,:].expand(self.num_heads,-1, -1, -1)
 
         x_stalk_i_batched = x_stalk_i[None,:,:,:].expand(self.num_heads,-1, -1, -1)
-        if self.use_attention:
-            alpha = self.leaky(self.apply_att(att_params, edge_features_batched))
-        else:
-            alpha = torch.ones(self.num_heads, 1, x_i.shape[0], 2* x_i.shape[1])
-        
-        transformed_j = self.apply_W(W_params, x_stalk_j_batched)
 
-        transformed_i = self.apply_W(W_params, x_stalk_i_batched)
+        if self.use_attention:
+            alpha = self.leaky(torch.einsum("hlf, hef -> hel", self.att, edge_features_batched)).unsqueeze(1)
+        else:
+            alpha = torch.ones(self.num_heads, 1, x_i.shape[0], 1, device=x_i.device)
+        
+        transformed_j = torch.einsum("hij, hecj -> heci", self.W, x_stalk_j_batched) #num_heads, num_edges, num_channels, stalk_dim
+
         if self.use_attention: 
             alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2) 
-            alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         if not self.ablate_sheaves: 
+            transformed_i = torch.einsum("hij, hecj -> heci", self.W, x_stalk_i_batched)
+
             i_maps_expanded = maps[None,:,0,:,:].expand(self.num_heads, -1, -1, -1)
 
             j_maps_expanded = maps[None,:,1,:,:].expand(self.num_heads, -1, -1, -1)
             i_to_edge = torch.matmul(i_maps_expanded, transformed_i.mT)
             j_to_edge = torch.matmul(j_maps_expanded, transformed_j.mT)
             edge_value = j_to_edge - i_to_edge 
-            transported = torch.matmul(i_maps_expanded.mT, edge_value)
+            transported = torch.matmul(i_maps_expanded.mT, edge_value).mT # last mT so that it's c,d not d,c
         else: 
             transported = transformed_j
-        if self.use_attention:
-            alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
-        return (alpha * transported).permute(1,0,2,3).contiguous() if self.use_attention else transported.permute(1,0,2,3).contiguous()
+        alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
+        return (alpha * transported).permute(1,0,2,3).contiguous() # multiplication by alpha serves as our dropout here
     
 class SheafResidualSANBlock(nn.Module):
     def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):

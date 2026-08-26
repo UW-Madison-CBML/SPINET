@@ -64,16 +64,16 @@ def train_residue_classifier(args_dict):
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 4
-    num_heads = 4
     masking_ratio = 0.75
     ablate_sheaves=args_dict["ablate_sheaves"]
     use_attention = not args_dict["ablate_attention"]
+    num_heads = 4 if use_attention else 1
     run_name = args_dict["run_name"]
     restriction_map_type=args_dict["restriction_map_type"]
     seed=42
     num_timesteps = 32
     use_scheduler=False
-    test_val = True
+    test_val = False
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
     # login on HF
@@ -452,16 +452,25 @@ def train_residue_classifier(args_dict):
                     last_sheaf = last_sheaf.cpu()
                     data = data.cpu()
                     traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
-                    _, s_1, _ = torch.svd(first_sheaf)
-                    _, s_2, _ = torch.svd(first_sheaf)
-                    values = torch.cat([s_1,s_2], dim=0)
-                    values = values.numpy()
+                    _, s_1, _ = torch.linalg.svd(first_sheaf)
+                    _, s_2, _ = torch.linalg.svd(last_sheaf)
+                    values = s_1.numpy()
                     pos = np.arange(values.shape[1]) 
                     fig, ax = plt.subplots(figsize=(10, 4))
 
-                    ax.violinplot(data.T, pos, points=60, widths=0.7, showmeans=True, showextrema=True, showmedians=True)
-                    prf_dict[f"{traj_id}_singular_values"] = wandb.Image(fig)
+                    ax.violinplot(values, pos, points=60, widths=0.7, showmeans=True, showextrema=True, showmedians=True)
+                    prf_dict[f"{traj_id}_singular_values_sheaf_0"] = wandb.Image(fig)
                     plt.close(fig)
+
+                    values = s_2.numpy()
+                    pos = np.arange(values.shape[1]) 
+                    fig, ax = plt.subplots(figsize=(10, 4))
+
+                    ax.violinplot(values, pos, points=60, widths=0.7, showmeans=True, showextrema=True, showmedians=True)
+                    prf_dict[f"{traj_id}_singular_values_sheaf_{num_blocks-1}"] = wandb.Image(fig)
+                    plt.close(fig)
+
+
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
 
