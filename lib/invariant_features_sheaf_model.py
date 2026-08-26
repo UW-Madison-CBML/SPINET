@@ -212,7 +212,7 @@ class SheafResidualSANBlock(nn.Module):
         self.restriction_map_type=restriction_map_type
         self.use_attention = use_attention
 
-        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=ablate_sheaves, restriction_map_type=self.restriction_map_type, self.use_attention=use_attention)
+        self.san = SheafAttentionConv(self.hidden_dim, self.stalk_dim, self.num_heads, dropout=self.dropout, ablate_sheaves=ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
         self.norm = nn.LayerNorm(self.hidden_dim)
         self.act = nn.ReLU()
 

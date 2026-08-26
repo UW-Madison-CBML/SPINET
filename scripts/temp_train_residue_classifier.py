@@ -73,7 +73,7 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 32
     use_scheduler=False
-    test_val = False
+    test_val = True
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
     # login on HF
@@ -439,7 +439,7 @@ def train_residue_classifier(args_dict):
             
             prf_dict["val_position_accuracy_plot"] = wandb.Image(fig_pos)
             plt.close(fig_pos)
-
+        
         # now let's qualitatively analyze sheaves
         if not ablate_sheaves:
             with torch.no_grad():
@@ -452,8 +452,16 @@ def train_residue_classifier(args_dict):
                     last_sheaf = last_sheaf.cpu()
                     data = data.cpu()
                     traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
+                    _, s_1, _ = torch.svd(first_sheaf)
+                    _, s_2, _ = torch.svd(first_sheaf)
+                    values = torch.cat([s_1,s_2], dim=0)
+                    values = values.numpy()
+                    pos = np.arange(values.shape[1]) 
+                    fig, ax = plt.subplots(figsize=(10, 4))
 
-                    print(traj_id)
+                    ax.violinplot(data.T, pos, points=60, widths=0.7, showmeans=True, showextrema=True, showmedians=True)
+                    prf_dict[f"{traj_id}_singular_values"] = wandb.Image(fig)
+                    plt.close(fig)
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
 
