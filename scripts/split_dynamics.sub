@@ -4,24 +4,24 @@ docker_image = jenslundsgaard/sheaf_training:v2.7
 
 universe = docker
 
-shell = ./load_dynamics.sh 
+shell = ./split_dynamics.sh 
 
-log = load_dynamics_$(Cluster)_$(Process).log
-error = load_dynamics_$(Cluster)_$(Process).err
-output = load_dynamics_$(Cluster)_$(Process).out
+log = split_dynamics_$(Cluster)_$(Process).log
+error = split_dynamics_$(Cluster)_$(Process).err
+output = split_dynamics_$(Cluster)_$(Process).out
 
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 
 
-transfer_input_files = load_dynamics.py, load_dynamics.sh, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/atlas.csv, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz
+transfer_input_files = split_dynamics.py, split_dynamics.sh, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/atlas.csv, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz
 transfer_output_files = surffold_data.tar.gz
 transfer_output_remaps = "surffold_data.tar.gz = file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz"
 #pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/surffold_data.tar.gz"
 
 request_cpus = 1
-request_memory = 16GB
+request_memory = 64GB
 request_disk = 258GB
 
 queue 1

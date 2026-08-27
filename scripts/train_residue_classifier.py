@@ -71,7 +71,7 @@ def train_residue_classifier(args_dict):
     run_name = args_dict["run_name"]
     restriction_map_type=args_dict["restriction_map_type"]
     seed=42
-    num_timesteps = 32
+    num_timesteps = 128
     use_scheduler=False
     test_val = False
     
