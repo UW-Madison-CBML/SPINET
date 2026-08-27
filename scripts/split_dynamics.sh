@@ -10,7 +10,7 @@ mkdir train/ validation/ test/
 
 cd ..
 
-python sort_dynamics.py
+python split_dynamics.py
 
 tar -czvf surffold_data.tar.gz surffold_data/
 
