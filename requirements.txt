@@ -10,4 +10,6 @@ wandb
 huggingface_hub
 tqdm
 mdtraj
-collabfold[alphafold]
+colabfold[alphafold]
+atom3d
+transformers
