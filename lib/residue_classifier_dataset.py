@@ -36,6 +36,20 @@ def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32)
 
 def calculate_node_features(coords, feats, labels, mask, name, epsilon=5.0):
 
+    
+def get_node_features(traj, pos_cols, feature_cols, amino_acids, epsilon, name):
+
+    frames = [group for name,group in list(traj)]
+    
+    pos = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
+
+
+    np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1),
+    torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
+    frames[0]["mask"].to_numpy(),
+    name,
+    epsilon = epsilon
+
     pos = torch.as_tensor(coords, dtype=torch.float32)
     x = torch.as_tensor(feats, dtype=torch.float32)
     y = torch.as_tensor(labels, dtype=torch.long)
@@ -44,22 +58,6 @@ def calculate_node_features(coords, feats, labels, mask, name, epsilon=5.0):
 
     return {"x":x, "pos":pos, "y":y, "node_mask":node_mask, "traj_id":name}
     
-
-def get_node_features(traj, pos_cols, feature_cols, amino_acids, epsilon, name):
-
-    frames = [group for name,group in list(traj)]
-    
-    pos = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
-
-
-    return calculate_node_features(
-            pos,
-            np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1),
-            torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
-            frames[0]["mask"].to_numpy(),
-            name,
-            epsilon = epsilon
-    )
 
 
 
