@@ -30,28 +30,8 @@ import subprocess
 
 from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
 from huggingface_hub import login, HfApi
+from stats_utils import get_confusion_matrix, top_k_acc
 
-
-def get_confusion_matrix(gt_indices, pred_indices, num_classes):
-    """Compute confusion matrix over 1D array of pred and target."""
-    gt_one_hot = F.one_hot(gt_indices, num_classes=num_classes).float()
-    pred_one_hot = F.one_hot(pred_indices, num_classes=num_classes).float()
-
-    confusion_mat = torch.einsum("bi, bj->ij", gt_one_hot, pred_one_hot)
-    return confusion_mat
-
-def top_k_acc(logits:torch.Tensor, targets:torch.Tensor, k:int):
-    """
-    logits: B, num_classes
-    targets: B, type=int/long > 0 
-    """
-    assert k > 0, "k must be >0"
-    hot_logits = torch.zeros_like(logits) 
-    indices = torch.topk(logits, k, dim=-1).indices
-    hot_logits = hot_logits.scatter_(1, indices, 1).float()
-    correct_mask = torch.einsum("bi,bi->b", hot_logits, F.one_hot(targets, num_classes=logits.shape[1]).float())
-    return correct_mask.sum().item() / correct_mask.shape[0] 
-    
 
 def train_residue_classifier(args_dict):
     # hyperparameters
@@ -270,9 +250,9 @@ def train_residue_classifier(args_dict):
         model.eval()
 
         global_confusion_mat = torch.zeros((num_classes, num_classes))
-        val_acc_top_1_stats = []
-        val_acc_top_5_stats = []
-        val_acc_top_10_stats = []
+        val_acc_top_1 = []
+        val_acc_top_5 = []
+        val_acc_top_10 = []
 
         pos_correct = torch.zeros(0, dtype=torch.long)
         pos_total = torch.zeros(0, dtype=torch.long)
@@ -294,9 +274,6 @@ def train_residue_classifier(args_dict):
 
                 targets = batch.y[pred_mask]
                 logits = out_batch.x[pred_mask]
-
-                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
-                val_losses.append(loss.item())
 
                 """out_batch = out_batch.cpu()
                 batch = batch.cpu()
@@ -336,11 +313,22 @@ def train_residue_classifier(args_dict):
                 #scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
                 
                 """ 
-                preds = logits.argmax(dim=-1).cpu()
-                targets_cpu = targets.cpu()
-                val_acc_top_1_stats.append(top_k_acc(logits.cpu(), targets_cpu,1))
-                val_acc_top_5_stats.append(top_k_acc(logits.cpu(), targets_cpu,5))
-                val_acc_top_10_stats.append(top_k_acc(logits.cpu(), targets_cpu,10))
+                out_batch = out_batch.cpu()
+                batch = batch.cpu()
+                preds = logits.argmax(dim=-1)
+                targets = targets
+ 
+                for pred_prot, gt_prot in zip(out_batch.to_data_list(), batch.to_data_list()):
+
+                    log = pred_prot.x[~gt_prot.node_mask] 
+                    targ = gt_prot.y[~gt_prot.node_mask]
+                    loss = crit(log, targ)
+                    val_losses.append(loss.item())
+
+                    pred = log.argmax(dim=-1)
+                    val_acc_top_1.append(top_k_acc(pred, targ, 1))
+                    val_acc_top_5.append(top_k_acc(pred, targ, 5))
+                    val_acc_top_10.append(top_k_acc(pred, targ,10))
 
                 batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
                 global_confusion_mat += batch_conf_mat
@@ -395,11 +383,11 @@ def train_residue_classifier(args_dict):
         prf_dict["val_perp_mean"] = val_perplexities.mean().item()
         prf_dict["val_perp_std"] = val_perplexities.std().item()
         
-        val_acc_top_1_stats = torch.tensor(val_acc_top_1_stats)
-        val_acc_top_5_stats = torch.tensor(val_acc_top_5_stats)
-        val_acc_top_10_stats = torch.tensor(val_acc_top_10_stats)
+        val_acc_top_1 = torch.tensor(val_acc_top_1)
+        val_acc_top_5 = torch.tensor(val_acc_top_5)
+        val_acc_top_10 = torch.tensor(val_acc_top_10)
 
-        prf_dict["val_top1_acc_mean"] = val_acc_top_1_stats.mean().item()
+        prf_dict["val_top1_acc_mean"] = val_acc_top_1.mean().item()
         prf_dict["val_top5_acc_mean"] = val_acc_top_5_stats.mean().item()
         prf_dict["val_top10_acc_mean"] = val_acc_top_10_stats.mean().item()
         prf_dict["val_top1_acc_std"] = val_acc_top_1_stats.std().item()

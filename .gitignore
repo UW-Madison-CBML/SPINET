@@ -13,3 +13,4 @@ __pycache__
 lib/__pycache__
 scripts/residue_model_InitDynamicsEmbedding_propagate_*
 scripts/torch_geometric.nn.conv.*
+comparisons/gvp-pytorch/gvp-pytorch.tar.gz
