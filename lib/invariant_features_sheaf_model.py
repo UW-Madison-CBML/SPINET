@@ -409,7 +409,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
 
 
                 
-        self.mlp_embedding = nn.Sequential(nn.Linear(12, 2*self.hidden_dim), nn.ReLU(), nn.Linear(2*self.hidden_dim, self.hidden_dim))
+        self.gru_embedding = nn.GRU(15, self.hidden_dim, batch_first=True)
 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
@@ -425,8 +425,9 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         )
 
     def forward(self, data, return_sheaf=False):
-
-        data.x = self.mlp_embedding(data.x)
+        # TODO: this is not invariant
+        _, (h, _) = self.gru_embedding(data.x)
+        data.x = h[0]
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

@@ -34,21 +34,18 @@ def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32)
     return edge_index
 
 
-def calculate_node_features(coords, feats, labels, mask, name, epsilon=5.0):
 
     
-def get_node_features(traj, pos_cols, feature_cols, amino_acids, epsilon, name):
+def get_node_features(traj, pos_cols, feature_cols, amino_acids, name):
 
     frames = [group for name,group in list(traj)]
     
     pos = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
 
 
-    np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1),
-    torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
-    frames[0]["mask"].to_numpy(),
-    name,
-    epsilon = epsilon
+    feats = np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1),
+    labels = torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
+    mask = frames[0]["mask"].to_numpy(),
 
     pos = torch.as_tensor(coords, dtype=torch.float32)
     x = torch.as_tensor(feats, dtype=torch.float32)
@@ -68,7 +65,7 @@ class ResidueClassifierDataset(Dataset):
 
     # ground truth order of amino acid indices. they must be capitalized
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()]
-    FEATURE_COLS = ["phi","psi","omega"]
+    FEATURE_COLS = features # from the data builder
     POS_COLS = ["CA_x","CA_y","CA_z"]
  
     
@@ -114,7 +111,7 @@ class ResidueClassifierDataset(Dataset):
         max_workers = os.cpu_count()
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.AMINO_ACIDS, self.epsilon, name) for name, traj in self.groups]
+            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.AMINO_ACIDS, name) for name, traj in self.groups]
             
             kwargs = {"total": len(futures), "desc": "Processing Training Data Seqs", "unit": "job"}
             for future in tqdm(as_completed(futures), **kwargs):
@@ -136,14 +133,6 @@ class ResidueClassifierDataset(Dataset):
         
         x, pos, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["y"], traj["node_mask"], traj["traj_id"]
 
-        x_time_first = x.permute(1,0,2).contiguous()
-        
-        mean = x_time_first.mean(dim=0)
-        std_dev = x_time_first.std(dim=0)
-        deviations = x_time_first - mean
-        skewness = torch.mean(deviations ** 3, dim=0) / (torch.clamp(std_dev, min=0.001) ** 3)
-        kurtosis = torch.mean(deviations ** 4, dim=0) / (torch.clamp(std_dev, min=0.001) ** 4) 
-        x = torch.cat([mean,std_dev,skewness,kurtosis], dim=-1)
         
         pos_time_first = pos.permute(1,0,2).contiguous()
         dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
