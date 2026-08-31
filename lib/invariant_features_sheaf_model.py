@@ -276,7 +276,7 @@ class InitDynamicsEmbedding(MessagePassing):
 
         self.lin_out = nn.Linear(self.hidden_dim, self.hidden_dim)
         
-        self.gru = nn.GRU(self.hidden_dim, self.hidden_dim)
+        self.gru = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True)
 
     def forward(self, x, edge_index, edge_attr):
         x = self.project_nodes(x)
@@ -295,7 +295,7 @@ class InitDynamicsEmbedding(MessagePassing):
         x_stalk = x.view(x.shape[0], x.shape[1], self.num_channels, self.stalk_dim) # stalk dim to c,d
         edge_stalk = edge_attr.view(edge_attr.shape[0], edge_attr.shape[1], self.num_channels, self.stalk_dim)
 
-        agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_attr, maps=maps)
+        agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps)
 
         agg_flat = agg.view(x.shape[0], x.shape[1], self.hidden_dim) # turn c,d into hidden_dim
         _, h = self.gru(agg_flat)
@@ -303,7 +303,7 @@ class InitDynamicsEmbedding(MessagePassing):
 
     def message(self, x_i, x_j, edge_attr, maps):
         
-        if not self.ablate_sheaves: 
+        if not self.ablate_sheaves:
             i_maps = maps[0] 
             j_maps = maps[1]
 
@@ -369,7 +369,7 @@ class AtomicFrame(nn.Module):
 
         # features will be certain positions in the coordinate frame
         relative_features = positions[:, :, self.not_frame_origin_mask, :] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-        in_frame_features = torch.matmul(relative_features, raw_to_basis_matrix).view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
+        in_frame_features = torch.matmul(raw_to_basis_matrix, relative_features.mT).mT.view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
         
         features = torch.cat([in_frame_features, x[:,:,len(self.atoms) * 3:]], dim=-1)
         

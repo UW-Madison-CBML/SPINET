@@ -28,7 +28,7 @@ import time
 import json
 import subprocess
 
-from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
+#from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
 from huggingface_hub import login, HfApi
 from stats_utils import get_confusion_matrix, top_k_acc
 #from sheaf_utils import sheaf_laplacian
@@ -54,7 +54,7 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 128
     use_scheduler=False
-    test_val = False
+    test_val = True
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
     # login on HF
@@ -71,9 +71,9 @@ def train_residue_classifier(args_dict):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load in data and create 3-way split
-    df = pd.read_csv(os.path.join("md_data","atlas_index.csv"))
+    df = pd.read_csv(os.path.join("md_data", "atlas_index.csv"))
 
-    features_np = np.load(os.path.join("md_data","atlas_index.npy"))
+    features_np = np.load(os.path.join("md_data", "atlas_index.npy"))
 
     # mask
     df["mask"] = np_rng.random(len(df)) > masking_ratio
@@ -183,7 +183,7 @@ def train_residue_classifier(args_dict):
     api = HfApi()
 
 
-    colabfold_model = ColabFoldValidationEngine(BACKBONE_ATOMS, device=DEVICE)
+    #colabfold_model = ColabFoldValidationEngine(BACKBONE_ATOMS, device=DEVICE)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     crit = torch.nn.CrossEntropyLoss() 
