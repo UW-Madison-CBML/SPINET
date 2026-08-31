@@ -1,8 +1,14 @@
 # CHTC HTCondor submit file for PiFold training/inference (Docker universe, GPU).
 #
 # Setup (one-time):
-#   1. ./build_and_push.sh cmikulski4  # builds+pushes the image
+#   1. ./build_and_push.sh <dockerhub_username>   # builds+pushes the image
 #   2. Set docker_image below to that image.
+#
+# Dataset: ATLAS-derived data (first MD frame per simulation, pre-split into
+# train/valid/test) is staged at
+# /staging/groups/bhaskar_group/sheaf_protein_folding/surffold_data.tar.gz
+# and transferred in via transfer_input_files below. run_pifold.sh extracts
+# it into a top-level surffold_data/ folder before main.py runs.
 #
 # Submit:
 #   cd chtc && mkdir -p logs && condor_submit pifold.sub
@@ -12,12 +18,11 @@ docker_image            = cmikulski4/pifold:v1
 
 executable              = run_pifold.sh
 # Forwarded verbatim to `python main.py ...` -- see parser.py for all options.
-arguments               = --data_name ATLAS --data_root /staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data/ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run
+arguments               = --data_name ATLAS --data_root ./surffold_data/ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run
 
-# Code needed to run PiFold. Adjust the relative path if you submit from
-# somewhere other than PiFold/chtc/.
-# transfer_input_files    = ../API, ../methods, ../utils, ../main.py, ../parser.py
-transfer_input_files  = ../API, ../methods, ../utils, ../main.py, ../parser.py, /staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz
+# Code needed to run PiFold, plus the ATLAS-derived dataset (first frame of
+# each MD simulation, pre-split into train/valid/test) staged on /staging.
+transfer_input_files    = ../API, ../methods, ../utils, ../main.py, ../parser.py, file:///staging/groups/bhaskar_group/sheaf_protein_folding/surffold_data.tar.gz
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT

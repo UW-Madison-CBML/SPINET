@@ -6,8 +6,8 @@
 # Usage: ./build_and_push.sh <dockerhub_username> [tag]
 set -euo pipefail
 
-USERNAME=${1:?Usage: $0 <dockerhub_username> [tag]}
-TAG=${2:-latest}
+USERNAME=${1:?Usage: $0 cmikulski4 [tag]}
+TAG=${2:-v1}
 IMAGE="${USERNAME}/pifold:${TAG}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -27,17 +27,25 @@ Edit `pifold.sub` and set:
 docker_image = <your_dockerhub_username>/pifold:latest
 ```
 
-## 3. (Optional) stage a dataset
+## 3. Dataset
 
-For CATH/TS50/ATLAS data too large to transfer per-job, tar it as
-`data.tar.gz` (expanding to a top-level `data/` folder) and either:
-- add it to `transfer_input_files` in `pifold.sub`, or
-- put it under `/staging/<username>/` on CHTC and reference that path in
-  `transfer_input_files` instead (recommended for large datasets — see
-  CHTC's docs on the `/staging` filesystem).
+The ATLAS-derived dataset (first frame of each MD simulation, pre-split
+into `train/`, `valid/`, `test/` folders of PDB files) is staged at:
 
-`run_pifold.sh` auto-extracts `data.tar.gz` if it's present in the job's
-scratch directory.
+```
+/staging/groups/bhaskar_group/sheaf_protein_folding/surffold_data.tar.gz
+```
+
+`pifold.sub` already references this path in `transfer_input_files`, so
+HTCondor copies it into the job's scratch directory. `run_pifold.sh`
+auto-extracts it into a top-level `surffold_data/` folder if not already
+present, and `--data_root ./surffold_data/` (set in `pifold.sub`'s
+`arguments`) points `API.atlas_dataset.ATLAS` at it.
+
+For other/smaller datasets (e.g. CATH, TS50), tar them as `data.tar.gz`
+(expanding to a top-level `data/` folder) and add them to
+`transfer_input_files` instead, or stage them under `/staging/<username>/`
+the same way.
 
 ## 4. Submit
 
