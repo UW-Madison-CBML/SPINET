@@ -8,8 +8,9 @@ from Bio.SeqUtils import seq1
 import torch.nn as nn
 import gvp.models
 from tqdm import tqdm
+import sys
 sys.path.append("..")
-from stats_utils import get_confusion_mat, top_k_acc
+from stats_utils import get_confusion_matrix, top_k_acc
 
 AA_MAP = {
     'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C', 'GLN': 'Q',
@@ -51,7 +52,7 @@ def parse_pdb_folder(folder_path):
             break
     return parsed_structures
 
-DEVICE = torch.DEVICE('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def main():
     train_raw = parse_pdb_folder("./surffold_data/train")
@@ -98,18 +99,12 @@ def main():
 
         model.eval()
 
-        global_confusion_mat = torch.zeros((num_classes, num_classes))
         val_acc_top_1 = []
         val_acc_top_5 = []
         val_acc_top_10 = []
 
         val_losses = []
 
-        f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-        precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-        recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
- 
-        
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(DEVICE)
@@ -118,6 +113,7 @@ def main():
                 logits = model(nodes, batch.edge_index, edges, batch.seq)
                 
                 
+                num_proteins_in_batch = batch.batch.max().item() + 1        
                 
                 for p_idx in range(num_proteins_in_batch):
                     protein_mask = (batch.batch == p_idx) & batch.mask

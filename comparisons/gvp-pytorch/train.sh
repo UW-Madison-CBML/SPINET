@@ -1,4 +1,5 @@
 #!/bin/bash
+python -m ruff check . --select F821,E9 || exit 1
 
 tar -xvf gvp-pytorch.tar.gz
 cd gvp-pytorch/

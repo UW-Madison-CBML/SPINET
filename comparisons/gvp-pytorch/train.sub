@@ -14,7 +14,7 @@ Requirements = (Target.HasCHTCStaging == true)
 
 
 
-transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz
+transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz, ../../lib/stats_utils.py
 
 request_cpus = 1
 request_memory = 64GB

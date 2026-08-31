@@ -257,7 +257,7 @@ class SheafResidualSAN(nn.Module):
 # it will be harder to not hard code some of this stuff
 # the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
-    def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, ablate_sheaves=False, restriction_map_type="arbitrary"):
+    def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, frame_origin="CA", ablate_sheaves=False, restriction_map_type="arbitrary"):
         super().__init__(aggr='sum', node_dim=0)
         self.input_dim = node_dim
         self.edge_dim = edge_dim
@@ -265,6 +265,14 @@ class InitDynamicsEmbedding(MessagePassing):
         self.stalk_dim = stalk_dim
         self.hidden_dim = hidden_dim
         self.num_channels = self.hidden_dim // self.stalk_dim
+        self.atoms = atoms
+        self.atom_indices = atom_indices
+        assert set(self.atoms) == set(self.atom_indices.keys()), "atoms are not the keys of atom_indices"
+        assert frame_origin in self.atoms, f"frame origin: {frame_origin} is not in atoms"
+        self.frame_origin = frame_origin
+        self.register_buffer("not_frame_origin_mask", torch.tensor([atom != self.frame_origin for atom in self.atoms], dtype=torch.bool))
+        
+
 
         if not self.ablate_sheaves:
             self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
@@ -278,9 +286,16 @@ class InitDynamicsEmbedding(MessagePassing):
         
         self.gru = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True)
 
-    def forward(self, x, edge_index, edge_attr):
+    def forward(self, x, pos, frame_maps, edge_index, edge_attr):
         x = self.project_nodes(x)
-        edge_attr = self.project_edges(edge_attr)
+
+        # need to calc some edge features here, since we don't know the edges yet at 
+        pos_feats = pos[:, :, self.atom_indices[self.frame_origin]]          # num_res, n_frames, 3*num_atoms
+        origin_distances = torch.linalg.vector_norm(pos_feats[edge_index[0]] -  pos_feats[edge_index[1]], dim = -1, keepdim=True) # num_res, n_frames, 1
+        pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
+        edge_features = torch.cat([origin_distances, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
+
+        edge_attr = self.project_edges(edge_features)
         if not self.ablate_sheaves:
             maps = self.sheaf_learner(torch.cat([x[edge_index[0]], x[edge_index[1]], edge_attr], dim = -1)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
 
@@ -318,62 +333,6 @@ class InitDynamicsEmbedding(MessagePassing):
 
 #def update(self, aggr_out, x):
 #    return self.update_linear(torch.cat([x, aggr_out], dim=-1))
-
-
-# the relative frame in this class is inspired by that of PiFold by Gao et al.
-class AtomicFrame(nn.Module):
-    def __init__(self, atoms, atom_indices, frame_origin="CA"):
-        super().__init__()
-        self.atoms = atoms
-        self.atom_indices = atom_indices
-        assert set(self.atoms) == set(self.atom_indices.keys()), "atoms are not the keys of atom_indices"
-        assert frame_origin in self.atoms, f"frame origin: {frame_origin} is not in atoms"
-        self.frame_origin = frame_origin
-        self.register_buffer("not_frame_origin_mask", torch.tensor([atom != self.frame_origin for atom in self.atoms], dtype=torch.bool))
-        
-        
-    def forward(self, x, edge_index, edge_attr):
-        carbon_alphas = x[:,:,self.atom_indices[self.frame_origin]]
-        u,v = carbon_alphas - x[:,:,self.atom_indices["C"]], x[:,:,self.atom_indices["N"]] - carbon_alphas
-
-        x_basis = u - v
-        # normalize
-        x_basis = x_basis / torch.clamp(torch.norm(x_basis, dim = -1, keepdim=True), min=0.01)
-
-        y = torch.cross(u, v, dim = -1) 
-        # normalize
-        y = y / torch.clamp(torch.norm(y, dim=-1, keepdim=True), min=0.01)
-        
-        # get final orthonormal basis vector:
-        z = torch.cross(x_basis,y, dim=-1) # will be normal since other two vectors are normal 
-        
-        raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-1) # num_res, n_frames, 3, 3
-
-        # now let's build edge features given by pairwise distances between atoms
-        pos_feats = x[:, :, self.atom_indices[self.frame_origin]]          # num_res, n_frames, 3*num_atoms
-        origin_distances = torch.linalg.vector_norm(pos_feats[edge_index[0]] -  pos_feats[edge_index[1]], dim = -1, keepdim=True) # num_res, n_frames, 1
-        #edges = edges.view(edge_index.shape[1], 2, x.shape[1], len(self.atom_indices), 3)
-        #dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(self.atom_indices), len(self.atom_indices)
-        #dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2)      
-        pairwise_matrices = F.cosine_similarity(raw_to_basis_matrix[edge_index[0]], raw_to_basis_matrix[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
-        
-        edge_features = torch.cat([origin_distances, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
-
-        # positions will contain the atomic coordinate
-        positions = x[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
-
-        # features will be certain positions in the coordinate frame
-        relative_features = positions[:, :, self.not_frame_origin_mask, :] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-        in_frame_features = torch.matmul(raw_to_basis_matrix.mT, relative_features.mT).mT.reshape(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
-        
-        features = torch.cat([in_frame_features, x[:,:,len(self.atoms) * 3:]], dim=-1)
-        
-        return features, edge_features # converts from standard I, J, K basis to atomic frame, M^T does the opposite (by definition of orthogonal maps)
-        
-
-        # -------------------------------------------------------------------------------------------
-
-
 
 
 class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
@@ -429,8 +388,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.restriction_map_type = config.restriction_map_type
                 self.use_attention = config.use_attention
         
-        self.atomic_frame = AtomicFrame(self.atoms, self.atom_indices, frame_origin=self.frame_origin)
-        self.init_dynamics_embedding = InitDynamicsEmbedding(12, 5, self.hidden_dim, self.stalk_dim, self.ablate_sheaves)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(12, 5, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
                 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
@@ -446,10 +404,8 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         )
 
     def forward(self, data, return_sheaf=False):
-         
-        data.x, data.edge_attr = self.atomic_frame(data.x, data.edge_index, data.edge_attr)
             
-        data.x = self.init_dynamics_embedding(data.x, data.edge_index, data.edge_attr)
+        data.x = self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

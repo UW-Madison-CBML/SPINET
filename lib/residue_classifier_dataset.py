@@ -8,7 +8,7 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.utils import dense_to_sparse
 import numpy as np
 from typing import Union, Tuple
-from load_dynamics import FEATURE_COLUMNS as features
+from load_dynamics import FEATURE_COLUMNS as features, BACKBONE_ATOMS
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import os
@@ -36,8 +36,8 @@ def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32)
 
 
     
-def get_node_features(traj, pos_cols, feature_cols, amino_acids, name):
-
+def get_node_features(traj, pos_cols, feature_cols, atoms, atom_indices, frame_origin, amino_acids, name):
+    not_frame_origin_mask = torch.tensor([atom == frame_origin for atom in atoms])
     frames = [group for name,group in list(traj)]
     
     coords = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
@@ -52,8 +52,31 @@ def get_node_features(traj, pos_cols, feature_cols, amino_acids, name):
     y = torch.as_tensor(labels, dtype=torch.long)
     node_mask = torch.as_tensor(mask, dtype=torch.bool)
 
+    carbon_alphas = x[:,:,atom_indices[frame_origin]]
+    u,v = carbon_alphas - x[:,:,atom_indices["C"]], x[:,:,atom_indices["N"]] - carbon_alphas
 
-    return {"x":x, "pos":pos, "y":y, "node_mask":node_mask, "traj_id":name}
+    x_basis = u - v
+    # normalize
+    x_basis = x_basis / torch.clamp(torch.norm(x_basis, dim = -1, keepdim=True), min=0.01)
+
+    y = torch.cross(u, v, dim = -1) 
+    # normalize
+    y = y / torch.clamp(torch.norm(y, dim=-1, keepdim=True), min=0.01)
+    
+    # get final orthonormal basis vector:
+    z = torch.cross(x_basis,y, dim=-1) # will be normal since other two vectors are normal 
+    
+    basis_to_raw_matrix = torch.stack([x_basis,y,z], dim=-1) # num_res, n_frames, 3, 3
+
+    positions = x[:,:,:len(atom_indices)*3].view(x.shape[0], x.shape[1],len(atom_indices), 3)
+
+    # features will be certain positions in the coordinate frame
+    relative_features = positions[:, :, not_frame_origin_mask, :] - positions[:, :, ~not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
+    in_frame_features = torch.matmul(raw_to_basis_matrix.mT, relative_features.mT).mT.reshape(x.shape[0], x.shape[1], 3*(len(atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
+    
+    features = torch.cat([in_frame_features, x[:,:,len(atoms) * 3:]], dim=-1)
+
+    return {"x":x, "features":features, "pos":pos, "y":y, "node_mask":node_mask, "traj_id":name, "frame_maps":basis_to_raw_matrix}
     
 
 
@@ -67,6 +90,9 @@ class ResidueClassifierDataset(Dataset):
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()]
     FEATURE_COLS = features # from the data builder
     POS_COLS = ["CA_x","CA_y","CA_z"]
+    FRAME_ORIGIN = "CA"
+    ATOMS = BACKBONE_ATOMS
+    ATOM_INDICES = {atom: slice(3*i, 3*(i+1)) for i, atom in enumerate(ATOMS)}
  
     
     #--------------------------------------------------
@@ -109,9 +135,10 @@ class ResidueClassifierDataset(Dataset):
             self.index = np.array(self.index)
         self.trajs = []
         max_workers = os.cpu_count()
-        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.AMINO_ACIDS, name) for name, traj in self.groups]
+
+            
+            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.ATOMS, self.__class__.ATOM_INDICES, self.__class__.FRAME_ORIGIN,  self.__class__.AMINO_ACIDS, name) for name, traj in self.groups]
             
             kwargs = {"total": len(futures), "desc": "Processing Training Data Seqs", "unit": "job"}
             for future in tqdm(as_completed(futures), **kwargs):
@@ -131,7 +158,7 @@ class ResidueClassifierDataset(Dataset):
         idxs = slice(frame_index_start, frame_index_end)
         traj = self.trajs[traj_idx]
         
-        x, pos, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["y"], traj["node_mask"], traj["traj_id"]
+        x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:idxs], traj["y"], traj["node_mask"], traj["traj_id"]
 
         
         pos_time_first = pos.permute(1,0,2).contiguous()
@@ -152,7 +179,7 @@ class ResidueClassifierDataset(Dataset):
             edge_index = torch.cat([edge_index, temporal], dim=1)
             edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
 
-        return Data(x=x, y=y, pos=pos, edge_index=edge_index,  edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
+        return Data(x=features, y=y, pos=x, frame_maps = frame_maps, edge_index=edge_index,  edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
 
         
 
