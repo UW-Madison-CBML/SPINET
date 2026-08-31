@@ -1,0 +1,44 @@
+# CHTC HTCondor submit file for PiFold training/inference (Docker universe, GPU).
+#
+# Setup (one-time):
+#   1. ./build_and_push.sh <dockerhub_username>   # builds+pushes the image
+#   2. Set docker_image below to that image.
+#   3. If your dataset is large, tar it up as data.tar.gz (expanding to a
+#      top-level data/ folder) and point DATA_TARBALL at it, or stage it
+#      under /staging/<username>/ and reference it there instead.
+#
+# Submit:
+#   cd chtc && mkdir -p logs && condor_submit pifold.sub
+
+universe                = docker
+docker_image            = <dockerhub_username>/pifold:latest
+
+executable              = run_pifold.sh
+# Forwarded verbatim to `python main.py ...` -- see parser.py for all options.
+arguments               = --data_name CATH --data_root ./data/ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run
+
+# Code needed to run PiFold. Adjust the relative path if you submit from
+# somewhere other than PiFold/chtc/.
+transfer_input_files    = ../API, ../methods, ../utils, ../main.py, ../parser.py
+# transfer_input_files  = ../API, ../methods, ../utils, ../main.py, ../parser.py, /staging/<username>/data.tar.gz
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_output_files   = results
+transfer_output_remaps  = "results = ../results/$(Cluster)_$(Process)"
+
+log                     = logs/pifold_$(Cluster)_$(Process).log
+output                  = logs/pifold_$(Cluster)_$(Process).out
+error                   = logs/pifold_$(Cluster)_$(Process).err
+
+request_gpus            = 1
+request_cpus            = 4
+request_memory          = 32GB
+request_disk            = 20GB
+
+# Only match GPU nodes with a modern-enough driver/CUDA for the cu118 image.
+requirements            = (Target.CUDADriverVersion >= 11.8)
++WantGPULab             = true
++GPUJobLength           = "medium"
+
+queue 1
