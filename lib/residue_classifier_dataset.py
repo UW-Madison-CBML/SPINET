@@ -59,20 +59,20 @@ def get_node_features(traj, pos_cols, feature_cols, atoms, atom_indices, frame_o
     # normalize
     x_basis = x_basis / torch.clamp(torch.norm(x_basis, dim = -1, keepdim=True), min=0.01)
 
-    y = torch.cross(u, v, dim = -1) 
+    y_basis = torch.cross(u, v, dim = -1) 
     # normalize
-    y = y / torch.clamp(torch.norm(y, dim=-1, keepdim=True), min=0.01)
+    y_basis = y_basis / torch.clamp(torch.norm(y_basis, dim=-1, keepdim=True), min=0.01)
     
     # get final orthonormal basis vector:
-    z = torch.cross(x_basis,y, dim=-1) # will be normal since other two vectors are normal 
+    z_basis = torch.cross(x_basis, y_basis, dim=-1) # will be normal since other two vectors are normal 
     
-    basis_to_raw_matrix = torch.stack([x_basis,y,z], dim=-1) # num_res, n_frames, 3, 3
+    basis_to_raw_matrix = torch.stack([x_basis,y_basis,z_basis], dim=-1) # num_res, n_frames, 3, 3
 
     positions = x[:,:,:len(atom_indices)*3].view(x.shape[0], x.shape[1],len(atom_indices), 3)
 
     # features will be certain positions in the coordinate frame
     relative_features = positions[:, :, not_frame_origin_mask, :] - positions[:, :, ~not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-    in_frame_features = torch.matmul(raw_to_basis_matrix.mT, relative_features.mT).mT.reshape(x.shape[0], x.shape[1], 3*(len(atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
+    in_frame_features = torch.matmul(basis_to_raw_matrix.mT, relative_features.mT).mT.reshape(x.shape[0], x.shape[1], 3*(len(atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
     
     features = torch.cat([in_frame_features, x[:,:,len(atoms) * 3:]], dim=-1)
 
@@ -158,8 +158,8 @@ class ResidueClassifierDataset(Dataset):
         idxs = slice(frame_index_start, frame_index_end)
         traj = self.trajs[traj_idx]
         
-        x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:idxs], traj["y"], traj["node_mask"], traj["traj_id"]
-
+        x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:, idxs], traj["y"], traj["node_mask"], traj["traj_id"]
+        print(y.dtype)
         
         pos_time_first = pos.permute(1,0,2).contiguous()
         dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)

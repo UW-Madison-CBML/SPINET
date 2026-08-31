@@ -55,8 +55,8 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 128
     use_scheduler=False
-    test_val = True
-    use_profiler = True
+    test_val = False
+    use_profiler = False
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
     # login on HF
@@ -80,7 +80,7 @@ def train_residue_classifier(args_dict):
     # mask
     df["mask"] = np_rng.random(len(df)) > masking_ratio
 
-    pdb_ids = df["pdb_id"].unique()
+    pdb_ids = df["pdb_id"].unique() if not test_val else df["pdb_id"].unique()[:100]
     num_pdbs = len(pdb_ids)
 
     val_cutoff = int(val_ratio * num_pdbs)
@@ -244,8 +244,8 @@ def train_residue_classifier(args_dict):
         if use_profiler:
             table = prof.key_averages()
             prof_results = prof.key_averages()
-            df = pd.DataFrame(map(vars, profile_results))
-            run.log({"profiler":wandb.Table(dataframe=df)})
+            df = pd.DataFrame(map(vars, prof_results))
+            run.log({"profiler": wandb.Table(dataframe=df)})
         times1 = torch.tensor(times2) - torch.tensor(times1)
         times2 = torch.tensor(times3) - torch.tensor(times2)
         times3 = torch.tensor(times4) - torch.tensor(times3)

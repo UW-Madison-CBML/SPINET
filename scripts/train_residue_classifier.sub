@@ -24,7 +24,8 @@ transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py,
 
 
 request_cpus = 16
-request_memory = 64GB
+request_memory = 128GB
+
 request_disk = 128GB
 request_gpus = 1
 
