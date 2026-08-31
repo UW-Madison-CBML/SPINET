@@ -258,7 +258,7 @@ class SheafResidualSAN(nn.Module):
 # the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
     def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, ablate_sheaves=False, restriction_map_type="arbitrary"):
-        super().__init__(aggr='mean', node_dim=0)
+        super().__init__(aggr='sum', node_dim=0)
         self.input_dim = node_dim
         self.edge_dim = edge_dim
         self.ablate_sheaves = ablate_sheaves
@@ -298,7 +298,7 @@ class InitDynamicsEmbedding(MessagePassing):
         agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_attr, maps=maps)
 
         agg_flat = agg.view(x.shape[0], x.shape[1], self.hidden_dim) # turn c,d into hidden_dim
-        _, h = self.gru(agg)
+        _, h = self.gru(agg_flat)
         return self.lin_out(F.relu(h.squeeze(0))) # use a gru as the overall representation
 
     def message(self, x_i, x_j, edge_attr, maps):
@@ -347,7 +347,7 @@ class AtomicFrame(nn.Module):
         # get final orthonormal basis vector:
         z = torch.cross(x_basis,y, dim=-1) # will be normal since other two vectors are normal 
         
-        raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-2) # num_res, n_frames, 3, 3
+        raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-1) # num_res, n_frames, 3, 3
 
         # now let's build edge features given by pairwise distances between atoms
         pos_feats = x[:, :, :3*len(self.atom_indices)]          # num_res, n_frames, 3*num_atoms
