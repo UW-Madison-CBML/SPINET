@@ -86,11 +86,11 @@ def main():
             optimizer.zero_grad()
             nodes = (batch.node_s, batch.node_v)
             edges = (batch.edge_s, batch.edge_v)
-            preds = model(nodes, batch.edge_index, edges, batch.seq)
+            logits = model(nodes, batch.edge_index, edges, batch.seq)
            
-            masked_preds = preds[batch.mask]
+            masked_logits = logits[batch.mask]
             masked_seq = batch.seq[batch.mask]
-            loss = crit(masked_preds, masked_seq)
+            loss = crit(masked_logits, masked_seq)
             
             loss.backward()
             optimizer.step()
@@ -102,9 +102,6 @@ def main():
         val_acc_top_1 = []
         val_acc_top_5 = []
         val_acc_top_10 = []
-
-        pos_correct = torch.zeros(0, dtype=torch.long)
-        pos_total = torch.zeros(0, dtype=torch.long)
 
         val_losses = []
 
@@ -118,45 +115,30 @@ def main():
                 batch = batch.to(DEVICE)
                 nodes = (batch.node_s, batch.node_v)
                 edges = (batch.edge_s, batch.edge_v)
-                preds = model(nodes, batch.edge_index, edges, batch.seq)
+                logits = model(nodes, batch.edge_index, edges, batch.seq)
                 
-                raw_loss = loss_fn(preds, batch.seq)
                 
-                _, topk_indices = torch.topk(preds, k=10, dim=-1)
-                targets_expanded = batch.seq.unsqueeze(-1)
-                
-                match_top1 = (topk_indices[:, :1] == targets_expanded).any(dim=-1).float()
-                match_top5 = (topk_indices[:, :5] == targets_expanded).any(dim=-1).float()
-                match_top10 = (topk_indices[:, :10] == targets_expanded).any(dim=-1).float()
-                
-                num_proteins_in_batch = batch.batch.max().item() + 1
-                prot_perplexities = []
-                prot_rec1 = []
-                prot_rec5 = []
-                prot_rec10 = []
                 
                 for p_idx in range(num_proteins_in_batch):
                     protein_mask = (batch.batch == p_idx) & batch.mask
                     if not protein_mask.any():
                         continue
                         
-                    p_loss = raw_loss[protein_mask].mean().item()
-                    prot_perplexities.append(np.exp(p_loss))
-                    
-                    prot_rec1.append(match_top1[protein_mask].mean().item())
-                    prot_rec5.append(match_top5[protein_mask].mean().item())
-                    prot_rec10.append(match_top10[protein_mask].mean().item())
-                
-                if prot_perplexities:
-                    batch_perplexities.append(np.mean(prot_perplexities))
-                    batch_top1.append(np.mean(prot_rec1))
-                    batch_top5.append(np.mean(prot_rec5))
-                    batch_top10.append(np.mean(prot_rec10))
-                    
-        val_ppl_mean, val_ppl_std = np.mean(batch_perplexities), np.std(batch_perplexities)
-        val_t1_mean, val_t1_std = np.mean(batch_top1), np.std(batch_top1)
-        val_t5_mean, val_t5_std = np.mean(batch_top5), np.std(batch_top5)
-        val_t10_mean, val_t10_std = np.mean(batch_top10), np.std(batch_top10)
+                    masked_logits = logits[protein_mask]
+                    masked_seq = batch.seq[protein_mask]
+                    loss = crit(masked_logits, masked_seq).item()
+
+                    val_losses.append(loss)
+                    val_acc_top_1.append(top_k_acc(masked_logits, masked_seq, 1))
+                    val_acc_top_5.append(top_k_acc(masked_logits, masked_seq, 5))
+                    val_acc_top_10.append(top_k_acc(masked_logits, masked_seq, 10))
+
+           
+        val_perps = np.exp(val_losses)   
+        val_ppl_mean, val_ppl_std = np.mean(val_perps), np.std(val_perps)
+        val_t1_mean, val_t1_std = np.mean(val_acc_top_1), np.std(val_acc_top_1)
+        val_t5_mean, val_t5_std = np.mean(val_acc_top_5), np.std(val_acc_top_5)
+        val_t10_mean, val_t10_std = np.mean(val_acc_top_10), np.std(val_acc_top_10)
         
         print(f"Train Loss    : {total_loss/len(train_loader)}")
         print(f"Val Perplexity: {val_ppl_mean} \pm {val_ppl_std}")

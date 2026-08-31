@@ -14,8 +14,9 @@ def top_k_acc(logits:torch.Tensor, targets:torch.Tensor, k:int):
     targets: B, type=int/long > 0 
     """
     assert k > 0, "k must be >0"
+    print("logits: ", logits.shape, ", targets", targets.shape, ", k", k)
     if (k == 1):
-        preds = F.one_hot(logits.argmax(dim=-1)).float()
+        preds = F.one_hot(logits.argmax(dim=-1), num_classes=logits.shape[1]).float()
         return torch.einsum("bi,bi->b", preds, F.one_hot(targets, num_classes=logits.shape[1]).float()).sum().item() / logits.shape[0]
 
     hot_logits = torch.zeros_like(logits) 

@@ -15,7 +15,7 @@ from residue_classifier_dataset import ResidueClassifierDataset
 from invariant_features_sheaf_model import NodeSheafClassifier
 import itertools
 from itertools import product
-
+from contextlib import nullcontext
 from load_dynamics import BACKBONE_ATOMS
 from Bio.SeqUtils import seq1
 
@@ -32,6 +32,7 @@ import subprocess
 from huggingface_hub import login, HfApi
 from stats_utils import get_confusion_matrix, top_k_acc
 #from sheaf_utils import sheaf_laplacian
+from torch.profiler import profile, ProfilerActivity, record_function
 
 
 def train_residue_classifier(args_dict):
@@ -54,7 +55,8 @@ def train_residue_classifier(args_dict):
     seed=42
     num_timesteps = 128
     use_scheduler=False
-    test_val = True
+    test_val = False
+    use_profiler = False
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
     # login on HF
@@ -189,9 +191,6 @@ def train_residue_classifier(args_dict):
     crit = torch.nn.CrossEntropyLoss() 
     if use_scheduler:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
-    # profiler stuff
-    table_path = os.path.abspath("table.txt")
-    trace_path = os.path.abspath("trace.json")
 
 
     # training loop
@@ -202,30 +201,48 @@ def train_residue_classifier(args_dict):
         times2 = []
         times3 = []
         times4 = []
-        for batch in pbar:
-            times1.append(time.perf_counter())
-            batch = batch.to(DEVICE)
+        activities = [ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities += [ProfilerActivity.CUDA]
+        with (profile(activities=activities, record_shapes=True) if use_profiler else nullcontext()) as prof:
+            for batch in pbar:
+                if use_profiler:
+                    torch.cuda.synchronize()
+                times1.append(time.perf_counter())
+                batch = batch.to(DEVICE)
 
-            batch = batch.sort()
-            times2.append(time.perf_counter())
-            optimizer.zero_grad()
-            
-            out_batch = model(batch)
+                batch = batch.sort()
+                if use_profiler:
+                    torch.cuda.synchronize()
 
-            times3.append(time.perf_counter())
+                times2.append(time.perf_counter())
+                optimizer.zero_grad()
+                
+                out_batch = model(batch)
 
-            pred_mask = ~batch.node_mask.bool()
+                if use_profiler:
+                    torch.cuda.synchronize()
+                times3.append(time.perf_counter())
 
-            loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
-            run.log({"train_loss": loss.item(), "epoch": epoch})
+                pred_mask = ~batch.node_mask.bool()
 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            times4.append(time.perf_counter())
-            if use_scheduler:
-                scheduler.step()
+                loss = crit(out_batch.x[pred_mask], batch.y[pred_mask])
+                run.log({"train_loss": loss.item(), "epoch": epoch})
 
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                if use_profiler:
+                    torch.cuda.synchronize()
+
+                times4.append(time.perf_counter())
+                if use_scheduler:
+                    scheduler.step()
+                if use_profiler:
+                    prof.step()
+        
+        if use_profiler:
+            print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)) 
         times1 = torch.tensor(times2) - torch.tensor(times1)
         times2 = torch.tensor(times3) - torch.tensor(times2)
         times3 = torch.tensor(times4) - torch.tensor(times3)
@@ -328,10 +345,9 @@ def train_residue_classifier(args_dict):
                     loss = crit(log, targ)
                     val_losses.append(loss.item())
 
-                    pred = log.argmax(dim=-1)
-                    val_acc_top_1.append(top_k_acc(pred, targ, 1))
-                    val_acc_top_5.append(top_k_acc(pred, targ, 5))
-                    val_acc_top_10.append(top_k_acc(pred, targ,10))
+                    val_acc_top_1.append(top_k_acc(log, targ, 1))
+                    val_acc_top_5.append(top_k_acc(log, targ, 5))
+                    val_acc_top_10.append(top_k_acc(log, targ,10))
 
                 batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
                 global_confusion_mat += batch_conf_mat

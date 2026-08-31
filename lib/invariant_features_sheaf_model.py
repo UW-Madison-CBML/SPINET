@@ -350,26 +350,21 @@ class AtomicFrame(nn.Module):
         raw_to_basis_matrix = torch.stack([x_basis,y,z], dim=-1) # num_res, n_frames, 3, 3
 
         # now let's build edge features given by pairwise distances between atoms
-        pos_feats = x[:, :, :3*len(self.atom_indices)]          # num_res, n_frames, 3*num_atoms
-        edges = torch.stack([pos_feats[edge_index[0]], pos_feats[edge_index[1]]], dim=1)
-        edges = edges.view(edge_index.shape[1], 2, x.shape[1], len(self.atom_indices), 3)
-        dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(self.atom_indices), len(self.atom_indices)
-        
+        pos_feats = x[:, :, self.atom_indices[self.frame_origin]]          # num_res, n_frames, 3*num_atoms
+        origin_distances = torch.linalg.vector_norm(pos_feats[edge_index[0]] -  pos_feats[edge_index[1]], dim = -1, keepdim=True) # num_res, n_frames, 1
+        #edges = edges.view(edge_index.shape[1], 2, x.shape[1], len(self.atom_indices), 3)
+        #dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(self.atom_indices), len(self.atom_indices)
+        #dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2)      
         pairwise_matrices = F.cosine_similarity(raw_to_basis_matrix[edge_index[0]], raw_to_basis_matrix[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
         
-        edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
- 
-
-
+        edge_features = torch.cat([origin_distances, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
 
         # positions will contain the atomic coordinate
-        positions = pos_feats[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
-
-
+        positions = x[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
 
         # features will be certain positions in the coordinate frame
         relative_features = positions[:, :, self.not_frame_origin_mask, :] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-        in_frame_features = torch.matmul(raw_to_basis_matrix, relative_features.mT).mT.view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
+        in_frame_features = torch.matmul(raw_to_basis_matrix.mT, relative_features.mT).mT.reshape(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
         
         features = torch.cat([in_frame_features, x[:,:,len(self.atoms) * 3:]], dim=-1)
         
@@ -435,9 +430,8 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.use_attention = config.use_attention
         
         self.atomic_frame = AtomicFrame(self.atoms, self.atom_indices, frame_origin=self.frame_origin)
-        self.init_dynamics_embedding = InitDynamicsEmbedding(12, 20, self.hidden_dim, self.stalk_dim, self.ablate_sheaves)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(12, 5, self.hidden_dim, self.stalk_dim, self.ablate_sheaves)
                 
-
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
@@ -453,7 +447,6 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
 
     def forward(self, data, return_sheaf=False):
          
-
         data.x, data.edge_attr = self.atomic_frame(data.x, data.edge_index, data.edge_attr)
             
         data.x = self.init_dynamics_embedding(data.x, data.edge_index, data.edge_attr)
