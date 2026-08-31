@@ -16,8 +16,8 @@ arguments               = --data_name ATLAS --data_root /staging/groups/bhaskar_
 
 # Code needed to run PiFold. Adjust the relative path if you submit from
 # somewhere other than PiFold/chtc/.
-transfer_input_files    = ../API, ../methods, ../utils, ../main.py, ../parser.py
-# transfer_input_files  = ../API, ../methods, ../utils, ../main.py, ../parser.py, /staging/<username>/data.tar.gz
+# transfer_input_files    = ../API, ../methods, ../utils, ../main.py, ../parser.py
+transfer_input_files  = ../API, ../methods, ../utils, ../main.py, ../parser.py, /staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT

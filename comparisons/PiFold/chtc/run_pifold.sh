@@ -7,7 +7,7 @@
 # Everything after 'run_pifold.sh' in the submit file's `arguments`
 # line is forwarded straight to main.py, e.g.:
 #
-#   arguments = --data_name CATH --data_root ./data/ --batch_size 8 --epoch 100
+#   arguments = --data_name ATLAS --data_root /staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data/ --batch_size 8 --epoch 100
 #
 set -euo pipefail
 
@@ -19,8 +19,8 @@ python -c "import torch; print('>>> torch:', torch.__version__, 'cuda available:
 # Name it data.tar.gz and have it expand to a top-level 'data/' folder
 # (or point --data_root at wherever it expands to).
 if [[ -f data.tar.gz && ! -d data ]]; then
-    echo ">>> extracting data.tar.gz"
-    tar -xzf data.tar.gz
+    echo ">>> extracting surffold_data.tar.gz"
+    tar -xzf surffold_data.tar.gz
 fi
 
 mkdir -p results
