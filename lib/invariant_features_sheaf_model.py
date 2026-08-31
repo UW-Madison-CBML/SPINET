@@ -220,7 +220,7 @@ class SheafResidualSANBlock(nn.Module):
 
 
 class SheafResidualSAN(nn.Module):
-    def __init__(self, num_blocks: int, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):
+    def __init__(self, num_blocks: int, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="arbitrary", use_attention=True):
         super().__init__()
         self.num_blocks = num_blocks
         self.ablate_sheaves=ablate_sheaves
@@ -257,44 +257,67 @@ class SheafResidualSAN(nn.Module):
 # it will be harder to not hard code some of this stuff
 # the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
-    def __init__(self, node_dim, edge_dim, output_dim, num_timesteps=16):
+    def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, ablate_sheaves=False, restriction_map_type="arbitrary"):
         super().__init__(aggr='mean', node_dim=0)
         self.input_dim = node_dim
         self.edge_dim = edge_dim
-        self.output_dim = output_dim
-        self.num_timesteps = num_timesteps
+        self.ablate_sheaves = ablate_sheaves
+        self.stalk_dim = stalk_dim
+        self.hidden_dim = hidden_dim
+        self.num_channels = self.hidden_dim // self.stalk_dim
 
-        self.mlp = nn.Sequential(
-            nn.Linear(edge_dim + 2*node_dim, 64), # TODO don't hard code this, tho it is super specific to the data
-            nn.ReLU(),
-            nn.Linear(64, output_dim)
-        )
+        if not self.ablate_sheaves:
+            self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
+        self.project_nodes = nn.Linear(node_dim, self.hidden_dim)
+        self.project_edges = nn.Linear(edge_dim, self.hidden_dim)
+         
 
-        self.update_linear = nn.Linear(node_dim + output_dim, output_dim)
+        self.mlp = nn.Sequential(nn.Linear(self.stalk_dim, self.stalk_dim), nn.ReLU(), nn.Linear(self.stalk_dim, self.stalk_dim))
 
-        self.distribution_embedding = nn.Sequential(
-            nn.Linear(output_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, output_dim)
-        )
-
-        self.lin_out = nn.Linear(output_dim, output_dim)
-        self.gru = nn.GRU(output_dim, output_dim, batch_first=True)
+        self.lin_out = nn.Linear(self.hidden_dim, self.hidden_dim)
+        
+        self.gru = nn.GRU(self.hidden_dim, self.hidden_dim)
 
     def forward(self, x, edge_index, edge_attr):
+        x = self.project_nodes(x)
+        edge_attr = self.project_edges(edge_attr)
+        if not self.ablate_sheaves:
+            maps = self.sheaf_learner(torch.cat([x[edge_index[0]], x[edge_index[1]], edge_attr], dim = -1)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
 
-        agg = self.propagate(edge_index, x=x, edge_attr=edge_attr)
+            _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
+            neighbor_maps = maps[reverse_edge_indices] 
+            maps = torch.stack([maps, neighbor_maps], dim=0)
+            
+        else:
+            # set transport maps to identity to ablate sheaves
+            maps = torch.eye(self.stalk_dim, device=x.device)[None, None, None, :, :].expand(2, edge_attr.shape[0], edge_attr.shape[1], -1, -1)
+
+        x_stalk = x.view(x.shape[0], x.shape[1], self.num_channels, self.stalk_dim) # stalk dim to c,d
+        edge_stalk = edge_attr.view(edge_attr.shape[0], edge_attr.shape[1], self.num_channels, self.stalk_dim)
+
+        agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_attr, maps=maps)
+
+        agg_flat = agg.view(x.shape[0], x.shape[1], self.hidden_dim) # turn c,d into hidden_dim
         _, h = self.gru(agg)
         return self.lin_out(F.relu(h.squeeze(0))) # use a gru as the overall representation
 
-    def message(self, x_i, x_j, edge_attr):
+    def message(self, x_i, x_j, edge_attr, maps):
         
-        dynamics_features = torch.cat([x_i, x_j, edge_attr], dim=-1)
+        if not self.ablate_sheaves: 
+            i_maps = maps[0] 
+            j_maps = maps[1]
 
-        return self.mlp(dynamics_features)
+            i_to_edge = torch.matmul(i_maps, x_i.mT)
+            j_to_edge = torch.matmul(j_maps, x_j.mT)
+            edge_value = edge_attr.mT + (j_to_edge - i_to_edge)
+            transported = torch.matmul(i_maps.mT, edge_value).mT # last mT so that it's c,d not d,c
+        else: 
+            transported = x_j
+    
+        return self.mlp(transported)
 
-    def update(self, aggr_out, x):
-        return self.update_linear(torch.cat([x, aggr_out], dim=-1))
+#def update(self, aggr_out, x):
+#    return self.update_linear(torch.cat([x, aggr_out], dim=-1))
 
 
 # the relative frame in this class is inspired by that of PiFold by Gao et al.
@@ -332,23 +355,23 @@ class AtomicFrame(nn.Module):
         edges = edges.view(edge_index.shape[1], 2, x.shape[1], len(self.atom_indices), 3)
         dist_features = torch.cdist(edges[:,0], edges[:,1]) # E, n_frames, len(self.atom_indices), len(self.atom_indices)
         
+        pairwise_matrices = F.cosine_similarity(raw_to_basis_matrix[edge_index[0]], raw_to_basis_matrix[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
+        
+        edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
+ 
+
+
+
         # positions will contain the atomic coordinate
         positions = pos_feats[:,:,:len(self.atom_indices)*3].view(x.shape[0], x.shape[1],len(self.atom_indices), 3)
 
-        backbone_centroids = positions.mean(dim=2)
-        unpadded = backbone_centroids.diff(dim=1)
-        velocities = torch.cat([unpadded[:,:1,:], unpadded],dim=1)
 
-        pair_wise_velocities = F.cosine_similarity(velocities[edge_index[0]], velocities[edge_index[1]], dim=-1).unsqueeze(-1)
 
-        edge_features = torch.cat([dist_features.view(edge_index.shape[1],x.shape[1], len(self.atom_indices)**2), edge_attr[:,None,:].expand(-1,x.shape[1], -1), pair_wise_velocities], dim=2)
- 
         # features will be certain positions in the coordinate frame
         relative_features = positions[:, :, self.not_frame_origin_mask, :] - positions[:, :, ~self.not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
         in_frame_features = torch.matmul(relative_features, raw_to_basis_matrix).view(x.shape[0], x.shape[1], 3*(len(self.atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
-        in_frame_velocities = torch.matmul(raw_to_basis_matrix.mT, velocities.unsqueeze(-1)).squeeze(-1)
         
-        features = torch.cat([in_frame_features, x[:,:,len(self.atom_indices):], in_frame_velocities], dim=-1)
+        features = torch.cat([in_frame_features, x[:,:,len(self.atoms) * 3:]], dim=-1)
         
         return features, edge_features # converts from standard I, J, K basis to atomic frame, M^T does the opposite (by definition of orthogonal maps)
         
@@ -359,7 +382,7 @@ class AtomicFrame(nn.Module):
 
 
 class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, config=None, num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True):
+    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True):
         super(NodeSheafClassifier, self).__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -376,6 +399,10 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
         self.use_attention = use_attention
+        self.atoms = atoms
+        self.frame_origin = frame_origin
+        self.atom_indices = {atom: slice(3*i,3*(i+1)) for i, atom in enumerate(atoms)}
+        #TODO add atoms and frame origin to config
 
 
         if(config != None):
@@ -406,10 +433,10 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.classifier_dropout = config.classifier_dropout
                 self.restriction_map_type = config.restriction_map_type
                 self.use_attention = config.use_attention
-
-
+        
+        self.atomic_frame = AtomicFrame(self.atoms, self.atom_indices, frame_origin=self.frame_origin)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(12, 20, self.hidden_dim, self.stalk_dim, self.ablate_sheaves)
                 
-        self.gru_embedding = nn.GRU(15, self.hidden_dim, batch_first=True)
 
         self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 
@@ -425,9 +452,11 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         )
 
     def forward(self, data, return_sheaf=False):
-        # TODO: this is not invariant
-        _, (h, _) = self.gru_embedding(data.x)
-        data.x = h[0]
+         
+
+        data.x, data.edge_attr = self.atomic_frame(data.x, data.edge_index, data.edge_attr)
+            
+        data.x = self.init_dynamics_embedding(data.x, data.edge_index, data.edge_attr)
 
         # add the residue label embedding to unmasked nodes
         data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]

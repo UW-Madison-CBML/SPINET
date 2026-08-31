@@ -40,12 +40,12 @@ def get_node_features(traj, pos_cols, feature_cols, amino_acids, name):
 
     frames = [group for name,group in list(traj)]
     
-    pos = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
+    coords = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
 
 
-    feats = np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1),
-    labels = torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long),
-    mask = frames[0]["mask"].to_numpy(),
+    feats = np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1)
+    labels = torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long)
+    mask = frames[0]["mask"].to_numpy()
 
     pos = torch.as_tensor(coords, dtype=torch.float32)
     x = torch.as_tensor(feats, dtype=torch.float32)
@@ -152,7 +152,7 @@ class ResidueClassifierDataset(Dataset):
             edge_index = torch.cat([edge_index, temporal], dim=1)
             edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
 
-        return Data(x=x, y=y, pos=pos, edge_index=edge_index, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
+        return Data(x=x, y=y, pos=pos, edge_index=edge_index,  edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
 
         
 

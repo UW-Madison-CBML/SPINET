@@ -31,6 +31,7 @@ import subprocess
 from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
 from huggingface_hub import login, HfApi
 from stats_utils import get_confusion_matrix, top_k_acc
+#from sheaf_utils import sheaf_laplacian
 
 
 def train_residue_classifier(args_dict):
@@ -161,6 +162,8 @@ def train_residue_classifier(args_dict):
     # ---------------------------------------------
 
     model = NodeSheafClassifier(
+        atoms=BACKBONE_ATOMS,
+        frame_origin="CA",
         num_classes=num_classes,
         hidden_dim=hidden_dim,
         stalk_dim=stalk_dim,
@@ -315,8 +318,8 @@ def train_residue_classifier(args_dict):
                 """ 
                 out_batch = out_batch.cpu()
                 batch = batch.cpu()
-                preds = logits.argmax(dim=-1)
-                targets = targets
+                preds = logits.argmax(dim=-1).cpu()
+                targets_cpu = targets.cpu()
  
                 for pred_prot, gt_prot in zip(out_batch.to_data_list(), batch.to_data_list()):
 
@@ -388,11 +391,11 @@ def train_residue_classifier(args_dict):
         val_acc_top_10 = torch.tensor(val_acc_top_10)
 
         prf_dict["val_top1_acc_mean"] = val_acc_top_1.mean().item()
-        prf_dict["val_top5_acc_mean"] = val_acc_top_5_stats.mean().item()
-        prf_dict["val_top10_acc_mean"] = val_acc_top_10_stats.mean().item()
-        prf_dict["val_top1_acc_std"] = val_acc_top_1_stats.std().item()
-        prf_dict["val_top5_acc_std"] = val_acc_top_5_stats.std().item()
-        prf_dict["val_top10_acc_std"] = val_acc_top_10_stats.std().item()
+        prf_dict["val_top5_acc_mean"] = val_acc_top_5.mean().item()
+        prf_dict["val_top10_acc_mean"] = val_acc_top_10.mean().item()
+        prf_dict["val_top1_acc_std"] = val_acc_top_1.std().item()
+        prf_dict["val_top5_acc_std"] = val_acc_top_5.std().item()
+        prf_dict["val_top10_acc_std"] = val_acc_top_10.std().item()
         
 
         #prf_dict["rmsd_mean"] = torch.tensor(scRMSDs).mean().item()
@@ -438,27 +441,14 @@ def train_residue_classifier(args_dict):
                     _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
                     first_sheaf = first_sheaf.cpu()
                     last_sheaf = last_sheaf.cpu()
-                    data = data.cpu()
+                    edge_index = data.edge_index.cpu()
                     traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
-                    _, s_1, _ = torch.linalg.svd(first_sheaf)
-                    _, s_2, _ = torch.linalg.svd(last_sheaf)
-                    values = s_1.numpy()
-                    pos = np.arange(values.shape[1]) 
-                    fig, ax = plt.subplots(figsize=(10, 4))
-
-                    ax.violinplot(values, pos, points=60, widths=0.7, showmeans=True, showextrema=True, showmedians=True)
-                    prf_dict[f"{traj_id}_singular_values_sheaf_0"] = wandb.Image(fig)
-                    plt.close(fig)
-
-                    values = s_2.numpy()
-                    pos = np.arange(values.shape[1]) 
-                    fig, ax = plt.subplots(figsize=(10, 4))
-
-                    ax.violinplot(values, pos, points=60, widths=0.7, showmeans=True, showextrema=True, showmedians=True)
-                    prf_dict[f"{traj_id}_singular_values_sheaf_{num_blocks-1}"] = wandb.Image(fig)
-                    plt.close(fig)
-
-
+                    #first_sheaf_laplacian = sheaf_laplacian(first_sheaf, edge_index)
+                    #last_sheaf_laplacian = sheaf_laplacian(last_sheaf, edge_index)
+                    #first_eigs = torch.linalg.eig(first_sheaf_laplacian)
+                    #last_eigs = torch.linalg.eig(last_sheaf_laplacian)
+                    
+                     
 
         avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
 
