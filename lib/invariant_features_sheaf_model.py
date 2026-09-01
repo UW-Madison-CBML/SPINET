@@ -105,7 +105,7 @@ class SheafLearner(nn.Module):
 #-----------------------------------------------------------------------------------
 class SheafAttentionConv(MessagePassing):
     def __init__(self, hidden_dim: int, stalk_dim: int, num_heads:int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):
-        super().__init__(aggr='add', node_dim=0)
+        super().__init__(aggr='sum', node_dim=0)
         self.hidden_dim = hidden_dim
         self.stalk_dim = stalk_dim
         self.num_heads = num_heads
