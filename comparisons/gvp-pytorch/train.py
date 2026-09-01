@@ -79,11 +79,13 @@ def main():
         node_in_dim=(6, 3), node_h_dim=(100, 16),
         edge_in_dim=(32, 1), edge_h_dim=(32, 1)
     ).to(DEVICE)
+    # Credit: Tomerikoo and Fabio Perez on StackOverflow
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     crit = nn.CrossEntropyLoss()
     
-    epochs = 10
+    epochs = 8
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -141,11 +143,17 @@ def main():
         val_t5_mean, val_t5_std = np.mean(val_acc_top_5), np.std(val_acc_top_5)
         val_t10_mean, val_t10_std = np.mean(val_acc_top_10), np.std(val_acc_top_10)
         
-        print(f"Train Loss    : {total_loss/len(train_loader)}")
         print(f"Val Perplexity: {val_ppl_mean} \pm {val_ppl_std}")
         print(f"Top-1 Recovery: {val_t1_mean} \pm {val_t1_std}")
         print(f"Top-5 Recovery: {val_t5_mean} \pm {val_t5_std}")
         print(f"Top-10 Recovery: {val_t10_mean} \pm {val_t10_std}")
+        
+    test_acc_top_1 = []
+    test_acc_top_5 = []
+    test_acc_top_10 = []
+
+    test_losses = []
+
     with torch.no_grad():
         for batch in test_loader:
             batch = batch.to(DEVICE)
@@ -177,8 +185,7 @@ def main():
     test_t5_mean, test_t5_std = np.mean(test_acc_top_5), np.std(test_acc_top_5)
     test_t10_mean, test_t10_std = np.mean(test_acc_top_10), np.std(test_acc_top_10)
     
-    print(f"Train Loss    : {total_loss/len(train_loader)}")
-    print(f"Val Perplexity: {test_ppl_mean} \pm {test_ppl_std}")
+    print(f"Test Perplexity: {test_ppl_mean} \pm {test_ppl_std}")
     print(f"Top-1 Recovery: {test_t1_mean} \pm {test_t1_std}")
     print(f"Top-5 Recovery: {test_t5_mean} \pm {test_t5_std}")
     print(f"Top-10 Recovery: {test_t10_mean} \pm {test_t10_std}")
