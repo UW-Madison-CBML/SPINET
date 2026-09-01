@@ -46,7 +46,8 @@ def train_residue_classifier(args_dict):
     hidden_dim = 16
     stalk_dim = 8
     num_blocks = 4
-    masking_ratio = 0.75
+    masking_ratio = 1.0
+    use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
     use_attention = not args_dict["ablate_attention"]
     num_heads = 4 if use_attention else 1
@@ -174,7 +175,8 @@ def train_residue_classifier(args_dict):
         ablate_sheaves=ablate_sheaves,
         num_timesteps=num_timesteps,
         restriction_map_type=restriction_map_type,
-        use_attention=use_attention
+        use_attention=use_attention,
+        use_masking=use_masking
     ).to(DEVICE)
 
     # -----------------------------------------

@@ -327,7 +327,7 @@ class InitDynamicsEmbedding(MessagePassing):
             edge_value = edge_attr.mT + (j_to_edge - i_to_edge)
             transported = torch.matmul(i_maps.mT, edge_value).mT # last mT so that it's c,d not d,c
         else: 
-            transported = x_j
+            transported = x_j + edge_attr
     
         return self.mlp(transported)
 
@@ -336,7 +336,7 @@ class InitDynamicsEmbedding(MessagePassing):
 
 
 class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True):
+    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True, use_masking=True):
         super(NodeSheafClassifier, self).__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -353,6 +353,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
         self.use_attention = use_attention
+        self.use_masking = use_masking
         self.atoms = atoms
         self.frame_origin = frame_origin
         self.atom_indices = {atom: slice(3*i,3*(i+1)) for i, atom in enumerate(atoms)}
@@ -374,6 +375,8 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.restriction_map_type = config.get("restriction_map_type", restriction_map_type)
                 self.use_attention = config.get("use_attention", use_attention)
 
+                self.use_masking = config.get("use_masking", use_masking)
+
             else:
                 self.hidden_dim = config.hidden_dim
                 self.stalk_dim = config.stalk_dim
@@ -387,6 +390,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.classifier_dropout = config.classifier_dropout
                 self.restriction_map_type = config.restriction_map_type
                 self.use_attention = config.use_attention
+                self.use_masking = config.use_masking
         
         self.init_dynamics_embedding = InitDynamicsEmbedding(12, 5, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
                 
@@ -407,8 +411,9 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
             
         data.x = self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
 
-        # add the residue label embedding to unmasked nodes
-        data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
+        if self.use_masking:
+            # add the residue label embedding to unmasked nodes
+            data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
 
         # run sheaf attention
         if return_sheaf:
