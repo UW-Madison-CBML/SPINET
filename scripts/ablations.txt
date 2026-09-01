@@ -1,2 +1,2 @@
---run-name our_model --restriction-map-type arbitrary --ablate-attention
---run-name no_sheaves --ablate-attention --ablate-sheaves
+--run-name our_model --restriction-map-type arbitrary --ablate-attention --resume our_model --epochs 0
+--run-name no_sheaves --ablate-attention --ablate-sheaves --resume no_sheaves --epochs 0

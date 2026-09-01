@@ -159,7 +159,6 @@ class ResidueClassifierDataset(Dataset):
         traj = self.trajs[traj_idx]
         
         x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:, idxs], traj["y"], traj["node_mask"], traj["traj_id"]
-        print(y.dtype)
         
         pos_time_first = pos.permute(1,0,2).contiguous()
         dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)

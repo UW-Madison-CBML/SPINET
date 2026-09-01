@@ -29,17 +29,18 @@ import json
 import subprocess
 
 #from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
-from huggingface_hub import login, HfApi
+from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download
 from stats_utils import get_confusion_matrix, top_k_acc
 #from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 
-
+# TODO fix the train val test split
+# move validation code to it's own function
 def train_residue_classifier(args_dict):
     # hyperparameters
     epsilon = 5.0 # in Angstroms
     learning_rate = 1e-3
-    epochs = 8
+    epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
     batch_size = 16
@@ -58,10 +59,15 @@ def train_residue_classifier(args_dict):
     use_scheduler=False
     test_val = False
     use_profiler = False
+    resume_model_name = args_dict["resume"]
+    resume = args_dict["resume"] != ""
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
+
     # login on HF
     login(token=os.environ["HF_TOKEN"])
+    api = HfApi()
+
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
@@ -178,13 +184,15 @@ def train_residue_classifier(args_dict):
         use_attention=use_attention,
         use_masking=use_masking
     ).to(DEVICE)
+    if resume:
+        weights_path = hf_hub_download("JensLundsgaard/" + resume, "pytorch_model.bin", local_dir=os.path.abspath("./"))
+        model.load_state_dict(torch.load(weights_path, weights_only=True)
 
     # -----------------------------------------
 
     local_dir = f"./{run_name}"
     os.makedirs(local_dir, exist_ok=True)
 
-    api = HfApi()
 
 
     #colabfold_model = ColabFoldValidationEngine(BACKBONE_ATOMS, device=DEVICE)
@@ -476,62 +484,188 @@ def train_residue_classifier(args_dict):
         run.log(prf_dict | {"epoch_val_loss": avg_val_loss, "epoch": epoch})
 
 
-
     model.eval()
 
-    global_confusion_mat = torch.zeros((num_classes, num_classes), device=DEVICE)
+    global_confusion_mat = torch.zeros((num_classes, num_classes))
+    test_acc_top_1 = []
+    test_acc_top_5 = []
+    test_acc_top_10 = []
+
+    pos_correct = torch.zeros(0, dtype=torch.long)
+    pos_total = torch.zeros(0, dtype=torch.long)
+
     test_losses = []
-
+    f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+    precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+    recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+    
+    #scRMSDs = [] 
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Testing"):
+        for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+
             batch = batch.to(DEVICE)
-
-            batch = batch.sort() # for ConvGAT aggregation
-
+            batch = batch.sort() 
             out_batch = model(batch)
 
             pred_mask = ~batch.node_mask.bool()
 
-            test_logits = out_batch.x[pred_mask]
-            test_targets = out_batch.y[pred_mask]
+            targets = batch.y[pred_mask]
+            logits = out_batch.x[pred_mask]
 
-            test_loss = crit(test_logits, test_targets)
-            test_losses.append(test_loss.item())
+            """out_batch = out_batch.cpu()
+            batch = batch.cpu()
+            data_list = out_batch.to_data_list()
+            gt_list = batch.to_data_list()
 
-            preds = test_logits.argmax(dim=-1)
-            batch_conf_mat = get_confusion_matrix(test_targets, preds, num_classes)
+            pred_seqs = {}
+            
+            for i, gt_data in enumerate(gt_list):
+                pred_data = data_list[i]
+
+                pred_idx = pred_data.x.argmax(dim=-1)
+                
+                graph_mask = ~gt_data.node_mask.bool()
+                
+                pred_idx[~graph_mask] = gt_data.y[~graph_mask]
+                
+                seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
+                pred_seqs[gt_data.traj_id] = seq_str
+            trajs = [[test_dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
+            traj_tensors = []
+            for traj in trajs:
+                traj_atoms = []
+                for atom in BACKBONE_ATOMS:
+                    cols = [atom + "_" + coord for coord in ["x","y","z"]]
+                    traj_atoms.append(torch.stack([torch.from_numpy(conf[cols].to_numpy()) for conf in traj ], dim=0)) # T, R, 3
+                    
+                traj_tensor = torch.stack(traj_atoms, dim=2) # T, R, A, 3
+                traj_tensors.append(traj_tensor)
+            lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])
+            pad_size = max(lengths)
+            traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
+            backbone_tensor = torch.stack(traj_tensors, dim=0)
+            mask = lengths[:,None] < torch.arange(pad_size)[None,:]
+            #scRMSD_results = evaluate_batch_rmsd(pred_seqs.values(), backbone_tensor, mask, colabfold_model)
+            
+            #scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
+            
+            """ 
+            out_batch = out_batch.cpu()
+            batch = batch.cpu()
+            preds = logits.argmax(dim=-1).cpu()
+            targets_cpu = targets.cpu()
+
+            for pred_prot, gt_prot in zip(out_batch.to_data_list(), batch.to_data_list()):
+
+                log = pred_prot.x[~gt_prot.node_mask] 
+                targ = gt_prot.y[~gt_prot.node_mask]
+                loss = crit(log, targ)
+                test_losses.append(loss.item())
+
+                test_acc_top_1.append(top_k_acc(log, targ, 1))
+                test_acc_top_5.append(top_k_acc(log, targ, 5))
+                test_acc_top_10.append(top_k_acc(log, targ,10))
+
+            batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
             global_confusion_mat += batch_conf_mat
 
-    avg_test_loss = sum(test_losses) / len(test_losses) if test_losses else 0
-    run.log({"final_test_loss": avg_test_loss})
+            if hasattr(batch, "batch") and batch.batch is not None:
+                nodes_per_protein = torch.bincount(batch.batch)
+                all_positions = torch.cat([torch.arange(n.item(), device=DEVICE) for n in nodes_per_protein])
+            else:
+                all_positions = torch.arange(batch.num_nodes, device=DEVICE)
+            
+            positions = all_positions[pred_mask].cpu()
+            correct_mask = (preds == targets_cpu).long()
+            
+            if len(positions) > 0:
+                current_max_pos = positions.max().item() + 1
+                
+                if current_max_pos > len(pos_total):
+                    pad_size = current_max_pos - len(pos_total)
+                    pos_correct = torch.cat([pos_correct, torch.zeros(pad_size, dtype=torch.long)])
+                    pos_total = torch.cat([pos_total, torch.zeros(pad_size, dtype=torch.long)])
+                
+                pos_total += torch.bincount(positions, minlength=len(pos_total))
+                pos_correct += torch.bincount(positions, weights=correct_mask, minlength=len(pos_correct)).long()
+                    
+            diag = batch_conf_mat.diag()
+            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)
+            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)
+            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
 
-    confusion_mat_cpu = global_confusion_mat.cpu()
-    diag = confusion_mat_cpu.diag()
+            # Residue sequence position
 
-    recall = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=1), 0.0)
-    precision = torch.nan_to_num(diag / confusion_mat_cpu.sum(dim=0), 0.0)
-    f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
+            # Evaluate amino acids
+            for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
+                 precisions[amino_acid].append(precision[k].item())
+                 recalls[amino_acid].append(recall[k].item())
+                 f1s[amino_acid].append(f1[k].item())
 
     prf_dict = {}
-    for k, residue in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
-        prf_dict[f"test_{residue}_precision"] = precision[k].item()
-        prf_dict[f"test_{residue}_recall"] = recall[k].item()
-        prf_dict[f"test_{residue}_f1"] = f1[k].item()
+    precisions = {key: torch.tensor(value) for key, value in precisions.items()}
+    recalls = {key: torch.tensor(value) for key, value in recalls.items()}
+    f1s = {key: torch.tensor(value) for key, value in f1s.items()}
+    for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
+        prf_dict[f"test_{amino_acid}_f1_mean"] = f1s[amino_acid].mean().item()
+        prf_dict[f"test_{amino_acid}_precision_mean"] = precisions[amino_acid].mean().item()
+        prf_dict[f"test_{amino_acid}_recall_mean"] = recalls[amino_acid].mean().item()
+        prf_dict[f"test_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
+        prf_dict[f"test_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
+        prf_dict[f"test_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
 
-    prf_dict["test_top_1_acc"] = diag.sum().item() / confusion_mat_cpu.sum().item()
-    # generate and log test confusion matrix
+    # perplexity score
+    test_perplexities = torch.exp(torch.tensor(test_losses))
+    prf_dict["test_perp_mean"] = test_perplexities.mean().item()
+    prf_dict["test_perp_std"] = test_perplexities.std().item()
+    
+    test_acc_top_1 = torch.tensor(test_acc_top_1)
+    test_acc_top_5 = torch.tensor(test_acc_top_5)
+    test_acc_top_10 = torch.tensor(test_acc_top_10)
 
-    # Hopefully plot will be big enough for 22 classes
+    prf_dict["test_top1_acc_mean"] = test_acc_top_1.mean().item()
+    prf_dict["test_top5_acc_mean"] = test_acc_top_5.mean().item()
+    prf_dict["test_top10_acc_mean"] = test_acc_top_10.mean().item()
+    prf_dict["test_top1_acc_std"] = test_acc_top_1.std().item()
+    prf_dict["test_top5_acc_std"] = test_acc_top_5.std().item()
+    prf_dict["test_top10_acc_std"] = test_acc_top_10.std().item()
+    
+
+    #prf_dict["rmsd_mean"] = torch.tensor(scRMSDs).mean().item()
+    #prf_dict["rmsd_std_dev"] = torch.tensor(scRMSDs).std().item()
+
+    
+    # Confusion matrix
     fig, ax = plt.subplots(figsize=(12, 12))
     disp = ConfusionMatrixDisplay(
-        confusion_matrix=confusion_mat_cpu.numpy().astype(int),
+        confusion_matrix=global_confusion_mat.numpy().astype(int),
         display_labels=ResidueClassifierDataset.AMINO_ACIDS
     )
     disp.plot(cmap='Blues', ax=ax, values_format='d')
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-    plt.title("Test Set Confusion Matrix")
+    plt.title("Val Set Amino Acid Confusion Matrix")
 
-    prf_dict["test_confusion_matrix"] = wandb.Image(fig)
+    prf_dict["test_aa_confusion_matrix"] = wandb.Image(fig)
+    plt.close(fig)
+
+    # Sequence positon accuracy
+    valid_pos_mask = pos_total > 0
+    if valid_pos_mask.any():
+        valid_positions = torch.arange(len(pos_total))[valid_pos_mask]
+        pos_accuracies = (pos_correct[valid_pos_mask] / pos_total[valid_pos_mask])
+
+        fig_pos, ax_pos = plt.subplots(figsize=(12, 5))
+        ax_pos.plot(valid_positions.numpy(), pos_accuracies, marker='.', linestyle='-', alpha=0.7)
+        ax_pos.set_xlabel("Amino Acid Sequence Position (N-terminus -> C-terminus)")
+        ax_pos.set_ylabel("Accuracy")
+        ax_pos.set_title(f"Validation Accuracy vs. Sequence Position (Epoch {epoch+1})")
+        ax_pos.grid(True, linestyle='--', alpha=0.6)
+        
+        prf_dict["test_position_accuracy_plot"] = wandb.Image(fig_pos)
+        plt.close(fig_pos)
+ 
+        prf_dict["test_confusion_matrix"] = wandb.Image(fig)
+
     run.log(prf_dict)
 
     plt.close(fig)
@@ -547,5 +681,7 @@ if __name__ == "__main__":
     parser.add_argument('--ablate-sheaves', action="store_true")
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
+    parser.add_argument('--resume', type=str, default="")
+    parser.add_argument('--epochs', type=int, default=8)
     args = parser.parse_args()
     train_residue_classifier(vars(args))

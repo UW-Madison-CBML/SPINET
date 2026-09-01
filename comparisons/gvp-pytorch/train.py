@@ -57,18 +57,23 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def main():
     train_raw = parse_pdb_folder("./surffold_data/train")
     val_raw = parse_pdb_folder("./surffold_data/validation")
+    test_raw = parse_pdb_folder("./surffold_data/test")
     
     train_node_counts = [len(s['seq']) for s in train_raw]
     val_node_counts = [len(s['seq']) for s in val_raw]
+    test_node_counts = [len(s['seq']) for s in val_raw]
     
     train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=3000)
     val_sampler = gvp.data.BatchSampler(val_node_counts, max_nodes=3000)
+    test_sampler = gvp.data.BatchSampler(test_node_counts, max_nodes=3000)
     
     train_dataset = gvp.data.ProteinGraphDataset(train_raw)
     val_dataset = gvp.data.ProteinGraphDataset(val_raw)
+    test_dataset = gvp.data.ProteinGraphDataset(test_raw)
     
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_sampler=val_sampler, num_workers=16)
+    test_loader = DataLoader(test_dataset, batch_sampler=test_sampler, num_workers=16)
     
     model = gvp.models.CPDModel(
         node_in_dim=(6, 3), node_h_dim=(100, 16),
@@ -141,6 +146,44 @@ def main():
         print(f"Top-1 Recovery: {val_t1_mean} \pm {val_t1_std}")
         print(f"Top-5 Recovery: {val_t5_mean} \pm {val_t5_std}")
         print(f"Top-10 Recovery: {val_t10_mean} \pm {val_t10_std}")
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = batch.to(DEVICE)
+            nodes = (batch.node_s, batch.node_v)
+            edges = (batch.edge_s, batch.edge_v)
+            logits = model(nodes, batch.edge_index, edges, batch.seq)
+            
+            
+            num_proteins_in_batch = batch.batch.max().item() + 1        
+            
+            for p_idx in range(num_proteins_in_batch):
+                protein_mask = (batch.batch == p_idx) & batch.mask
+                if not protein_mask.any():
+                    continue
+                    
+                masked_logits = logits[protein_mask]
+                masked_seq = batch.seq[protein_mask]
+                loss = crit(masked_logits, masked_seq).item()
+
+                test_losses.append(loss)
+                test_acc_top_1.append(top_k_acc(masked_logits, masked_seq, 1))
+                test_acc_top_5.append(top_k_acc(masked_logits, masked_seq, 5))
+                test_acc_top_10.append(top_k_acc(masked_logits, masked_seq, 10))
+
+       
+    test_perps = np.exp(test_losses)   
+    test_ppl_mean, test_ppl_std = np.mean(test_perps), np.std(test_perps)
+    test_t1_mean, test_t1_std = np.mean(test_acc_top_1), np.std(test_acc_top_1)
+    test_t5_mean, test_t5_std = np.mean(test_acc_top_5), np.std(test_acc_top_5)
+    test_t10_mean, test_t10_std = np.mean(test_acc_top_10), np.std(test_acc_top_10)
+    
+    print(f"Train Loss    : {total_loss/len(train_loader)}")
+    print(f"Val Perplexity: {test_ppl_mean} \pm {test_ppl_std}")
+    print(f"Top-1 Recovery: {test_t1_mean} \pm {test_t1_std}")
+    print(f"Top-5 Recovery: {test_t5_mean} \pm {test_t5_std}")
+    print(f"Top-10 Recovery: {test_t10_mean} \pm {test_t10_std}")
+
+
 
 if __name__ == '__main__':
     main()
