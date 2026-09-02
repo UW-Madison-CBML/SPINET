@@ -81,6 +81,7 @@ def main():
     ).to(DEVICE)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(pytorch_total_params)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     crit = nn.CrossEntropyLoss()

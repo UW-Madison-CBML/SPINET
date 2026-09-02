@@ -183,10 +183,15 @@ def train_residue_classifier(args_dict):
         restriction_map_type=restriction_map_type,
         use_attention=use_attention,
         use_masking=use_masking
+   
     ).to(DEVICE)
+    # Credit: Tomerikoo and Fabio Perez on StackOverflow
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    run.log({"params":pytorch_total_params})
+
     if resume:
-        weights_path = hf_hub_download("JensLundsgaard/" + resume, "pytorch_model.bin", local_dir=os.path.abspath("./"))
-        model.load_state_dict(torch.load(weights_path, weights_only=True)
+        weights_path = hf_hub_download("JensLundsgaard/" + resume_model_name, "pytorch_model.bin", local_dir=os.path.abspath("./"))
+        model.load_state_dict(torch.load(weights_path, weights_only=True))
 
     # -----------------------------------------
 
@@ -501,7 +506,7 @@ def train_residue_classifier(args_dict):
     
     #scRMSDs = [] 
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+        for batch in tqdm(test_loader):
 
             batch = batch.to(DEVICE)
             batch = batch.sort() 
@@ -647,24 +652,6 @@ def train_residue_classifier(args_dict):
 
     prf_dict["test_aa_confusion_matrix"] = wandb.Image(fig)
     plt.close(fig)
-
-    # Sequence positon accuracy
-    valid_pos_mask = pos_total > 0
-    if valid_pos_mask.any():
-        valid_positions = torch.arange(len(pos_total))[valid_pos_mask]
-        pos_accuracies = (pos_correct[valid_pos_mask] / pos_total[valid_pos_mask])
-
-        fig_pos, ax_pos = plt.subplots(figsize=(12, 5))
-        ax_pos.plot(valid_positions.numpy(), pos_accuracies, marker='.', linestyle='-', alpha=0.7)
-        ax_pos.set_xlabel("Amino Acid Sequence Position (N-terminus -> C-terminus)")
-        ax_pos.set_ylabel("Accuracy")
-        ax_pos.set_title(f"Validation Accuracy vs. Sequence Position (Epoch {epoch+1})")
-        ax_pos.grid(True, linestyle='--', alpha=0.6)
-        
-        prf_dict["test_position_accuracy_plot"] = wandb.Image(fig_pos)
-        plt.close(fig_pos)
- 
-        prf_dict["test_confusion_matrix"] = wandb.Image(fig)
 
     run.log(prf_dict)
 
