@@ -1,2 +1,2 @@
---run-name our_model --restriction-map-type arbitrary --ablate-attention
---run-name no_sheaves --ablate-attention --ablate-sheaves
+--run-name our_model --restriction-map-type arbitrary --ablate-attention --paradigm static
+--run-name no_sheaves --ablate-attention --ablate-sheaves --paradigm static

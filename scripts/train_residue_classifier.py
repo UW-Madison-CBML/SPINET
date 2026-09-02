@@ -31,12 +31,12 @@ import subprocess
 #from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
 from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download
 from stats_utils import get_confusion_matrix, top_k_acc
-from sheaf_utils import sheaf_laplacian
+#from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
     files = [path for path in os.listdir() if path.endswith(".pdb")] 
     
-def run_val(run, model, loader, dataset, epoch, val_name="val", num_classes = len(ResidueClassifierDataset.AMINO_ACIDS), cm_title="Amino Acid Confusion Matrix", test_val=False):
+def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", num_classes = len(ResidueClassifierDataset.AMINO_ACIDS), cm_title="Amino Acid Confusion Matrix", test_val=False):
     model.eval()
 
     global_confusion_mat = torch.zeros((num_classes, num_classes))
@@ -52,7 +52,7 @@ def run_val(run, model, loader, dataset, epoch, val_name="val", num_classes = le
     with torch.no_grad():
         for batch in tqdm(loader if not test_val else itertools.islice(loader,100), desc=f"Epoch {epoch} {val_name}", leave=False):
 
-            batch = batch.to(DEVICE)
+            batch = batch.to(device)
             batch = batch.sort() 
             out_batch = model(batch)
 
@@ -79,7 +79,7 @@ def run_val(run, model, loader, dataset, epoch, val_name="val", num_classes = le
                 
                 seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
                 pred_seqs[gt_data.traj_id] = seq_str
-            trajs = [[dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
+            """trajs = [[dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
             traj_tensors = []
             for traj in trajs:
                 traj_atoms = []
@@ -94,7 +94,7 @@ def run_val(run, model, loader, dataset, epoch, val_name="val", num_classes = le
             traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
             backbone_tensor = torch.stack(traj_tensors, dim=0)
             mask = lengths[:,None] < torch.arange(pad_size)[None,:]
-            
+            """ 
             out_batch = out_batch.cpu()
             batch = batch.cpu()
             preds = logits.argmax(dim=-1).cpu()
@@ -170,11 +170,11 @@ def run_val(run, model, loader, dataset, epoch, val_name="val", num_classes = le
 
     run.log(prf_dict | {"epoch_{val_name}_loss": avg_loss, "epoch": epoch})
 
-def interpret_sheaves(loader, model, run):
+def interpret_sheaves(loader, model, run, device):
     with torch.no_grad():
-        for batch in tqdm(loader, desc=f"Epoch {epoch}", leave=False):
+        for batch in tqdm(loader, desc=f"Loading Sheaves", leave=False):
 
-            data = batch.to_data_list()[0].to(DEVICE)
+            data = batch.to_data_list()[0].to(device)
             data = data.sort() 
             _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
             first_sheaf = first_sheaf.cpu()
@@ -439,13 +439,12 @@ def train_residue_classifier(args_dict):
         )
         
         # Validation Check
-        run_val(run, model, val_loader, val_dataset, epoch, val_name="val", test_val=test_val)
+        run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, val_name="val", test_val=test_val)
 
         if not ablate_sheaves:
-            interpret_sheaves(loader, model, run)
+            interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
 
-    run_val(run, model, test_loader, test_dataset, -1, val_name="test", test_val=False)
-    plt.close(fig)
+    run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, val_name="test", test_val=False)
 
     run.finish()
 

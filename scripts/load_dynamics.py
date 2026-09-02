@@ -155,7 +155,7 @@ def main(atlas_df, out_csv_name):
 
 if __name__ == "__main__":
     # credit: Ian Stapleton Cordasco on StackOverflow
-    socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=0.5)
+    socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=3)
 
     atlas_df = pd.read_csv("atlas.csv")
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])

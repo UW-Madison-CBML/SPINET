@@ -282,11 +282,11 @@ class InitDynamicsEmbedding(MessagePassing):
 
         self.lin_out = nn.Linear(self.hidden_dim, self.hidden_dim)
         if self.paradigm == "dynamic": 
-            self.temporal_sum = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
+            self.temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
         elif self.paradigm == "static":
-            self.temporal_sum = nn.Identity()
+            self.temporal_product = nn.Identity()
         else: 
-            self.temporal_sum = lambda x: x.mean(dim=1) # this needs to permutation invariant if using ensemble, since there is no temporal relationship between ensemble conformations
+            self.temporal_product = lambda x: x.mean(dim=1) # this needs to permutation invariant if using ensemble, since there is no temporal relationship between ensemble conformations
 
     def forward(self, x, pos, frame_maps, edge_index, edge_attr):
         x = self.project_nodes(x)

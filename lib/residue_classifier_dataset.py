@@ -99,7 +99,7 @@ class ResidueClassifierDataset(Dataset):
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
     
-    def __init__(self, df:pd.DataFrame, json: paradigm:str="dynamic", traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
+    def __init__(self, df:pd.DataFrame, paradigm:str="dynamic", traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
         """
         self
         df: the dataframe containing trajectory information 
@@ -172,9 +172,9 @@ class ResidueClassifierDataset(Dataset):
             dists = torch.cdist(pos, pos, p=2.0)
 
         edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
-        edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1).float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
+        edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1)[:,None].float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
 
-        return Data(x=features, y=y, pos=x, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
+        return Data(x=features, y=y, pos=x, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([self.index[idx]]))
 
     def build_dynamic_index(self):
         index = []
@@ -200,8 +200,9 @@ class ResidueClassifierDataset(Dataset):
     def build_static_index(self):
         index = []
         for i, (name, traj) in enumerate(self.groups):
-            for j in range(len(traj)):
-                index.append((i, j))
+            index.append((i, 0)) # this is hard coded for the time being
+            #for j in range(len(traj)):
+            #    index.append((i, j))
         return index
         
 
