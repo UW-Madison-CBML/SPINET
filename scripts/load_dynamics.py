@@ -53,7 +53,7 @@ def process_traj(traj):
  
     return df, features, traj[::40]
 
-def download_and_process_file(url, pdb_id, cath_id):
+def download_and_process_file(url, pdb_id, cath_top, cath_hom):
     base_md_dir = "md_data"
     os.makedirs(base_md_dir, exist_ok=True)
     
@@ -96,12 +96,8 @@ def download_and_process_file(url, pdb_id, cath_id):
         dfs, features = zip(*data) 
         trajectories_df = pd.concat(dfs, axis=0, ignore_index=True)
         trajectories_df["pdb_id"] = pdb_id
-        first_cath_lineage = cath_id.strip().split("<br>")[0].split(".") # should fail if csv is bad
-        if(len(first_cath_lineage) != 4):
-            print(cath_id)
-        _,_,top,hom = first_cath_lineage
-        trajectories_df["cath_top"] = top
-        trajectories_df["cath_hom"] = hom
+        trajectories_df["cath_hom"] = cath_hom
+        trajectories_df["cath_top"] = cath_top
         features_np = np.concatenate(features, axis=0)
         
         return trajectories_df, features_np
@@ -117,17 +113,25 @@ def download_and_process_file(url, pdb_id, cath_id):
             shutil.rmtree(worker_temp_dir, ignore_errors=True)
 
 def main(atlas_df, out_csv_name):
+    first_cath_lineage = [cath_id.strip().split("<br>")[0].split(".") for cath_id in atlas_df["cath_id"].to_list()] # should fail if csv is bad
+
+    _,_,top,hom = zip(*first_cath_lineage)
+
+    atlas_df["cath_top"] = top
+    atlas_df["cath_hom"] = hom
+
+    print(atlas_df["cath_hom"].unique())
+
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api"
        
-    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"], row["cath_id"]) for _,row in atlas_df.iterrows()]
-
+    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"], row["cath_top"], row["cath_hom"]) for _, row in atlas_df.iterrows()]
     
     out_data = []
     max_workers = os.cpu_count()
     
     print(f"Starting pipeline using {max_workers} parallel workers...")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(download_and_process_file, url, pdb, cath_id): pdb for url, pdb, cath_id in md_urls}
+        futures = {executor.submit(download_and_process_file, url, pdb, cath_top, cath_hom): pdb for url, pdb, cath_top, cath_hom in md_urls}
         
         kwargs = {"total": len(futures), "desc": "Processing PDB jobs", "unit": "job"}
         for future in tqdm(as_completed(futures), **kwargs):
@@ -151,7 +155,7 @@ def main(atlas_df, out_csv_name):
 
 if __name__ == "__main__":
     # credit: Ian Stapleton Cordasco on StackOverflow
-    socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=2)
+    socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=0.5)
 
     atlas_df = pd.read_csv("atlas.csv")
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])

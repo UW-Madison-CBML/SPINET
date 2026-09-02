@@ -99,7 +99,7 @@ class ResidueClassifierDataset(Dataset):
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
     
-    def __init__(self, df, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
+    def __init__(self, df:pd.DataFrame, json: paradigm:str="dynamic", traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
         """
         self
         df: the dataframe containing trajectory information 
@@ -110,34 +110,29 @@ class ResidueClassifierDataset(Dataset):
         self.df = df
         self.groups = [(name, group.groupby('timestep')) for name, group in list(df.groupby("traj_id"))]
         self.epsilon = epsilon
-        assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
+        assert paradigm in ["dynamic", "static", "ensemble"], f"invalid option for paradigm: {paradigm}"
+
+        # TODO implement and get rid of below
+        assert paradigm != "ensemble", "ensemble is not implemented"
+        self.paradigm = paradigm
+        if self.paradigm == "dynamic":
+            assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
+        else:
+            assert fixed_length == 1, "fixed length must be 1 if using static model"
         self.fixed_length = fixed_length
         self.variable_length = variable_length
         self.traj_len = traj_len
  
+        if self.paradigm == "dynamic":
+            self.index = self.build_dynamic_index()
+        elif self.paradigm == "static":
+            self.index = self.build_static_index()
+        # else: otherwise the program will fail. TODO implement this
+        
 
-        if self.traj_len is not None and self.fixed_length is not None:
-            self.index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_length + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), axis=-1).reshape(-1, 3)
-        elif self.fixed_length is not None: 
-            self.index = []
-            for i, traj in enumerate(self.groups):
-                length = len(traj) 
-                self.index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
-            self.index = np.concatenate(self.index, axis=0)
-        else:
-            self.index = []
-            min_len, max_len = self.variable_length
-            for i, traj in enumerate(self.groups):
-                length = len(traj) 
-                for seq_len in range(self.variable_length[0], self.variable_length[1] + 1): # upper bound on lengths is inclusive
-                    for j in range(length-(seq_len - 1)):
-                        self.index.append((i,j,j+seq_len))
-            self.index = np.array(self.index)
         self.trajs = []
         max_workers = os.cpu_count()
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-
-            
             futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.ATOMS, self.__class__.ATOM_INDICES, self.__class__.FRAME_ORIGIN,  self.__class__.AMINO_ACIDS, name) for name, traj in self.groups]
             
             kwargs = {"total": len(futures), "desc": "Processing Training Data Seqs", "unit": "job"}
@@ -154,36 +149,65 @@ class ResidueClassifierDataset(Dataset):
         return len(self.index) 
 
     def __getitem__(self, idx):
-        traj_idx, frame_index_start, frame_index_end = self.index[idx]
-        idxs = slice(frame_index_start, frame_index_end)
+        if self.paradigm == "dynamic":
+            traj_idx, frame_index_start, frame_index_end = self.index[idx]
+            idxs = slice(frame_index_start, frame_index_end)
+        elif self.paradigm == "static":
+            traj_idx, idxs = self.index[idx]
+        # else: TODO 
+
         traj = self.trajs[traj_idx]
         
-        x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:, idxs], traj["y"], traj["node_mask"], traj["traj_id"]
-        
-        pos_time_first = pos.permute(1,0,2).contiguous()
-        dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
+        # ensure that these have the proper shape for the paradigm
+        if self.paradigm in ["dynamic", "static"]:
+            x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:, idxs], traj["y"], traj["node_mask"], traj["traj_id"]
+        # else: TODO
+        if self.paradigm == "dynamic":
+            pos_time_first = pos.permute(1,0,2).contiguous()
+            dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
 
-        dists = dists_over_time.amin(dim=0)
+            dists = dists_over_time.amin(dim=0)
+
+        elif self.paradigm == "static":
+            dists = torch.cdist(pos, pos, p=2.0)
 
         edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
-        edge_attr = torch.zeros(edge_index.shape[1], 1)
+        edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1).float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
 
-        if pos.shape[0] > 1: # check that protein isn't a monomer
-            idx = torch.arange(pos.shape[0] - 1)
-            temporal = torch.stack([
-                torch.cat([idx, idx + 1]),
-                torch.cat([idx + 1, idx]),
-            ])
-            temporal_attr = torch.ones(temporal.shape[1], 1)
-            edge_index = torch.cat([edge_index, temporal], dim=1)
-            edge_attr = torch.cat([edge_attr, temporal_attr], dim=0)
+        return Data(x=features, y=y, pos=x, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
 
-        return Data(x=features, y=y, pos=x, frame_maps = frame_maps, edge_index=edge_index,  edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([[traj_idx, frame_index_start, frame_index_end]]))
+    def build_dynamic_index(self):
+        index = []
+        if self.traj_len is not None and self.fixed_length is not None:
+            index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_length + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), axis=-1).reshape(-1, 3)
+        elif self.fixed_length is not None: 
+            index = []
+            for i, traj in enumerate(self.groups):
+                length = len(traj) 
+                index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
+            index = np.concatenate(index, axis=0)
+        else:
+            index = []
+            min_len, max_len = self.variable_length
+            for i, traj in enumerate(self.groups):
+                length = len(traj) 
+                for seq_len in range(self.variable_length[0], self.variable_length[1] + 1): # upper bound on lengths is inclusive
+                    for j in range(length-(seq_len - 1)):
+                        index.append((i,j,j+seq_len))
+            index = np.array(index)
+        return index
 
+    def build_static_index(self):
+        index = []
+        for i, (name, traj) in enumerate(self.groups):
+            for j in range(len(traj)):
+                index.append((i, j))
+        return index
         
 
 
     def graph_collate(self, batch):
+            
         if self.fixed_length is not None:
             out_data = Batch.from_data_list(batch)
             return out_data.sort()

@@ -31,8 +31,162 @@ import subprocess
 #from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
 from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download
 from stats_utils import get_confusion_matrix, top_k_acc
-#from sheaf_utils import sheaf_laplacian
+from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
+def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
+    files = [path for path in os.listdir() if path.endswith(".pdb")] 
+    
+def run_val(run, model, loader, dataset, epoch, val_name="val", num_classes = len(ResidueClassifierDataset.AMINO_ACIDS), cm_title="Amino Acid Confusion Matrix", test_val=False):
+    model.eval()
+
+    global_confusion_mat = torch.zeros((num_classes, num_classes))
+    acc_top_1 = []
+    acc_top_5 = []
+    acc_top_10 = []
+
+    losses = []
+    f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+    precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+    recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
+    
+    with torch.no_grad():
+        for batch in tqdm(loader if not test_val else itertools.islice(loader,100), desc=f"Epoch {epoch} {val_name}", leave=False):
+
+            batch = batch.to(DEVICE)
+            batch = batch.sort() 
+            out_batch = model(batch)
+
+            pred_mask = ~batch.node_mask.bool()
+
+            targets = batch.y[pred_mask]
+            logits = out_batch.x[pred_mask]
+
+            out_batch = out_batch.cpu()
+            batch = batch.cpu()
+            data_list = out_batch.to_data_list()
+            gt_list = batch.to_data_list()
+
+            pred_seqs = {}
+            
+            for i, gt_data in enumerate(gt_list):
+                pred_data = data_list[i]
+
+                pred_idx = pred_data.x.argmax(dim=-1)
+                
+                graph_mask = ~gt_data.node_mask.bool()
+                
+                pred_idx[~graph_mask] = gt_data.y[~graph_mask]
+                
+                seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
+                pred_seqs[gt_data.traj_id] = seq_str
+            trajs = [[dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
+            traj_tensors = []
+            for traj in trajs:
+                traj_atoms = []
+                for atom in BACKBONE_ATOMS:
+                    cols = [atom + "_" + coord for coord in ["x","y","z"]]
+                    traj_atoms.append(torch.stack([torch.from_numpy(conf[cols].to_numpy()) for conf in traj ], dim=0)) # T, R, 3
+                    
+                traj_tensor = torch.stack(traj_atoms, dim=2) # T, R, A, 3
+                traj_tensors.append(traj_tensor)
+            lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])
+            pad_size = max(lengths)
+            traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
+            backbone_tensor = torch.stack(traj_tensors, dim=0)
+            mask = lengths[:,None] < torch.arange(pad_size)[None,:]
+            
+            out_batch = out_batch.cpu()
+            batch = batch.cpu()
+            preds = logits.argmax(dim=-1).cpu()
+            targets_cpu = targets.cpu()
+
+            for pred_prot, gt_prot in zip(out_batch.to_data_list(), batch.to_data_list()):
+
+                log = pred_prot.x[~gt_prot.node_mask] 
+                targ = gt_prot.y[~gt_prot.node_mask]
+                loss = crit(log, targ)
+                losses.append(loss.item())
+
+                acc_top_1.append(top_k_acc(log, targ, 1))
+                acc_top_5.append(top_k_acc(log, targ, 5))
+                acc_top_10.append(top_k_acc(log, targ,10))
+
+            batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
+            global_confusion_mat += batch_conf_mat
+                   
+            diag = batch_conf_mat.diag()
+            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)
+            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)
+            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
+
+
+            for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
+                 precisions[amino_acid].append(precision[k].item())
+                 recalls[amino_acid].append(recall[k].item())
+                 f1s[amino_acid].append(f1[k].item())
+
+    prf_dict = {}
+    precisions = {key: torch.tensor(value) for key, value in precisions.items()}
+    recalls = {key: torch.tensor(value) for key, value in recalls.items()}
+    f1s = {key: torch.tensor(value) for key, value in f1s.items()}
+    for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
+        prf_dict[f"{val_name}_{amino_acid}_f1_mean"] = f1s[amino_acid].mean().item()
+        prf_dict[f"{val_name}_{amino_acid}_precision_mean"] = precisions[amino_acid].mean().item()
+        prf_dict[f"{val_name}_{amino_acid}_recall_mean"] = recalls[amino_acid].mean().item()
+        prf_dict[f"{val_name}_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
+        prf_dict[f"{val_name}_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
+        prf_dict[f"{val_name}_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
+
+    # perplexity score
+    perplexities = torch.exp(torch.tensor(losses))
+    prf_dict[f"{val_name}_perp_mean"] = perplexities.mean().item()
+    prf_dict[f"{val_name}_perp_std"] = perplexities.std().item()
+    
+    acc_top_1 = torch.tensor(acc_top_1)
+    acc_top_5 = torch.tensor(acc_top_5)
+    acc_top_10 = torch.tensor(acc_top_10)
+
+    prf_dict[f"{val_name}_top1_acc_mean"] = acc_top_1.mean().item()
+    prf_dict[f"{val_name}_top5_acc_mean"] = acc_top_5.mean().item()
+    prf_dict[f"{val_name}_top10_acc_mean"] = acc_top_10.mean().item()
+    prf_dict[f"{val_name}_top1_acc_std"] = acc_top_1.std().item()
+    prf_dict[f"{val_name}_top5_acc_std"] = acc_top_5.std().item()
+    prf_dict[f"{val_name}_top10_acc_std"] = acc_top_10.std().item()
+    
+
+    fig, ax = plt.subplots(figsize=(12, 12))
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=global_confusion_mat.numpy().astype(int),
+        display_labels=ResidueClassifierDataset.AMINO_ACIDS
+    )
+    disp.plot(cmap='Blues', ax=ax, values_format='d')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    plt.title(cm_title)
+
+    prf_dict[f"{val_name}_aa_confusion_matrix"] = wandb.Image(fig)
+    plt.close(fig)
+
+    avg_loss = sum(losses) / len(losses) if losses else 0
+
+    run.log(prf_dict | {"epoch_{val_name}_loss": avg_loss, "epoch": epoch})
+
+def interpret_sheaves(loader, model, run):
+    with torch.no_grad():
+        for batch in tqdm(loader, desc=f"Epoch {epoch}", leave=False):
+
+            data = batch.to_data_list()[0].to(DEVICE)
+            data = data.sort() 
+            _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
+            first_sheaf = first_sheaf.cpu()
+            last_sheaf = last_sheaf.cpu()
+            edge_index = data.edge_index.cpu()
+            traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
+            #first_sheaf_laplacian = sheaf_laplacian(first_sheaf, edge_index)
+            #last_sheaf_laplacian = sheaf_laplacian(last_sheaf, edge_index)
+            #first_eigs = torch.linalg.eig(first_sheaf_laplacian)
+            #last_eigs = torch.linalg.eig(last_sheaf_laplacian)
+            
+         
 
 # TODO fix the train val test split
 # move validation code to it's own function
@@ -55,7 +209,8 @@ def train_residue_classifier(args_dict):
     run_name = args_dict["run_name"]
     restriction_map_type=args_dict["restriction_map_type"]
     seed=42
-    num_timesteps = 128
+    paradigm = args_dict["paradigm"]
+    num_timesteps = 128 if paradigm == "dynamic" else 1
     use_scheduler=False
     test_val = False
     use_profiler = False
@@ -154,9 +309,9 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df,  epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
-    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
-    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, fixed_length=num_timesteps, traj_len=200)
+    train_dataset = ResidueClassifierDataset(train_df,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
@@ -171,6 +326,7 @@ def train_residue_classifier(args_dict):
     # ---------------------------------------------
 
     model = NodeSheafClassifier(
+        paradigm=paradigm,
         atoms=BACKBONE_ATOMS,
         frame_origin="CA",
         num_classes=num_classes,
@@ -183,7 +339,6 @@ def train_residue_classifier(args_dict):
         restriction_map_type=restriction_map_type,
         use_attention=use_attention,
         use_masking=use_masking
-   
     ).to(DEVICE)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -226,7 +381,6 @@ def train_residue_classifier(args_dict):
                 times1.append(time.perf_counter())
                 batch = batch.to(DEVICE)
 
-                batch = batch.sort()
                 if use_profiler:
                     torch.cuda.synchronize()
 
@@ -285,376 +439,12 @@ def train_residue_classifier(args_dict):
         )
         
         # Validation Check
-        model.eval()
+        run_val(run, model, val_loader, val_dataset, epoch, val_name="val", test_val=test_val)
 
-        global_confusion_mat = torch.zeros((num_classes, num_classes))
-        val_acc_top_1 = []
-        val_acc_top_5 = []
-        val_acc_top_10 = []
-
-        pos_correct = torch.zeros(0, dtype=torch.long)
-        pos_total = torch.zeros(0, dtype=torch.long)
-
-        val_losses = []
-        f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-        precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-        recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-        
-        #scRMSDs = [] 
-        with torch.no_grad():
-            for batch in tqdm(val_loader if not test_val else itertools.islice(val_loader,100), desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
-
-                batch = batch.to(DEVICE)
-                batch = batch.sort() 
-                out_batch = model(batch)
-
-                pred_mask = ~batch.node_mask.bool()
-
-                targets = batch.y[pred_mask]
-                logits = out_batch.x[pred_mask]
-
-                """out_batch = out_batch.cpu()
-                batch = batch.cpu()
-                data_list = out_batch.to_data_list()
-                gt_list = batch.to_data_list()
-
-                pred_seqs = {}
-                
-                for i, gt_data in enumerate(gt_list):
-                    pred_data = data_list[i]
-    
-                    pred_idx = pred_data.x.argmax(dim=-1)
-                    
-                    graph_mask = ~gt_data.node_mask.bool()
-                    
-                    pred_idx[~graph_mask] = gt_data.y[~graph_mask]
-                    
-                    seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
-                    pred_seqs[gt_data.traj_id] = seq_str
-                trajs = [[val_dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
-                traj_tensors = []
-                for traj in trajs:
-                    traj_atoms = []
-                    for atom in BACKBONE_ATOMS:
-                        cols = [atom + "_" + coord for coord in ["x","y","z"]]
-                        traj_atoms.append(torch.stack([torch.from_numpy(conf[cols].to_numpy()) for conf in traj ], dim=0)) # T, R, 3
-                        
-                    traj_tensor = torch.stack(traj_atoms, dim=2) # T, R, A, 3
-                    traj_tensors.append(traj_tensor)
-                lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])
-                pad_size = max(lengths)
-                traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
-                backbone_tensor = torch.stack(traj_tensors, dim=0)
-                mask = lengths[:,None] < torch.arange(pad_size)[None,:]
-                #scRMSD_results = evaluate_batch_rmsd(pred_seqs.values(), backbone_tensor, mask, colabfold_model)
-                
-                #scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
-                
-                """ 
-                out_batch = out_batch.cpu()
-                batch = batch.cpu()
-                preds = logits.argmax(dim=-1).cpu()
-                targets_cpu = targets.cpu()
- 
-                for pred_prot, gt_prot in zip(out_batch.to_data_list(), batch.to_data_list()):
-
-                    log = pred_prot.x[~gt_prot.node_mask] 
-                    targ = gt_prot.y[~gt_prot.node_mask]
-                    loss = crit(log, targ)
-                    val_losses.append(loss.item())
-
-                    val_acc_top_1.append(top_k_acc(log, targ, 1))
-                    val_acc_top_5.append(top_k_acc(log, targ, 5))
-                    val_acc_top_10.append(top_k_acc(log, targ,10))
-
-                batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
-                global_confusion_mat += batch_conf_mat
-
-                if hasattr(batch, "batch") and batch.batch is not None:
-                    nodes_per_protein = torch.bincount(batch.batch)
-                    all_positions = torch.cat([torch.arange(n.item(), device=DEVICE) for n in nodes_per_protein])
-                else:
-                    all_positions = torch.arange(batch.num_nodes, device=DEVICE)
-                
-                positions = all_positions[pred_mask].cpu()
-                correct_mask = (preds == targets_cpu).long()
-                
-                if len(positions) > 0:
-                    current_max_pos = positions.max().item() + 1
-                    
-                    if current_max_pos > len(pos_total):
-                        pad_size = current_max_pos - len(pos_total)
-                        pos_correct = torch.cat([pos_correct, torch.zeros(pad_size, dtype=torch.long)])
-                        pos_total = torch.cat([pos_total, torch.zeros(pad_size, dtype=torch.long)])
-                    
-                    pos_total += torch.bincount(positions, minlength=len(pos_total))
-                    pos_correct += torch.bincount(positions, weights=correct_mask, minlength=len(pos_correct)).long()
-                        
-                diag = batch_conf_mat.diag()
-                recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)
-                precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)
-                f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
-
-                # Residue sequence position
-
-                # Evaluate amino acids
-                for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
-                     precisions[amino_acid].append(precision[k].item())
-                     recalls[amino_acid].append(recall[k].item())
-                     f1s[amino_acid].append(f1[k].item())
-
-        prf_dict = {}
-        precisions = {key: torch.tensor(value) for key, value in precisions.items()}
-        recalls = {key: torch.tensor(value) for key, value in recalls.items()}
-        f1s = {key: torch.tensor(value) for key, value in f1s.items()}
-        for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
-            prf_dict[f"val_{amino_acid}_f1_mean"] = f1s[amino_acid].mean().item()
-            prf_dict[f"val_{amino_acid}_precision_mean"] = precisions[amino_acid].mean().item()
-            prf_dict[f"val_{amino_acid}_recall_mean"] = recalls[amino_acid].mean().item()
-            prf_dict[f"val_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
-            prf_dict[f"val_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
-            prf_dict[f"val_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
-
-        # perplexity score
-        val_perplexities = torch.exp(torch.tensor(val_losses))
-        prf_dict["val_perp_mean"] = val_perplexities.mean().item()
-        prf_dict["val_perp_std"] = val_perplexities.std().item()
-        
-        val_acc_top_1 = torch.tensor(val_acc_top_1)
-        val_acc_top_5 = torch.tensor(val_acc_top_5)
-        val_acc_top_10 = torch.tensor(val_acc_top_10)
-
-        prf_dict["val_top1_acc_mean"] = val_acc_top_1.mean().item()
-        prf_dict["val_top5_acc_mean"] = val_acc_top_5.mean().item()
-        prf_dict["val_top10_acc_mean"] = val_acc_top_10.mean().item()
-        prf_dict["val_top1_acc_std"] = val_acc_top_1.std().item()
-        prf_dict["val_top5_acc_std"] = val_acc_top_5.std().item()
-        prf_dict["val_top10_acc_std"] = val_acc_top_10.std().item()
-        
-
-        #prf_dict["rmsd_mean"] = torch.tensor(scRMSDs).mean().item()
-        #prf_dict["rmsd_std_dev"] = torch.tensor(scRMSDs).std().item()
-
-        
-        # Confusion matrix
-        fig, ax = plt.subplots(figsize=(12, 12))
-        disp = ConfusionMatrixDisplay(
-            confusion_matrix=global_confusion_mat.numpy().astype(int),
-            display_labels=ResidueClassifierDataset.AMINO_ACIDS
-        )
-        disp.plot(cmap='Blues', ax=ax, values_format='d')
-        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-        plt.title("Val Set Amino Acid Confusion Matrix")
-
-        prf_dict["val_aa_confusion_matrix"] = wandb.Image(fig)
-        plt.close(fig)
-
-        # Sequence positon accuracy
-        valid_pos_mask = pos_total > 0
-        if valid_pos_mask.any():
-            valid_positions = torch.arange(len(pos_total))[valid_pos_mask]
-            pos_accuracies = (pos_correct[valid_pos_mask] / pos_total[valid_pos_mask])
-
-            fig_pos, ax_pos = plt.subplots(figsize=(12, 5))
-            ax_pos.plot(valid_positions.numpy(), pos_accuracies, marker='.', linestyle='-', alpha=0.7)
-            ax_pos.set_xlabel("Amino Acid Sequence Position (N-terminus -> C-terminus)")
-            ax_pos.set_ylabel("Accuracy")
-            ax_pos.set_title(f"Validation Accuracy vs. Sequence Position (Epoch {epoch+1})")
-            ax_pos.grid(True, linestyle='--', alpha=0.6)
-            
-            prf_dict["val_position_accuracy_plot"] = wandb.Image(fig_pos)
-            plt.close(fig_pos)
-        
-        # now let's qualitatively analyze sheaves
         if not ablate_sheaves:
-            with torch.no_grad():
-                for batch in tqdm(single_graph_val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=False):
+            interpret_sheaves(loader, model, run)
 
-                    data = batch.to_data_list()[0].to(DEVICE)
-                    data = data.sort() 
-                    _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
-                    first_sheaf = first_sheaf.cpu()
-                    last_sheaf = last_sheaf.cpu()
-                    edge_index = data.edge_index.cpu()
-                    traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
-                    #first_sheaf_laplacian = sheaf_laplacian(first_sheaf, edge_index)
-                    #last_sheaf_laplacian = sheaf_laplacian(last_sheaf, edge_index)
-                    #first_eigs = torch.linalg.eig(first_sheaf_laplacian)
-                    #last_eigs = torch.linalg.eig(last_sheaf_laplacian)
-                    
-                     
-
-        avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else 0
-
-        run.log(prf_dict | {"epoch_val_loss": avg_val_loss, "epoch": epoch})
-
-
-    model.eval()
-
-    global_confusion_mat = torch.zeros((num_classes, num_classes))
-    test_acc_top_1 = []
-    test_acc_top_5 = []
-    test_acc_top_10 = []
-
-    pos_correct = torch.zeros(0, dtype=torch.long)
-    pos_total = torch.zeros(0, dtype=torch.long)
-
-    test_losses = []
-    f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-    precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-    recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-    
-    #scRMSDs = [] 
-    with torch.no_grad():
-        for batch in tqdm(test_loader):
-
-            batch = batch.to(DEVICE)
-            batch = batch.sort() 
-            out_batch = model(batch)
-
-            pred_mask = ~batch.node_mask.bool()
-
-            targets = batch.y[pred_mask]
-            logits = out_batch.x[pred_mask]
-
-            """out_batch = out_batch.cpu()
-            batch = batch.cpu()
-            data_list = out_batch.to_data_list()
-            gt_list = batch.to_data_list()
-
-            pred_seqs = {}
-            
-            for i, gt_data in enumerate(gt_list):
-                pred_data = data_list[i]
-
-                pred_idx = pred_data.x.argmax(dim=-1)
-                
-                graph_mask = ~gt_data.node_mask.bool()
-                
-                pred_idx[~graph_mask] = gt_data.y[~graph_mask]
-                
-                seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
-                pred_seqs[gt_data.traj_id] = seq_str
-            trajs = [[test_dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
-            traj_tensors = []
-            for traj in trajs:
-                traj_atoms = []
-                for atom in BACKBONE_ATOMS:
-                    cols = [atom + "_" + coord for coord in ["x","y","z"]]
-                    traj_atoms.append(torch.stack([torch.from_numpy(conf[cols].to_numpy()) for conf in traj ], dim=0)) # T, R, 3
-                    
-                traj_tensor = torch.stack(traj_atoms, dim=2) # T, R, A, 3
-                traj_tensors.append(traj_tensor)
-            lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])
-            pad_size = max(lengths)
-            traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
-            backbone_tensor = torch.stack(traj_tensors, dim=0)
-            mask = lengths[:,None] < torch.arange(pad_size)[None,:]
-            #scRMSD_results = evaluate_batch_rmsd(pred_seqs.values(), backbone_tensor, mask, colabfold_model)
-            
-            #scRMSDs.append(scRMSD_results["all_backbone_rmsd"].cpu().mean().item()) 
-            
-            """ 
-            out_batch = out_batch.cpu()
-            batch = batch.cpu()
-            preds = logits.argmax(dim=-1).cpu()
-            targets_cpu = targets.cpu()
-
-            for pred_prot, gt_prot in zip(out_batch.to_data_list(), batch.to_data_list()):
-
-                log = pred_prot.x[~gt_prot.node_mask] 
-                targ = gt_prot.y[~gt_prot.node_mask]
-                loss = crit(log, targ)
-                test_losses.append(loss.item())
-
-                test_acc_top_1.append(top_k_acc(log, targ, 1))
-                test_acc_top_5.append(top_k_acc(log, targ, 5))
-                test_acc_top_10.append(top_k_acc(log, targ,10))
-
-            batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
-            global_confusion_mat += batch_conf_mat
-
-            if hasattr(batch, "batch") and batch.batch is not None:
-                nodes_per_protein = torch.bincount(batch.batch)
-                all_positions = torch.cat([torch.arange(n.item(), device=DEVICE) for n in nodes_per_protein])
-            else:
-                all_positions = torch.arange(batch.num_nodes, device=DEVICE)
-            
-            positions = all_positions[pred_mask].cpu()
-            correct_mask = (preds == targets_cpu).long()
-            
-            if len(positions) > 0:
-                current_max_pos = positions.max().item() + 1
-                
-                if current_max_pos > len(pos_total):
-                    pad_size = current_max_pos - len(pos_total)
-                    pos_correct = torch.cat([pos_correct, torch.zeros(pad_size, dtype=torch.long)])
-                    pos_total = torch.cat([pos_total, torch.zeros(pad_size, dtype=torch.long)])
-                
-                pos_total += torch.bincount(positions, minlength=len(pos_total))
-                pos_correct += torch.bincount(positions, weights=correct_mask, minlength=len(pos_correct)).long()
-                    
-            diag = batch_conf_mat.diag()
-            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)
-            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)
-            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
-
-            # Residue sequence position
-
-            # Evaluate amino acids
-            for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
-                 precisions[amino_acid].append(precision[k].item())
-                 recalls[amino_acid].append(recall[k].item())
-                 f1s[amino_acid].append(f1[k].item())
-
-    prf_dict = {}
-    precisions = {key: torch.tensor(value) for key, value in precisions.items()}
-    recalls = {key: torch.tensor(value) for key, value in recalls.items()}
-    f1s = {key: torch.tensor(value) for key, value in f1s.items()}
-    for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
-        prf_dict[f"test_{amino_acid}_f1_mean"] = f1s[amino_acid].mean().item()
-        prf_dict[f"test_{amino_acid}_precision_mean"] = precisions[amino_acid].mean().item()
-        prf_dict[f"test_{amino_acid}_recall_mean"] = recalls[amino_acid].mean().item()
-        prf_dict[f"test_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
-        prf_dict[f"test_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
-        prf_dict[f"test_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
-
-    # perplexity score
-    test_perplexities = torch.exp(torch.tensor(test_losses))
-    prf_dict["test_perp_mean"] = test_perplexities.mean().item()
-    prf_dict["test_perp_std"] = test_perplexities.std().item()
-    
-    test_acc_top_1 = torch.tensor(test_acc_top_1)
-    test_acc_top_5 = torch.tensor(test_acc_top_5)
-    test_acc_top_10 = torch.tensor(test_acc_top_10)
-
-    prf_dict["test_top1_acc_mean"] = test_acc_top_1.mean().item()
-    prf_dict["test_top5_acc_mean"] = test_acc_top_5.mean().item()
-    prf_dict["test_top10_acc_mean"] = test_acc_top_10.mean().item()
-    prf_dict["test_top1_acc_std"] = test_acc_top_1.std().item()
-    prf_dict["test_top5_acc_std"] = test_acc_top_5.std().item()
-    prf_dict["test_top10_acc_std"] = test_acc_top_10.std().item()
-    
-
-    #prf_dict["rmsd_mean"] = torch.tensor(scRMSDs).mean().item()
-    #prf_dict["rmsd_std_dev"] = torch.tensor(scRMSDs).std().item()
-
-    
-    # Confusion matrix
-    fig, ax = plt.subplots(figsize=(12, 12))
-    disp = ConfusionMatrixDisplay(
-        confusion_matrix=global_confusion_mat.numpy().astype(int),
-        display_labels=ResidueClassifierDataset.AMINO_ACIDS
-    )
-    disp.plot(cmap='Blues', ax=ax, values_format='d')
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-    plt.title("Val Set Amino Acid Confusion Matrix")
-
-    prf_dict["test_aa_confusion_matrix"] = wandb.Image(fig)
-    plt.close(fig)
-
-    run.log(prf_dict)
-
+    run_val(run, model, test_loader, test_dataset, -1, val_name="test", test_val=False)
     plt.close(fig)
 
     run.finish()
@@ -668,6 +458,7 @@ if __name__ == "__main__":
     parser.add_argument('--ablate-sheaves', action="store_true")
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
+    parser.add_argument('--paradigm', type=str, default="dynamic", choices = ['dynamic', 'static', 'ensemble'])
     parser.add_argument('--resume', type=str, default="")
     parser.add_argument('--epochs', type=int, default=8)
     args = parser.parse_args()
