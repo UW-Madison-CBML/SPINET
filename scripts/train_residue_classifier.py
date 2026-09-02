@@ -31,7 +31,7 @@ import subprocess
 #from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
 from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download
 from stats_utils import get_confusion_matrix, top_k_acc
-#from sheaf_utils import sheaf_laplacian
+from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
     files = [path for path in os.listdir() if path.endswith(".pdb")] 
@@ -181,10 +181,10 @@ def interpret_sheaves(loader, model, run, device):
             last_sheaf = last_sheaf.cpu()
             edge_index = data.edge_index.cpu()
             traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
-            #first_sheaf_laplacian = sheaf_laplacian(first_sheaf, edge_index)
-            #last_sheaf_laplacian = sheaf_laplacian(last_sheaf, edge_index)
-            #first_eigs = torch.linalg.eig(first_sheaf_laplacian)
-            #last_eigs = torch.linalg.eig(last_sheaf_laplacian)
+            first_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], first_sheaf, edge_index)
+            last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf, edge_index)
+            first_eigs = torch.linalg.eig(first_sheaf_laplacian).eigenvalues
+            last_eigs = torch.linalg.eig(last_sheaf_laplacian).eigenvalues
             
          
 
@@ -289,7 +289,9 @@ def train_residue_classifier(args_dict):
             "trajectory_subsequence_timesteps":num_timesteps,
             "use_scheduler":use_scheduler,
             "scheduler_type":"cosine annealing warm restarts every epoch" if use_scheduler else "none",
-            "restriction_map_type":restriction_map_type
+            "restriction_map_type":restriction_map_type,
+            "paradigm":paradigm,
+            "use_masking": use_masking
         },
     )
 
