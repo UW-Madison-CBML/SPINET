@@ -13,3 +13,4 @@ mdtraj
 colabfold[alphafold]
 atom3d
 transformers
+h5py
