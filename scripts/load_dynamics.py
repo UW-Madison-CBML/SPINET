@@ -12,11 +12,9 @@ from itertools import product
 import socket
 
 BACKBONE_ATOMS = ["CA", "N", "C", "O"]
-FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS, ["x","y","z"])] + [ "phi","psi","omega"]
+FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS, ["x","y","z"])] + [ "phi_sin", "phi_cos","psi_sin", "psi_cos","omega_sin", "omega_cos"]
 
 def process_traj(traj):
-
-
     top = traj.topology
     n_frames = traj.n_frames
     n_res = top.n_residues
@@ -29,11 +27,18 @@ def process_traj(traj):
             residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')].squeeze(1)) # n_frames,3
         all_atoms.append(np.concatenate(residue_atoms, axis=1)) # n_frames, 12
     all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
+    phi_rad = mdtraj.compute_phi(traj)[1]
+    psi_rad = mdtraj.compute_psi(traj)[1]
+    omega_rad = mdtraj.compute_omega(traj)[1]
 
-    phi   = np.pad(mdtraj.compute_phi(traj)[1], ((0,0),(1,0)), mode="constant", constant_values=0.0)
-    psi   = np.pad(mdtraj.compute_psi(traj)[1], ((0,0),(0,1)), mode="constant", constant_values=0.0)
-    omega = np.pad(mdtraj.compute_omega(traj)[1], ((0,0),(0,1)), mode="constant", constant_values=0.0)
-    angles_features = np.stack([phi,psi,omega], axis=2) # n_frames, n_residues-1, 3
+    phi_sin   = np.pad(np.sin(phi_rad), ((0,0),(1,0)), mode="constant", constant_values=0.0)
+    psi_sin   = np.pad(np.sin(psi_rad), ((0,0),(0,1)), mode="constant", constant_values=0.0)
+    omega_sin = np.pad(np.sin(omega_rad), ((0,0),(0,1)), mode="constant", constant_values=0.0)
+    phi_cos   = np.pad(np.cos(phi_rad), ((0,0),(1,0)), mode="constant", constant_values=0.0)
+    psi_cos   = np.pad(np.cos(psi_rad), ((0,0),(0,1)), mode="constant", constant_values=0.0)
+    omega_cos = np.pad(np.cos(omega_rad), ((0,0),(0,1)), mode="constant", constant_values=0.0)
+
+    angles_features = np.stack([phi_sin,phi_cos,psi_sin,psi_cos,omega_sin,omega_cos], axis=2) # n_frames, n_residues-1, 3
     
     features = np.concatenate([all_atoms, angles_features], axis=2)
     timesteps = np.broadcast_to(np.arange(n_frames)[:,None], features.shape[:2])
@@ -41,7 +46,7 @@ def process_traj(traj):
 
     timesteps = timesteps.flatten(order="C")
     res_targets = res_names * n_frames  
-    df = pd.DataFrame({"residue":res_targets})
+    df = pd.DataFrame({"residue": res_targets})
     df.insert(0, "timestep", timesteps)
     
     # limit the number of timesteps:

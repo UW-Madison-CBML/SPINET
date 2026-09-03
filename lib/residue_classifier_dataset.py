@@ -161,7 +161,8 @@ class ResidueClassifierDataset(Dataset):
         # ensure that these have the proper shape for the paradigm
         if self.paradigm in ["dynamic", "static"]:
             x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:, idxs], traj["y"], traj["node_mask"], traj["traj_id"]
-        # else: TODO
+        else: 
+            pass #TODO
         if self.paradigm == "dynamic":
             pos_time_first = pos.permute(1,0,2).contiguous()
             dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
@@ -200,9 +201,8 @@ class ResidueClassifierDataset(Dataset):
     def build_static_index(self):
         index = []
         for i, (name, traj) in enumerate(self.groups):
-            index.append((i, 0)) # this is hard coded for the time being
-            #for j in range(len(traj)):
-            #    index.append((i, j))
+            for j in range(len(traj)):
+                index.append((i, j))
         return index
         
 

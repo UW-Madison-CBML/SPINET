@@ -9,6 +9,10 @@ api_keys.txt
 *.cif
 *.pdb
 *.pyc
+#pytorch
+*.bin
+*.pt
+*.pth
 __pycache__
 lib/__pycache__
 scripts/residue_model_InitDynamicsEmbedding_propagate_*

@@ -291,18 +291,30 @@ class InitDynamicsEmbedding(MessagePassing):
     def forward(self, x, pos, frame_maps, edge_index, edge_attr):
         x = self.project_nodes(x)
 
+        relative_positions = []
         # need to calc some edge features here, since we don't know the edges yet at 
         if self.paradigm == "static":
-            pos_feats = pos[:, self.atom_indices[self.frame_origin]]          # num_res, 3*num_atoms
-        else: 
-            pos_feats = pos[:, :, self.atom_indices[self.frame_origin]]          # num_res, n_frames, 3*num_atoms
+            poss = pos[:, :3 * len(self.atoms)].view(pos.shape[0], len(self.atoms), 3)
+            origin = poss[:, ~self.not_frame_origin_mask]
+            other_atoms = poss[:, self.not_frame_origin_mask]
 
-        origin_distances = torch.linalg.vector_norm(pos_feats[edge_index[0]] -  pos_feats[edge_index[1]], dim = -1, keepdim=True) # num_res, n_frames, 1
-        pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
+
+        else: 
+            poss = pos[:, :, :3 * len(self.atoms)].view(pos.shape[0], pos.shape[1], len(self.atoms), 3)
+            origin = poss[:, :, ~self.not_frame_origin_mask]
+            other_atoms = poss[:, :, self.not_frame_origin_mask]
+
+        in_frame_atoms = torch.matmul(other_atoms[edge_index[1]] - origin[edge_index[0]], frame_maps[edge_index[0]])
         if self.paradigm == "static":
-            edge_features = torch.cat([origin_distances, edge_attr, pairwise_matrices], dim=1)
+            in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], 9)
         else:
-            edge_features = torch.cat([origin_distances, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
+            in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], pos.shape[1], 9)
+        pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
+
+        if self.paradigm == "static":
+            edge_features = torch.cat([in_frame_atoms, edge_attr, pairwise_matrices], dim=1)
+        else:
+            edge_features = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
 
         edge_attr = self.project_edges(edge_features)
         if not self.ablate_sheaves:

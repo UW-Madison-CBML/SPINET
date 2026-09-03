@@ -29,7 +29,7 @@ import json
 import subprocess
 
 #from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
-from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download
+from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download, create_repo
 from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
@@ -139,19 +139,22 @@ def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", nu
 
     # perplexity score
     perplexities = torch.exp(torch.tensor(losses))
-    prf_dict[f"{val_name}_perp_mean"] = perplexities.mean().item()
-    prf_dict[f"{val_name}_perp_std"] = perplexities.std().item()
+    prf_dict[f"{val_name}_perp_mean"] = (pm := perplexities.mean().item())
+    prf_dict[f"{val_name}_perp_std"] = (ps := perplexities.std().item())
     
     acc_top_1 = torch.tensor(acc_top_1)
     acc_top_5 = torch.tensor(acc_top_5)
     acc_top_10 = torch.tensor(acc_top_10)
 
-    prf_dict[f"{val_name}_top1_acc_mean"] = acc_top_1.mean().item()
-    prf_dict[f"{val_name}_top5_acc_mean"] = acc_top_5.mean().item()
-    prf_dict[f"{val_name}_top10_acc_mean"] = acc_top_10.mean().item()
-    prf_dict[f"{val_name}_top1_acc_std"] = acc_top_1.std().item()
-    prf_dict[f"{val_name}_top5_acc_std"] = acc_top_5.std().item()
-    prf_dict[f"{val_name}_top10_acc_std"] = acc_top_10.std().item()
+    prf_dict[f"{val_name}_top1_acc_mean"] = (a1m := acc_top_1.mean().item())
+    prf_dict[f"{val_name}_top5_acc_mean"] = (a5m := acc_top_5.mean().item())
+    prf_dict[f"{val_name}_top10_acc_mean"] = (a10m := acc_top_10.mean().item())
+    prf_dict[f"{val_name}_top1_acc_std"] = (a1s := acc_top_1.std().item())
+    prf_dict[f"{val_name}_top5_acc_std"] = (a5s := acc_top_5.std().item())
+    prf_dict[f"{val_name}_top10_acc_std"] = (a10s := acc_top_10.std().item())
+
+    print(f"{sum(p.numel() for p in model.parameters() if p.requires_grad)} & ${a1m:.3f} \\pm {a1s:.3f}$ & ${a5m:.3f} \\pm {a5s:.3f}$ & ${a10m:.3f} \\pm {a10s:.3f}$ & ${pm:.3f} \\pm {ps:.3f}$") 
+
     
 
     fig, ax = plt.subplots(figsize=(12, 12))
@@ -168,7 +171,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", nu
 
     avg_loss = sum(losses) / len(losses) if losses else 0
 
-    run.log(prf_dict | {"epoch_{val_name}_loss": avg_loss, "epoch": epoch})
+    run.log(prf_dict | {f"epoch_{val_name}_loss": avg_loss, "epoch": epoch})
 
 def interpret_sheaves(loader, model, run, device):
     with torch.no_grad():
@@ -183,8 +186,27 @@ def interpret_sheaves(loader, model, run, device):
             traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
             first_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], first_sheaf, edge_index)
             last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf, edge_index)
-            first_eigs = torch.linalg.eig(first_sheaf_laplacian).eigenvalues
-            last_eigs = torch.linalg.eig(last_sheaf_laplacian).eigenvalues
+            first_eigs = torch.linalg.eig(first_sheaf_laplacian)
+            last_eigs = torch.linalg.eig(last_sheaf_laplacian)
+            # we just need the real components here, sheaf laplacian is real positive semi-definite
+            first_eigvals = first_eigs.eigenvalues.real
+            first_eigvecs = first_eigs.eigenvectors.real 
+            last_eigvals = first_eigs.eigenvalues.real
+            last_eigvecs = first_eigs.eigenvectors.real
+
+            img_dict = {}
+            fig, ax = plt.subplots()  
+            ax.plot(np.arange(first_eigvals.shape[0]),first_eigvals.numpy())
+            img_dict["first_sheaf"] = wandb.Image(fig)
+            plt.close(fig)
+
+            fig, ax = plt.subplots()  
+            ax.plot(np.arange(last_eigvals.shape[0]), last_eigvals.numpy())
+            img_dict["last_sheaf"] = wandb.Image(fig)
+            plt.close(fig)
+            
+            run.log(img_dict)
+            
             
          
 
@@ -197,10 +219,10 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 16
-    hidden_dim = 16
-    stalk_dim = 8
-    num_blocks = 4
+    batch_size = 32
+    hidden_dim = 64
+    stalk_dim = 16
+    num_blocks = 8
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
@@ -346,6 +368,7 @@ def train_residue_classifier(args_dict):
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run.log({"params":pytorch_total_params})
 
+    create_repo(f"JensLundsgaard/{run_name}", exist_ok=True)
     if resume:
         weights_path = hf_hub_download("JensLundsgaard/" + resume_model_name, "pytorch_model.bin", local_dir=os.path.abspath("./"))
         model.load_state_dict(torch.load(weights_path, weights_only=True))
