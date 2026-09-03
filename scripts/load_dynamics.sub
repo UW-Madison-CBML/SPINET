@@ -1,6 +1,6 @@
 # load_dynamics.sub
 
-docker_image = jenslundsgaard/sheaf_training:v2.9
+docker_image = jenslundsgaard/sheaf_training:v3.0
 
 universe = docker
 

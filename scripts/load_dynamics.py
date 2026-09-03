@@ -10,9 +10,9 @@ from tqdm import tqdm
 import traceback
 from itertools import product
 import socket
+import h5py
 
-BACKBONE_ATOMS = ["CA", "N", "C", "O"]
-FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS, ["x","y","z"])] + [ "phi_sin", "phi_cos","psi_sin", "psi_cos","omega_sin", "omega_cos"]
+BACKBONE_ATOMS = ["CA", "N", "C", "O"] # this is the GT order of backbone atoms in a coordinates array
 
 def process_traj(traj):
     top = traj.topology
@@ -25,8 +25,8 @@ def process_traj(traj):
         residue_atoms = []
         for atom in BACKBONE_ATOMS:
             residue_atoms.append(traj.xyz[:, top.select(f'resid {res_idx} and name {atom} and backbone')].squeeze(1)) # n_frames,3
-        all_atoms.append(np.concatenate(residue_atoms, axis=1)) # n_frames, 12
-    all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 12 (there's a 1 dim at 2 for whatever reason)
+        all_atoms.append(np.stack(residue_atoms, axis=1)) # n_frames, 4, 3
+    all_atoms = np.stack(all_atoms, axis=1) # n_frames, n_residues, 4, 3
     phi_rad = mdtraj.compute_phi(traj)[1]
     psi_rad = mdtraj.compute_psi(traj)[1]
     omega_rad = mdtraj.compute_omega(traj)[1]
@@ -38,25 +38,10 @@ def process_traj(traj):
     psi_cos   = np.pad(np.cos(psi_rad), ((0,0),(0,1)), mode="constant", constant_values=0.0)
     omega_cos = np.pad(np.cos(omega_rad), ((0,0),(0,1)), mode="constant", constant_values=0.0)
 
-    angles_features = np.stack([phi_sin,phi_cos,psi_sin,psi_cos,omega_sin,omega_cos], axis=2) # n_frames, n_residues-1, 3
+    angles_features = np.stack([phi_sin,phi_cos,psi_sin,psi_cos,omega_sin,omega_cos], axis=2) # n_frames, n_residues, 3
     
-    features = np.concatenate([all_atoms, angles_features], axis=2)
-    timesteps = np.broadcast_to(np.arange(n_frames)[:,None], features.shape[:2])
-    features = features.reshape(n_frames * n_res, -1, order="C") # C means right most columns will change the quickest
-
-    timesteps = timesteps.flatten(order="C")
-    res_targets = res_names * n_frames  
-    df = pd.DataFrame({"residue": res_targets})
-    df.insert(0, "timestep", timesteps)
     
-    # limit the number of timesteps:
-    timestep_mask = df["timestep"] < 200 
-    df = df[timestep_mask]
-    features = features[timestep_mask]
-
-
- 
-    return df, features, traj[::40]
+    return angles_features, all_atoms, 
 
 def download_and_process_file(url, pdb_id, cath_top, cath_hom):
     base_md_dir = "md_data"
@@ -89,23 +74,9 @@ def download_and_process_file(url, pdb_id, cath_top, cath_hom):
                 continue
                 
             traj = mdtraj.load_xtc(xtc_path, top=pdb_path)
-            df, features, frames = process_traj(traj)
-            for idx, frame in enumerate(frames):
-                frame.save_pdb(os.path.join(base_md_dir, f"{pdb_id}-{idx}.pdb"))
-
-            df["traj_id"] = eye_d
-            data.append((df, features))
-            
-        if not data:
-            return pd.DataFrame()
-        dfs, features = zip(*data) 
-        trajectories_df = pd.concat(dfs, axis=0, ignore_index=True)
-        trajectories_df["pdb_id"] = pdb_id
-        trajectories_df["cath_hom"] = cath_hom
-        trajectories_df["cath_top"] = cath_top
-        features_np = np.concatenate(features, axis=0)
-        
-        return trajectories_df, features_np
+            traj = traj.atom_slices(traj.top.select("backbone"))
+           
+        return data
         
     except Exception as e:
         print(f"Failed to process {pdb_id}: {str(e)}")
@@ -141,9 +112,8 @@ def main(atlas_df, out_csv_name):
         kwargs = {"total": len(futures), "desc": "Processing PDB jobs", "unit": "job"}
         for future in tqdm(as_completed(futures), **kwargs):
             try:
-                res_df, out_np = future.result()
-                if not res_df.empty:
-                    out_data.append((res_df, out_np))
+                data = future.result()
+                out_data += data
             except Exception as e:
                 print(f"Worker generated an exception: {e}")
                 
