@@ -52,35 +52,7 @@ def get_node_features(traj, pos_cols, feature_cols, atoms, atom_indices, frame_o
     y = torch.as_tensor(labels, dtype=torch.long)
     node_mask = torch.as_tensor(mask, dtype=torch.bool)
 
-    carbon_alphas = x[:,:,atom_indices[frame_origin]]
-    u,v = carbon_alphas - x[:,:,atom_indices["C"]], x[:,:,atom_indices["N"]] - carbon_alphas
-
-    x_basis = u - v
-    # normalize
-    x_basis = x_basis / torch.clamp(torch.norm(x_basis, dim = -1, keepdim=True), min=0.01)
-
-    y_basis = torch.cross(u, v, dim = -1) 
-    # normalize
-    y_basis = y_basis / torch.clamp(torch.norm(y_basis, dim=-1, keepdim=True), min=0.01)
     
-    # get final orthonormal basis vector:
-    z_basis = torch.cross(x_basis, y_basis, dim=-1) # will be normal since other two vectors are normal 
-    
-    basis_to_raw_matrix = torch.stack([x_basis,y_basis,z_basis], dim=-1) # num_res, n_frames, 3, 3
-
-    positions = x[:,:,:len(atom_indices)*3].view(x.shape[0], x.shape[1],len(atom_indices), 3)
-
-    # features will be certain positions in the coordinate frame
-    relative_features = positions[:, :, not_frame_origin_mask, :] - positions[:, :, ~not_frame_origin_mask, :] # num_res, n_frames, num_atoms-1, 3
-    in_frame_features = torch.matmul(basis_to_raw_matrix.mT, relative_features.mT).mT.reshape(x.shape[0], x.shape[1], 3*(len(atom_indices)-1)) # num_res, n_frames, (num_atoms-1) * 3
-    
-    features = torch.cat([in_frame_features, x[:,:,len(atoms) * 3:]], dim=-1)
-
-    return {"x":x, "features":features, "pos":pos, "y":y, "node_mask":node_mask, "traj_id":name, "frame_maps":basis_to_raw_matrix}
-    
-
-
-
    
 
     
@@ -88,11 +60,8 @@ class ResidueClassifierDataset(Dataset):
 
     # ground truth order of amino acid indices. they must be capitalized
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()]
-    FEATURE_COLS = features # from the data builder
-    POS_COLS = ["CA_x","CA_y","CA_z"]
     FRAME_ORIGIN = "CA"
     ATOMS = BACKBONE_ATOMS
-    ATOM_INDICES = {atom: slice(3*i, 3*(i+1)) for i, atom in enumerate(ATOMS)}
  
     
     #--------------------------------------------------

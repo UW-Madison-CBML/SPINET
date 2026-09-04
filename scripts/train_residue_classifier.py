@@ -326,6 +326,7 @@ def train_residue_classifier(args_dict):
         "residue_classifier_dataset.py",
         "sheaf_utils.py"
     ]
+
     for file in dependencies:
         if os.path.exists(file):
             artifact.add_file(os.path.abspath(file))
