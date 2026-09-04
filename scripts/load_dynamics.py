@@ -12,6 +12,30 @@ from itertools import product
 import socket
 import h5py
 
+def copy_attributes(source, destination):
+    for attr_name in source.attrs:
+        destination.attrs[attr_name] = source.attrs[attr_name]
+
+def merge_hdf5_item(name, obj, dest_file):
+    if isinstance(obj, h5py.Group):
+        group = dest_file.require_group(name)
+        copy_attributes(obj, group)
+    elif isinstance(obj, h5py.Dataset):
+        if name in dist_file:
+            print(f"warning: {name} is already a dataset")
+        dest_file.copy(obj, name)
+
+# open dest file outside this
+def merge_items(source_files:list[str], dest_file):
+    for file in tqdm(source_files):
+        if(os.path.exists(file)):
+            with h5py.File(file,'w') as f:
+                f.visititems(lambda name, obj: merge_fdf5_item(name, obj, dest_file))
+        else:
+            print(f"{file} DNE ")
+            
+
+
 BACKBONE_ATOMS = ["CA", "N", "C", "O"] # this is the GT order of backbone atoms in a coordinates array
 FRAME_ORIGIN = "CA"
 
@@ -106,13 +130,9 @@ def download_and_process_file(url, pdb_id, cath_top, cath_hom):
                 dihedrals, coordinates, spinet_features, frame_maps, residues = process_traj(traj, BACKBONE_ATOMS, FRAME_ORIGIN)
 
                 traj_group.create_dataset("coordinates", data=coordinates)
-
                 traj_group.create_dataset("dihedrals", data=dihedrals)
-
                 traj_group.create_dataset("spinet_features", data=spinet_features)
-
                 traj_group.create_dataset("frame_maps", data=frame_maps)
-
                 traj_group.create_dataset("residues", data=residues)
            
         return path
@@ -139,7 +159,7 @@ def main(atlas_df, out_csv_name):
        
     md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"], row["cath_top"], row["cath_hom"]) for _, row in atlas_df.iterrows()]
     
-    out_data = []
+    out_paths = []
     max_workers = os.cpu_count()
     
     print(f"Starting pipeline using {max_workers} parallel workers...")
@@ -149,18 +169,20 @@ def main(atlas_df, out_csv_name):
         kwargs = {"total": len(futures), "desc": "Processing PDB jobs", "unit": "job"}
         for future in tqdm(as_completed(futures), **kwargs):
             try:
-                data = future.result()
-                out_data += data
+                path = future.result()
+                out_paths.append(path)
             except Exception as e:
                 print(f"Worker generated an exception: {e}")
     # now merge the files together
-    
+    with h5py.File("md_data.h5",'w') as f:
+        merge_items(out_paths, f)
+
 
 if __name__ == "__main__":
     # credit: Ian Stapleton Cordasco on StackOverflow
     socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=3)
 
-    atlas_df = pd.read_csv("atlas.csv")
+    atlas_df = pd.read_csv("atlas.csv").iloc[:100]
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
     df_len = len(atlas_df)
 
