@@ -15,8 +15,8 @@ Requirements = (Target.HasCHTCStaging == true)
 
 
 transfer_input_files = load_dynamics.py, load_dynamics.sh, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas.csv
-transfer_output_files = md_data.tar.gz
-transfer_output_remaps = "md_data.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data_1.tar.gz"
+transfer_output_files = atlas_data.h5
+transfer_output_remaps = "atlas_data.h5 = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5"
 
 # , file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/atlas.csv,
 #pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/md_data.tar.gz"

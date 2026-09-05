@@ -21,16 +21,16 @@ def merge_hdf5_item(name, obj, dest_file):
         group = dest_file.require_group(name)
         copy_attributes(obj, group)
     elif isinstance(obj, h5py.Dataset):
-        if name in dist_file:
+        if name in dest_file:
             print(f"warning: {name} is already a dataset")
         dest_file.copy(obj, name)
 
 # open dest file outside this
 def merge_items(source_files:list[str], dest_file):
     for file in tqdm(source_files):
-        if(os.path.exists(file)):
-            with h5py.File(file,'w') as f:
-                f.visititems(lambda name, obj: merge_fdf5_item(name, obj, dest_file))
+        if(file != "" and os.path.exists(file)):
+            with h5py.File(file,'r') as f:
+                f.visititems(lambda name, obj: merge_hdf5_item(name, obj, dest_file))
         else:
             print(f"{file} DNE ")
             
@@ -93,7 +93,7 @@ def process_traj(traj,backbone_atoms, frame_origin): # save hdf5 and path to it
     
     return angle_features, all_atoms, spinet_features, basis_to_raw_matrix, np.array(res_names, "S4")
 
-def download_and_process_file(url, pdb_id, cath_top, cath_hom):
+def download_and_process_file(url, pdb_id):
     base_md_dir = "md_data"
     os.makedirs(base_md_dir, exist_ok=True)
     
@@ -119,7 +119,7 @@ def download_and_process_file(url, pdb_id, cath_top, cath_hom):
         path = os.path.abspath(os.path.join(base_md_dir, f'{pdb_id}.h5'))
         with h5py.File(path,'w') as f:
             for eye_d in traj_ids:
-                traj_group = f.create_group(f"{cath_top}/{cath_hom}/{pdb_id}/temp_1/{eye_d}")
+                traj_group = f.create_group(f"{pdb_id}/temp_1/{eye_d}")
                 xtc_path = os.path.join(extract_folder, f"{eye_d}.xtc")
                 
                 if not os.path.exists(xtc_path) or not os.path.exists(pdb_path):
@@ -157,14 +157,14 @@ def main(atlas_df, out_csv_name):
 
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api"
        
-    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"], row["cath_top"], row["cath_hom"]) for _, row in atlas_df.iterrows()]
+    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"]) for _, row in atlas_df.iterrows()]
     
     out_paths = []
     max_workers = os.cpu_count()
     
     print(f"Starting pipeline using {max_workers} parallel workers...")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(download_and_process_file, url, pdb, cath_top, cath_hom): pdb for url, pdb, cath_top, cath_hom in md_urls}
+        futures = {executor.submit(download_and_process_file, url, pdb): pdb for url, pdb in md_urls}
         
         kwargs = {"total": len(futures), "desc": "Processing PDB jobs", "unit": "job"}
         for future in tqdm(as_completed(futures), **kwargs):
@@ -174,15 +174,18 @@ def main(atlas_df, out_csv_name):
             except Exception as e:
                 print(f"Worker generated an exception: {e}")
     # now merge the files together
-    with h5py.File("md_data.h5",'w') as f:
+    with h5py.File("atlas_data.h5",'w') as f:
         merge_items(out_paths, f)
 
 
 if __name__ == "__main__":
     # credit: Ian Stapleton Cordasco on StackOverflow
-    socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=3)
+    try:
+        socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=3)
+    except Exception as e:
+        print(e)
 
-    atlas_df = pd.read_csv("atlas.csv").iloc[:100]
+    atlas_df = pd.read_csv("atlas.csv")
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
     df_len = len(atlas_df)
 

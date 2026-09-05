@@ -36,22 +36,6 @@ def edge_index_from_distmat(dist_matrix: torch.Tensor, epsilon: float, k:int=32)
 
 
     
-def get_node_features(traj, pos_cols, feature_cols, atoms, atom_indices, frame_origin, amino_acids, name):
-    not_frame_origin_mask = torch.tensor([atom == frame_origin for atom in atoms])
-    frames = [group for name,group in list(traj)]
-    
-    coords = np.stack([frame[pos_cols].to_numpy() for frame in frames], axis=1)
-
-
-    feats = np.stack([frame[feature_cols].to_numpy() for frame in frames], axis=1)
-    labels = torch.tensor([amino_acids.index(res) for res in frames[0]['residue'].to_list()], dtype=torch.long)
-    mask = frames[0]["mask"].to_numpy()
-
-    pos = torch.as_tensor(coords, dtype=torch.float32)
-    x = torch.as_tensor(feats, dtype=torch.float32)
-    y = torch.as_tensor(labels, dtype=torch.long)
-    node_mask = torch.as_tensor(mask, dtype=torch.bool)
-
     
    
 
@@ -62,22 +46,21 @@ class ResidueClassifierDataset(Dataset):
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()]
     FRAME_ORIGIN = "CA"
     ATOMS = BACKBONE_ATOMS
- 
-    
+    REQUIRED_DATASETS = {"coordinates", "dihedrals", "spinet_features","frame_maps","residues"}
     #--------------------------------------------------
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
     
-    def __init__(self, df:pd.DataFrame, paradigm:str="dynamic", traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
+    def __init__(self, h5_path, paradigm:str="dynamic", traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
         """
         self
-        df: the dataframe containing trajectory information 
+        h5_path: the dataframe containing trajectory information 
         traj_len: the fixed length of all trajectories if it exists
         variable_length: None if fixed length sequences else the range (inclusive) of valid sequence sizes
         epsilon: tolerance to build edge between nodes, i.e. if during the trajectory the edges ever get within epsilon from eachother
         """
-        self.df = df
-        self.groups = [(name, group.groupby('timestep')) for name, group in list(df.groupby("traj_id"))]
+        self.h5_path = self.h5_path
+        self.h5_file = None 
         self.epsilon = epsilon
         assert paradigm in ["dynamic", "static", "ensemble"], f"invalid option for paradigm: {paradigm}"
 
@@ -91,26 +74,13 @@ class ResidueClassifierDataset(Dataset):
         self.fixed_length = fixed_length
         self.variable_length = variable_length
         self.traj_len = traj_len
- 
-        if self.paradigm == "dynamic":
-            self.index = self.build_dynamic_index()
-        elif self.paradigm == "static":
-            self.index = self.build_static_index()
-        # else: otherwise the program will fail. TODO implement this
+        with h5py.File(self.h5_path, "r") as f:
+            if self.paradigm == "dynamic":
+                self.index = self.build_dynamic_index(f)
+            elif self.paradigm == "static":
+                self.index = self.build_static_index(f)
+            # else: otherwise the program will fail. TODO implement this
         
-
-        self.trajs = []
-        max_workers = os.cpu_count()
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(get_node_features, traj, self.__class__.POS_COLS, self.__class__.FEATURE_COLS, self.__class__.ATOMS, self.__class__.ATOM_INDICES, self.__class__.FRAME_ORIGIN,  self.__class__.AMINO_ACIDS, name) for name, traj in self.groups]
-            
-            kwargs = {"total": len(futures), "desc": "Processing Training Data Seqs", "unit": "job"}
-            for future in tqdm(as_completed(futures), **kwargs):
-                try:
-                    data = future.result()
-                    self.trajs.append(data)
-                except Exception as e:
-                    print(f"Worker generated an exception: {e}")
      
             
 
@@ -118,6 +88,10 @@ class ResidueClassifierDataset(Dataset):
         return len(self.index) 
 
     def __getitem__(self, idx):
+        if self.h5_file is None:
+            self.h5_file = h5py.File(self.h5_path, "r", libver="latest", swmr=True)
+                
+
         if self.paradigm == "dynamic":
             traj_idx, frame_index_start, frame_index_end = self.index[idx]
             idxs = slice(frame_index_start, frame_index_end)
@@ -125,11 +99,11 @@ class ResidueClassifierDataset(Dataset):
             traj_idx, idxs = self.index[idx]
         # else: TODO 
 
-        traj = self.trajs[traj_idx]
+        group_name = self.groups[traj_idx]
         
         # ensure that these have the proper shape for the paradigm
         if self.paradigm in ["dynamic", "static"]:
-            x, pos, features, frame_maps, y, node_mask, traj_id = traj["x"][:,idxs], traj["pos"][:,idxs], traj["features"][:,idxs], traj["frame_maps"][:, idxs], traj["y"], traj["node_mask"], traj["traj_id"]
+            x, pos, features, frame_maps, y, node_mask, traj_id = # todo fix
         else: 
             pass #TODO
         if self.paradigm == "dynamic":
@@ -144,33 +118,45 @@ class ResidueClassifierDataset(Dataset):
         edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
         edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1)[:,None].float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
 
-        return Data(x=features, y=y, pos=x, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([self.index[idx]]))
+        return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([self.index[idx]]))
 
-    def build_dynamic_index(self):
+    def build_dynamic_index(self, h5_path):
+        self.groups = []
+        def visit(name, obj):
+            if isnstance(obj, h5py.Group) and all(ds in obj for ds in self.__class__.REQUIRED_DATASETS):
+                self.groups.append(name) 
+        h5_path.visit_items(visit)
+
         index = []
         if self.traj_len is not None and self.fixed_length is not None:
             index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_length + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), axis=-1).reshape(-1, 3)
         elif self.fixed_length is not None: 
             index = []
-            for i, traj in enumerate(self.groups):
-                length = len(traj) 
+            for i, group_name in enumerate(self.groups):
+                length = h5_path[group_name + "/" + "coordinates"].shape[1]
                 index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
             index = np.concatenate(index, axis=0)
         else:
             index = []
             min_len, max_len = self.variable_length
-            for i, traj in enumerate(self.groups):
-                length = len(traj) 
+            for i, group_name in enumerate(self.groups):
+                length = h5_path[group_name + "/" + "coordinates"].shape[1]
                 for seq_len in range(self.variable_length[0], self.variable_length[1] + 1): # upper bound on lengths is inclusive
                     for j in range(length-(seq_len - 1)):
                         index.append((i,j,j+seq_len))
             index = np.array(index)
         return index
 
-    def build_static_index(self):
+    def build_static_index(self, h5_path):
+        self.groups = []
+        def visit(name, obj):
+            if isnstance(obj, h5py.Group) and all(ds in obj for ds in self.__class__.REQUIRED_DATASETS):
+                self.groups.append(name) 
+        h5_path.visit_items(visit)
+
         index = []
-        for i, (name, traj) in enumerate(self.groups):
-            for j in range(len(traj)):
+        for i, group_name in enumerate(self.groups):
+            for j in range(h5_path[group_name + "/" + "coordinates"].shape[1]):
                 index.append((i, j))
         return index
         
