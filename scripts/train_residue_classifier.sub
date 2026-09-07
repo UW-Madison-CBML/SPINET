@@ -1,6 +1,6 @@
 # train_residue_classifier.sub
 
-docker_image = jenslundsgaard/sheaf_training:v2.9
+docker_image = jenslundsgaard/sheaf_training:v3.0
 #docker_image = pytorch/pytorch:2.9.0-cuda12.8-cudnn9-runtime
 #docker_image = pytorch/pytorch:1.1.0-cuda10.0-cudnn7.5-runtime
 universe = docker
