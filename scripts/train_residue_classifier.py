@@ -28,7 +28,9 @@ import time
 import json
 import subprocess
 
-#from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
+from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
+
+
 from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download, create_repo
 from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
@@ -36,13 +38,15 @@ from torch.profiler import profile, ProfilerActivity, record_function
 def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
     files = [path for path in os.listdir() if path.endswith(".pdb")] 
     
-def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", num_classes = len(ResidueClassifierDataset.AMINO_ACIDS), cm_title="Amino Acid Confusion Matrix", test_val=False):
+def run_val(run, model, loader, dataset, epoch, device, crit, colabfold_model, val_name="val", num_classes = len(ResidueClassifierDataset.AMINO_ACIDS), cm_title="Amino Acid Confusion Matrix", test_val=False):
     model.eval()
 
     global_confusion_mat = torch.zeros((num_classes, num_classes))
     acc_top_1 = []
     acc_top_5 = []
     acc_top_10 = []
+
+    scrmsd = []
 
     losses = []
     f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
@@ -53,71 +57,79 @@ def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", nu
         for batch in tqdm(loader if not test_val else itertools.islice(loader,100), desc=f"Epoch {epoch} {val_name}", leave=False):
 
             batch = batch.to(device)
-            batch = batch.sort() 
-            out_batch = model(batch)
+            batch = batch.sort()
+            out_batch = model(batch)                                    # out_batch.x: (N, num_classes) logits, N = total nodes (residues) across all B proteins in the batched graph
 
-            pred_mask = ~batch.node_mask.bool()
+            pred_mask = ~batch.node_mask.bool()                         # (N,) bool, True at nodes whose residue identity is masked (i.e. a prediction target)
 
-            targets = batch.y[pred_mask]
-            logits = out_batch.x[pred_mask]
+            targets = batch.y[pred_mask]                                # (N_masked,) ground-truth class index, masked nodes only
+            logits = out_batch.x[pred_mask]                             # (N_masked, num_classes)
 
             out_batch = out_batch.cpu()
             batch = batch.cpu()
-            data_list = out_batch.to_data_list()
-            gt_list = batch.to_data_list()
+            data_list = out_batch.to_data_list()                        # list of B per-protein Data objects (model output)
+            gt_list = batch.to_data_list()                              # list of B per-protein Data objects (ground truth)
 
             pred_seqs = {}
-            
+
             for i, gt_data in enumerate(gt_list):
                 pred_data = data_list[i]
 
-                pred_idx = pred_data.x.argmax(dim=-1)
-                
-                graph_mask = ~gt_data.node_mask.bool()
-                
-                pred_idx[~graph_mask] = gt_data.y[~graph_mask]
-                
-                seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])
-                pred_seqs[gt_data.traj_id] = seq_str
-            """trajs = [[dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]
+                pred_idx = pred_data.x.argmax(dim=-1)                   # (R_i,) predicted class index per residue, protein i (R_i = residue count, varies per protein)
+
+                graph_mask = ~gt_data.node_mask.bool()                  # (R_i,) True at masked (prediction-target) residues
+
+                pred_idx[~graph_mask] = gt_data.y[~graph_mask]          # unmasked residues get their known ground-truth identity instead of the prediction
+
+                seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])  # length-R_i amino-acid string
+                pred_seqs[gt_data.traj_id] = seq_str                    # accumulates to B entries, insertion order == gt_list order
+
+            # Get gt coordinates from trajectory
+            trajs = [[dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]  # B lists of T per-frame DataFrames, each frame has R_i residue rows
             traj_tensors = []
             for traj in trajs:
                 traj_atoms = []
                 for atom in BACKBONE_ATOMS:
                     cols = [atom + "_" + coord for coord in ["x","y","z"]]
                     traj_atoms.append(torch.stack([torch.from_numpy(conf[cols].to_numpy()) for conf in traj ], dim=0)) # T, R, 3
-                    
+
                 traj_tensor = torch.stack(traj_atoms, dim=2) # T, R, A, 3
-                traj_tensors.append(traj_tensor)
-            lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])
-            pad_size = max(lengths)
-            traj_tensors = [F.pad(traj_tensor, (0,0,0,pad_size-traj_tensor.shape[1],0,0,0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
-            backbone_tensor = torch.stack(traj_tensors, dim=0)
-            mask = lengths[:,None] < torch.arange(pad_size)[None,:]
-            """ 
+                traj_tensors.append(traj_tensor)                        # B tensors, each (T, R_i, A, 3); R_i still ragged across proteins at this point
+            lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])  # (B,) residue count R_i per protein
+            pad_size = max(lengths)                                     # scalar = max R_i in this batch
+
+
+            traj_tensors = [F.pad(traj_tensor, (0,0,0,0,0,pad_size-traj_tensor.shape[1],0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
+
+            backbone_tensor = torch.stack(traj_tensors, dim=0)          # (B, T, pad_size, A, 3)
+            gt_seq_mask = lengths[:,None] > torch.arange(pad_size)[None,:]  # (B, pad_size) bool
+
             out_batch = out_batch.cpu()
             batch = batch.cpu()
-            preds = logits.argmax(dim=-1).cpu()
-            targets_cpu = targets.cpu()
+            preds = logits.argmax(dim=-1).cpu()                        # (N_masked,)
+            targets_cpu = targets.cpu()                                 # (N_masked,)
 
-            for pred_prot, gt_prot in zip(out_batch.to_data_list(), batch.to_data_list()):
 
-                log = pred_prot.x[~gt_prot.node_mask] 
-                targ = gt_prot.y[~gt_prot.node_mask]
-                loss = crit(log, targ)
+            for pred_prot, gt_prot in zip(data_list, gt_list):
+
+                pred_mask = ~gt_prot.node_mask                          # (R_i,) per-protein version of the batch-level pred_mask above
+
+                log = pred_prot.x[pred_mask]                             # (R_i_masked, num_classes)
+                targ = gt_prot.y[pred_mask]                              # (R_i_masked,)
+                loss = crit(log, targ)                                  # scalar
                 losses.append(loss.item())
 
                 acc_top_1.append(top_k_acc(log, targ, 1))
                 acc_top_5.append(top_k_acc(log, targ, 5))
                 acc_top_10.append(top_k_acc(log, targ,10))
 
-            batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)
+            batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)  # (num_classes, num_classes)
             global_confusion_mat += batch_conf_mat
-                   
-            diag = batch_conf_mat.diag()
-            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)
-            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)
-            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
+
+            diag = batch_conf_mat.diag()                                          # (num_classes,)
+            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)      # (num_classes,)
+            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)   # (num_classes,)
+            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)  # (num_classes,)
 
 
             for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
@@ -125,10 +137,17 @@ def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", nu
                  recalls[amino_acid].append(recall[k].item())
                  f1s[amino_acid].append(f1[k].item())
 
+            # Calculate rmsd per-batch (evaluate_batch_rmsd scores one structure per protein,
+            # so collapse the trajectory-frame axis down to frame 0)
+            gt_frame0_coords = backbone_tensor[:, 0]  # (B, T, pad_size, A, 3) -> (B, pad_size, A, 3)
+            scrmsd.append(evaluate_batch_rmsd(list(pred_seqs.values()), gt_frame0_coords, gt_seq_mask, colabfold_model))
+
+
+
     prf_dict = {}
-    precisions = {key: torch.tensor(value) for key, value in precisions.items()}
-    recalls = {key: torch.tensor(value) for key, value in recalls.items()}
-    f1s = {key: torch.tensor(value) for key, value in f1s.items()}
+    precisions = {key: torch.tensor(value) for key, value in precisions.items()}  # each value: (num_batches,), one entry per batch this amino acid appeared in
+    recalls = {key: torch.tensor(value) for key, value in recalls.items()}        # each value: (num_batches,)
+    f1s = {key: torch.tensor(value) for key, value in f1s.items()}               # each value: (num_batches,)
     for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
         prf_dict[f"{val_name}_{amino_acid}_f1_mean"] = f1s[amino_acid].mean().item()
         prf_dict[f"{val_name}_{amino_acid}_precision_mean"] = precisions[amino_acid].mean().item()
@@ -138,10 +157,18 @@ def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", nu
         prf_dict[f"{val_name}_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
 
     # perplexity score
-    perplexities = torch.exp(torch.tensor(losses))
+    perplexities = torch.exp(torch.tensor(losses))  # losses/perplexities: (total_proteins,) -- one scalar per protein, accumulated across every batch in the loader
     prf_dict[f"{val_name}_perp_mean"] = (pm := perplexities.mean().item())
     prf_dict[f"{val_name}_perp_std"] = (ps := perplexities.std().item())
-    
+
+    scrmsd_keys = ["C_rmsd", "CA_rmsd", "N_rmsd", "O_rmsd", "all_backbone_rmsd"]
+    scrmsd = {key: torch.cat([batch_scores[key] for batch_scores in scrmsd]) for key in scrmsd_keys}  # each value: (total_proteins,)
+    for key in scrmsd_keys:
+        prf_dict[f"{val_name}_{key}_mean"] = scrmsd[key].mean().item()
+        prf_dict[f"{val_name}_{key}_std"] = scrmsd[key].std().item()
+    rmsdM = scrmsd["all_backbone_rmsd"].mean().item()
+    rmsdS = scrmsd["all_backbone_rmsd"].std().item()
+
     acc_top_1 = torch.tensor(acc_top_1)
     acc_top_5 = torch.tensor(acc_top_5)
     acc_top_10 = torch.tensor(acc_top_10)
@@ -153,9 +180,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, val_name="val", nu
     prf_dict[f"{val_name}_top5_acc_std"] = (a5s := acc_top_5.std().item())
     prf_dict[f"{val_name}_top10_acc_std"] = (a10s := acc_top_10.std().item())
 
-    print(f"{sum(p.numel() for p in model.parameters() if p.requires_grad)} & ${a1m:.3f} \\pm {a1s:.3f}$ & ${a5m:.3f} \\pm {a5s:.3f}$ & ${a10m:.3f} \\pm {a10s:.3f}$ & ${pm:.3f} \\pm {ps:.3f}$") 
-
-    
+    print(f"{sum(p.numel() for p in model.parameters() if p.requires_grad)} & ${a1m:.3f} \\pm {a1s:.3f}$ & ${a5m:.3f} \\pm {a5s:.3f}$ & ${a10m:.3f} \\pm {a10s:.3f}$ & ${pm:.3f} \\pm {ps:.3f}$ & ${rmsdM: .3f} \\pm {rmsdS: .3f}$") 
 
     fig, ax = plt.subplots(figsize=(12, 12))
     disp = ConfusionMatrixDisplay(
@@ -255,6 +280,7 @@ def train_residue_classifier(args_dict):
 
     # set up device
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
     # load in data and create 3-way split
     df = pd.read_csv(os.path.join("md_data", "atlas_index.csv"))
@@ -379,15 +405,13 @@ def train_residue_classifier(args_dict):
     local_dir = f"./{run_name}"
     os.makedirs(local_dir, exist_ok=True)
 
-
-
-    #colabfold_model = ColabFoldValidationEngine(BACKBONE_ATOMS, device=DEVICE)
-
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     crit = torch.nn.CrossEntropyLoss() 
     if use_scheduler:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
 
+    # Instatiate colabfold model
+    colabfold_model = ColabFoldValidationEngine(BACKBONE_ATOMS, device=DEVICE)
 
     # training loop
     for epoch in range(epochs):
@@ -465,12 +489,12 @@ def train_residue_classifier(args_dict):
         )
         
         # Validation Check
-        run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, val_name="val", test_val=test_val)
+        run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, colabfold_model, val_name="val", test_val=test_val)
 
         if not ablate_sheaves:
             interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
 
-    run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, val_name="test", test_val=False)
+    run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, colabfold_model, val_name="test", test_val=False)
 
     run.finish()
 
