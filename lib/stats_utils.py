@@ -24,5 +24,43 @@ def top_k_acc(logits:torch.Tensor, targets:torch.Tensor, k:int):
     correct_mask = torch.einsum("bi,bi->b", hot_logits, F.one_hot(targets, num_classes=logits.shape[1]).float())
     return correct_mask.sum().item() / correct_mask.shape[0] 
     
+def perplexity_from_nll(mean_nll):
+    """exp() of a mean per-residue negative-log-likelihood / cross-entropy loss."""
+    if isinstance(mean_nll, torch.Tensor):
+        mean_nll = mean_nll.item()
+    return float(np.exp(mean_nll))
+
+METRIC_KEYS = ('perplexity', 'recovery_top1', 'recovery_top5', 'recovery_top10')
+
+def summarize_per_protein(per_protein, metric_keys=METRIC_KEYS, ddof=0):
+    """Mean +/- std over a list of per-protein metric dicts.
+
+    :param ddof: 0 for population std (PiFold/eval_atlas.py's convention), 1 for
+        sample std (MapDiff/eval_atlas.py's convention) -- pass explicitly to match
+        whichever aggregation the caller previously computed by hand.
+    """
+    summary = {}
+    for key in metric_keys:
+        values = np.asarray([p[key] for p in per_protein], dtype=np.float64)
+        summary['{}_mean'.format(key)] = float(values.mean())
+        summary['{}_std'.format(key)] = float(values.std(ddof=ddof)) if len(values) > ddof else 0.0
+    return summary
 
 
+def init_wandb(key_file, entity, project, name, config=None):
+    """`wandb.login` + `wandb.init` boilerplate shared by every eval/train script."""
+    import wandb
+    with open(key_file) as f:
+        api_key = f.read().strip()
+    wandb.login(key=api_key)
+    return wandb.init(entity=entity, project=project, name=name, config=config or {})
+
+
+def log_per_protein_table(per_protein, metric_keys=METRIC_KEYS, columns=('title', 'length'),
+                           table_name='per_protein_metrics'):
+    """Upload a wandb.Table of per-protein metrics (one row per protein)."""
+    import wandb
+    table = wandb.Table(columns=list(columns) + list(metric_keys))
+    for p in per_protein:
+        table.add_data(*(p[c] for c in columns), *(p[k] for k in metric_keys))
+    wandb.log({table_name: table})

@@ -139,11 +139,20 @@ class ColabFoldValidationEngine:
 
 def evaluate_batch_rmsd(
     sequences: List[str], 
-    ground_truth_coords: torch.Tensor, 
+    ground_truth_coords: torch.Tensor, # evaluate vs a ground-truth determined structure (XRC, cryo-EM, or NMR)
     gt_mask: torch.Tensor,
     colabfold_engine: 'ColabFoldValidationEngine'
 ) -> Dict[str, torch.Tensor]:
+    """Evaluates SCRMSD for a given batch of inverse-folding predictions.
 
+    params:
+        sequences: List of predicted AA sequences.
+        ground_truth_coords: Ground-truth pdb atomic coords, shape (Traj,Residue,Atom,3)
+        gt_mask: Mask from groun-truth.
+    return:
+        List of rmsd scores for at atom and backbone level."""
+
+    # alphafold prediction
     pred_coords, pred_mask = colabfold_engine.process_batch(sequences)
     
     device = pred_coords.device
@@ -154,6 +163,7 @@ def evaluate_batch_rmsd(
     ground_truth_coords = ground_truth_coords.to(device)
     gt_mask = gt_mask.to(device)
     
+    # determine padding
     if R_pred < R_target:
         pad_size = R_target - R_pred
         pred_coords = torch.cat([pred_coords, torch.zeros((B, pad_size, A, 3), device=device)], dim=1)
@@ -169,6 +179,7 @@ def evaluate_batch_rmsd(
     atom_mapping = {'C': 0, 'CA': 1, 'N': 2, 'O': 3}
     scores = {}
     
+    # Get atom-level rmsd
     for atom_name, atom_idx in atom_mapping.items():
         P_atom = pred_coords[:, :, atom_idx, :]
         Q_atom = ground_truth_coords[:, :, atom_idx, :]
@@ -180,6 +191,7 @@ def evaluate_batch_rmsd(
     
     backbone_mask = combined_mask.unsqueeze(-1).expand(-1, -1, 4).reshape(B, -1)
     
+    # entire backbone
     scores["all_backbone_rmsd"] = kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask)
     
     return scores
