@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from zipfile import ZipFile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from tqdm import tqdm
 import traceback
 from itertools import product
@@ -38,6 +40,30 @@ def merge_items(source_files:list[str], dest_file):
 
 BACKBONE_ATOMS = ["CA", "N", "C", "O"] # this is the GT order of backbone atoms in a coordinates array
 FRAME_ORIGIN = "CA"
+
+
+def make_session():
+    retry = Retry(
+        total=6,
+        connect=6,
+        read=6,
+        status=6,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=4,
+        pool_maxsize=4,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    return session
 
 def process_traj(traj,backbone_atoms, frame_origin): # save hdf5 and path to it
     atom_indices = {atom: i for i, atom in enumerate(backbone_atoms)}
@@ -93,7 +119,9 @@ def process_traj(traj,backbone_atoms, frame_origin): # save hdf5 and path to it
     
     return angle_features, all_atoms, spinet_features, basis_to_raw_matrix, np.array(res_names, "S4")
 
-def download_and_process_file(url, pdb_id):
+def download_and_process_file(url, pdb_id, cath_id):
+
+
     base_md_dir = "md_data"
     os.makedirs(base_md_dir, exist_ok=True)
     
@@ -104,15 +132,27 @@ def download_and_process_file(url, pdb_id):
     extract_folder = os.path.join(worker_temp_dir, "extracted")
     
     try:
-        with requests.get(url, stream=True) as r:
-            r.raise_for_status()
-            with open(zip_file, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=65536):
-                    f.write(chunk)
-                    
-        with ZipFile(zip_file, 'r') as zObject:
-            zObject.extractall(path=extract_folder)
-            
+        session = make_session()
+
+        with session.get(
+            url,
+            stream=True,
+            timeout=(10, 300),
+        ) as response:
+            if response.status_code >= 400:
+                raise requests.HTTPError(
+                    f"{response.status_code} response from {url}",
+                    response=response,
+                )
+
+            with open(zip_file, "wb") as f:
+                for chunk in response.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+
+        with ZipFile(zip_file, "r") as archive:
+            archive.extractall(extract_folder)
+           
         traj_ids = [f"{pdb_id}_R{i}" for i in range(1, 2)]# just look at first one, can load whole dataset this way
         
         pdb_path = os.path.join(extract_folder, f"{pdb_id}.pdb")
@@ -120,6 +160,10 @@ def download_and_process_file(url, pdb_id):
         with h5py.File(path,'w') as f:
             for eye_d in traj_ids:
                 traj_group = f.create_group(f"{pdb_id}/temp_1/{eye_d}")
+                try:
+                    traj_group.attrs["cath_id"] = np.array([int(phylum) for phylum in cath_id.strip().split("<br>")[0].split(".")])
+                except Exception as e: 
+                    traj_group.attrs["cath_id"] = np.array([])
                 xtc_path = os.path.join(extract_folder, f"{eye_d}.xtc")
                 
                 if not os.path.exists(xtc_path) or not os.path.exists(pdb_path):
@@ -148,23 +192,18 @@ def download_and_process_file(url, pdb_id):
 def main(atlas_df, out_csv_name):
     first_cath_lineage = [cath_id.strip().split("<br>")[0].split(".") for cath_id in atlas_df["cath_id"].to_list()] 
 
-    _,_,top,hom = zip(*first_cath_lineage)
 
-    atlas_df["cath_top"] = top
-    atlas_df["cath_hom"] = hom
-
-    print(atlas_df["cath_hom"].unique())
 
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api"
        
-    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"]) for _, row in atlas_df.iterrows()]
+    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"], row["cath_id"]) for _, row in atlas_df.iterrows()]
     
     out_paths = []
-    max_workers = os.cpu_count()
+    max_workers = min(16, os.cpu_count())
     
     print(f"Starting pipeline using {max_workers} parallel workers...")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(download_and_process_file, url, pdb): pdb for url, pdb in md_urls}
+        futures = {executor.submit(download_and_process_file, url, pdb, cath_id): pdb for url, pdb, cath_id in md_urls}
         
         kwargs = {"total": len(futures), "desc": "Processing PDB jobs", "unit": "job"}
         for future in tqdm(as_completed(futures), **kwargs):
@@ -180,11 +219,6 @@ def main(atlas_df, out_csv_name):
 
 if __name__ == "__main__":
     # credit: Ian Stapleton Cordasco on StackOverflow
-    try:
-        socket.create_connection(('www.dsimb.inserm.fr', 443), timeout=3)
-    except Exception as e:
-        print(e)
-
     atlas_df = pd.read_csv("atlas.csv")
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
     df_len = len(atlas_df)

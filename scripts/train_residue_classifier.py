@@ -35,6 +35,7 @@ from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download, create_re
 from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
+import h5py
 def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
     files = [path for path in os.listdir() if path.endswith(".pdb")] 
     
@@ -281,39 +282,13 @@ def train_residue_classifier(args_dict):
     # set up device
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-    # load in data and create 3-way split
-    df = pd.read_csv(os.path.join("md_data", "atlas_index.csv"))
-
-    features_np = np.load(os.path.join("md_data", "atlas_index.npy"))
-
-    # mask
-    df["mask"] = np_rng.random(len(df)) > masking_ratio
-
-    pdb_ids = df["pdb_id"].unique() if not test_val else df["pdb_id"].unique()[:100]
-    num_pdbs = len(pdb_ids)
-
-    val_cutoff = int(val_ratio * num_pdbs)
-    test_cutoff = val_cutoff + int(test_ratio * num_pdbs)
-
-    val_pdbs = pdb_ids[:val_cutoff]
-    test_pdbs = pdb_ids[val_cutoff:test_cutoff]
-    train_pdbs = pdb_ids[test_cutoff:]
-
-    train_mask = df["pdb_id"].isin(train_pdbs)
-    train_np = features_np[train_mask]
-    train_df = df[train_mask]
-    train_df = pd.concat([train_df, pd.DataFrame(train_np, columns=FEATURE_COLUMNS, index=train_df.index)], axis=1)
-
-    val_mask = df["pdb_id"].isin(val_pdbs)
-    val_np = features_np[val_mask]
-    val_df = df[val_mask]
-    val_df = pd.concat([val_df, pd.DataFrame(val_np, columns=FEATURE_COLUMNS, index=val_df.index)], axis=1)
-
-    test_mask = df["pdb_id"].isin(test_pdbs)
-    test_np = features_np[test_mask]
-    test_df = df[test_mask]
-    test_df = pd.concat([test_df, pd.DataFrame(test_np, columns=FEATURE_COLUMNS, index=test_df.index)], axis=1)
+    h5_path = os.path.abspath("atlas_data.h5")
+    all_pdbs = []
+    with h5py.File(h5_path, "r") as f:
+        pdb_ids = f.keys()
+     
+    val_pdbs = # TODO implement some sort of 
+    train_pdbs = # TODO implement some sort split here
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -360,14 +335,12 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(train_df,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
-    val_dataset = ResidueClassifierDataset(val_df, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
-    test_dataset = ResidueClassifierDataset(test_df, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+    train_dataset = ResidueClassifierDataset(h5_path, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+    val_dataset = ResidueClassifierDataset(h5_path, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
     val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
-    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:test_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
 
     single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, generator=torch_rng, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
@@ -493,8 +466,6 @@ def train_residue_classifier(args_dict):
 
         if not ablate_sheaves:
             interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
-
-    run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, colabfold_model, val_name="test", test_val=False)
 
     run.finish()
 

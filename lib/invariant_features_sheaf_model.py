@@ -101,6 +101,50 @@ class SheafLearner(nn.Module):
 
         return maps
 
+class SheafLearner(nn.Module):
+    def __init__(self, input_dim:int, stalk_dim:int):
+        super().__init__()
+        self.input_dim = input_dim
+        self.stalk_dim = stalk_dim
+        self.lin = nn.Linear(2*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
+        self.map_learner = nn.Linear(2*self.stalk_dim, self.stalk_dim ** 2)
+
+    def forward(self, x, edge_index):
+        row, col = edge_index
+
+        x_row = x[row]
+        x_col = x[col]
+
+        maps = self.map_learner(F.relu(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+
+        return maps
+
+
+
+class EdgeCrossAttention(nn.Module):
+    def __init__(self, input_dim:int, stalk_dim:int):
+        super().__init__()
+        self.input_dim = input_dim
+        self.stalk_dim = stalk_dim
+        self.channels = slf.input_dim // self.stalk_dim
+        self.map_learner = nn.Linear(self.hidden_dim, self.stalk_dim ** 2)
+        self.multihead_attn = nn.MultiheadAttention(self.channels, 1, batch_first=True)
+        self.keys = nn.Linear(self.channels, self.channels)
+        self.values = nn.Linear(self.channels, self.channels)
+        self.queries = nn.Linear(self.channels, self.channels)
+
+
+    def forward(self, x, edge_index):
+        row, col = edge_index
+
+        x_row = x[row].view(-1, self.stalk_dim, self.channels)
+        x_col = x[col].view(-1, self.stalk_dim, self.channels)
+
+        attn_output, _ = self.multihead_attn(self.queries(x_row), self.keys(x_col), self.values(x_col))
+
+        return F.relu(attn_output).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.channels) if len(x.shape) > 3 else F.relu(attn_output)
+
+
 
 #-----------------------------------------------------------------------------------
 class SheafAttentionConv(MessagePassing):
@@ -117,7 +161,7 @@ class SheafAttentionConv(MessagePassing):
 
         self.W = nn.Parameter(torch.empty(self.num_heads, self.stalk_dim, self.stalk_dim))
         nn.init.xavier_uniform_(self.W)
-        
+
 
         if self.use_attention:
             self.att = nn.Parameter(torch.empty(self.num_heads, 1, 2 * self.hidden_dim))
@@ -274,7 +318,10 @@ class InitDynamicsEmbedding(MessagePassing):
         self.paradigm = paradigm
 
         if not self.ablate_sheaves:
-            self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
+            #self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
+            self.transformer = EdgeCrossAttention(self.hiddn_dim, self.stalk_dim)
+            self.sheaf_learner = nn.Sequential(nn.Linear(self.hidden_dim, 4 * self.hidden_dim), nn.ReLU(), nn.Linear( 4 * self.hidden_dim, self.stalk_dim**2))
+
         self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
         self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
 
@@ -294,15 +341,12 @@ class InitDynamicsEmbedding(MessagePassing):
         relative_positions = []
         # need to calc some edge features here, since we don't know the edges yet at 
         if self.paradigm == "static":
-            poss = pos[:, :3 * len(self.atoms)].view(pos.shape[0], len(self.atoms), 3)
-            origin = poss[:, ~self.not_frame_origin_mask]
+            origin = pos[:, ~self.not_frame_origin_mask]
             other_atoms = poss[:, self.not_frame_origin_mask]
 
-
         else: 
-            poss = pos[:, :, :3 * len(self.atoms)].view(pos.shape[0], pos.shape[1], len(self.atoms), 3)
-            origin = poss[:, :, ~self.not_frame_origin_mask]
-            other_atoms = poss[:, :, self.not_frame_origin_mask]
+            origin = pos[:, :, ~self.not_frame_origin_mask]
+            other_atoms = pos[:, :, self.not_frame_origin_mask]
 
         in_frame_atoms = torch.matmul(other_atoms[edge_index[1]] - origin[edge_index[0]], frame_maps[edge_index[0]])
         if self.paradigm == "static":
@@ -319,9 +363,13 @@ class InitDynamicsEmbedding(MessagePassing):
         edge_attr = self.project_edges(edge_features)
         if not self.ablate_sheaves:
             if self.paradigm == "static":
-                maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+                #maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+                maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr).view(edge_index.shape[1], self.hidden_dim)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+
             else:
-                maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
+                #maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
+
+                maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr).view(edge_index.shape[1], x.shape[1], self.hidden_dim)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
 
             _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
             neighbor_maps = maps[reverse_edge_indices] 
