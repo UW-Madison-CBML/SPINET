@@ -162,7 +162,7 @@ def download_and_process_file(url, pdb_id, cath_id):
                 traj_group = f.create_group(f"{pdb_id}/temp_1/{eye_d}")
                 try:
                     traj_group.attrs["cath_id"] = np.array([int(phylum) for phylum in cath_id.strip().split("<br>")[0].split(".")])
-                else: 
+                except Exception as e: 
                     traj_group.attrs["cath_id"] = np.array([])
                 xtc_path = os.path.join(extract_folder, f"{eye_d}.xtc")
                 
