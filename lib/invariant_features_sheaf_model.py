@@ -126,7 +126,7 @@ class EdgeCrossAttention(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.stalk_dim = stalk_dim
-        self.channels = slf.input_dim // self.stalk_dim
+        self.channels = self.input_dim // self.stalk_dim
         self.map_learner = nn.Linear(self.hidden_dim, self.stalk_dim ** 2)
         self.multihead_attn = nn.MultiheadAttention(self.channels, 1, batch_first=True)
         self.keys = nn.Linear(self.channels, self.channels)
@@ -342,7 +342,7 @@ class InitDynamicsEmbedding(MessagePassing):
         # need to calc some edge features here, since we don't know the edges yet at 
         if self.paradigm == "static":
             origin = pos[:, ~self.not_frame_origin_mask]
-            other_atoms = poss[:, self.not_frame_origin_mask]
+            other_atoms = pos[:, self.not_frame_origin_mask]
 
         else: 
             origin = pos[:, :, ~self.not_frame_origin_mask]

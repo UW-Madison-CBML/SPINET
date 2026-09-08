@@ -34,6 +34,7 @@ from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 import h5py
+
 def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
     files = [path for path in os.listdir() if path.endswith(".pdb")] 
     
@@ -239,6 +240,8 @@ def train_residue_classifier(args_dict):
     use_profiler = False
     resume_model_name = args_dict["resume"]
     resume = args_dict["resume"] != ""
+    nth_cross_val = args_dict["cross_val"]
+    assert nth_cross_val >= 0 and nth_cross_val < 5
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -260,10 +263,13 @@ def train_residue_classifier(args_dict):
     h5_path = os.path.abspath("atlas_data.h5")
     all_pdbs = []
     with h5py.File(h5_path, "r") as f:
-        pdb_ids = f.keys()
-     
-    val_pdbs = # TODO implement some sort of 
-    train_pdbs = # TODO implement some sort split here
+        all_pdbs = f.keys()
+    num_pdbs = len(all_pdbs) 
+    group_size = num_pdbs // 5
+    val_pdbs = all_pdbs[group_size * nth_cross_val: group_size * (nth_cross_val + 1)]
+    train_pdbs = list(set(all_pdbs).difference(set(val_pdbs)))
+    print("train: ", train_pdbs)
+    print("val: ", val_pdbs)
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -310,8 +316,8 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(h5_path, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
-    val_dataset = ResidueClassifierDataset(h5_path, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=1000)
+    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=1000)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
@@ -458,5 +464,6 @@ if __name__ == "__main__":
     parser.add_argument('--paradigm', type=str, default="dynamic", choices = ['dynamic', 'static', 'ensemble'])
     parser.add_argument('--resume', type=str, default="")
     parser.add_argument('--epochs', type=int, default=8)
+    parser.add_argument('--cross-val', type=int, default=0)
     args = parser.parse_args()
     train_residue_classifier(vars(args))
