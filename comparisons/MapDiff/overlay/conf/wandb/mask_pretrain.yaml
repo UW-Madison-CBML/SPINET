@@ -1,0 +1,5 @@
+use: False
+entity: jenslundsgaard7-uw-madison
+project: SheafProtein
+run_name: MapDiff_mask_ipa_pretrain
+key_file: ./wandb_api.txt

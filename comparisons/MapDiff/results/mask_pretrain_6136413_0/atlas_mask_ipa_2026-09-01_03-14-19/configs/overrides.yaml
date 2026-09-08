@@ -1,0 +1,4 @@
+- dataset=atlas
+- dataset.train_dir=./surffold_data/atlas_process/train/
+- comet.use=False
+- experiment.name=atlas_mask_ipa

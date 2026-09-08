@@ -1,0 +1,8 @@
+- dataset=atlas
+- dataset.train_dir=./surffold_data/atlas_process/train/
+- dataset.val_dir=./surffold_data/atlas_process/validation/
+- dataset.test_dir=./surffold_data/atlas_process/test/
+- dataset.marginal_train_dir=./surffold_data/train_marginal_x_atlas.pt
+- comet.use=False
+- experiment.name=atlas_diffusion
+- prior_model.path=./atlas_mask_ipa_last_200_epochs_2026-09-01_11-14-03.pt

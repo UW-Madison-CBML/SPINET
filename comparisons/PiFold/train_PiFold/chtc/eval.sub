@@ -1,0 +1,44 @@
+# CHTC HTCondor submit file for evaluating a trained PiFold checkpoint on the
+# ATLAS validation split (Docker universe, GPU), logging results to W&B.
+#
+# Setup (one-time): same image as training -- see pifold.sub / README.md.
+#
+# Prerequisite: a checkpoint.pth + model_param.json from a pifold.sub run
+# (../results/<Cluster>_<Process>/chtc_run/{checkpoint.pth,model_param.json}).
+# Fill in the real path below (replacing the placeholder run id).
+#
+# Submit:
+#   cd chtc && mkdir -p logs && condor_submit eval.sub
+
+universe                = docker
+docker_image            = cmikulski4/pifold:v2
+
+executable              = run_eval.sh
+# Forwarded verbatim to `python eval_atlas.py ...` -- see ../eval_atlas.py.
+# --run_dir . because the checkpoint + model_param.json below are transferred
+# in flat (run_eval.sh copies them into PiFold/ before running).
+arguments               = --run_dir . --data_root ./surffold_data/ --wandb_key_file ./wandb_api.txt
+
+# The pristine PiFold tarball, ATLAS overlay, eval script, the trained
+# checkpoint + its hyperparameters, the W&B key, lib/stats_utils.py, and the
+# ATLAS-derived dataset staged on /staging.
+transfer_input_files    = ../PiFold.tar.gz, ../overlay, ../eval_atlas.py, ../results/6133697_0/chtc_run/checkpoint.pth, ../results/6133697_0/chtc_run/model_param.json, ../wandb_api.txt, ../../lib/stats_utils.py, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+
+log                     = logs/eval_$(Cluster)_$(Process).log
+output                  = logs/eval_$(Cluster)_$(Process).out
+error                   = logs/eval_$(Cluster)_$(Process).err
+
+request_gpus            = 1
+request_cpus            = 4
+request_memory          = 16GB
+request_disk            = 20GB
+
+# Only match GPU nodes with a modern-enough driver/CUDA for the cu118 image.
+requirements            = (Target.CUDADriverVersion >= 11.8)
++WantGPULab             = true
++GPUJobLength           = "short"
+
+queue 1
