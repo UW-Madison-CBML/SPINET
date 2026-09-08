@@ -218,7 +218,6 @@ def main(atlas_df, out_csv_name):
 
 
 if __name__ == "__main__":
-    # credit: Ian Stapleton Cordasco on StackOverflow
     atlas_df = pd.read_csv("atlas.csv")
     atlas_df["pdb"] = atlas_df["pdb"].map(lambda x: x[:4] + "_" + x[-1])
     df_len = len(atlas_df)
