@@ -196,7 +196,7 @@ def main(atlas_df, out_csv_name):
 
     base_url = "https://www.dsimb.inserm.fr/ATLAS/api"
        
-    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"], row["cath_id"]) for _, row in atlas_df.iterrows()]
+    md_urls = [(base_url + f"/ATLAS/analysis/{row['pdb']}", row["pdb"], row["ecod_id"]) for _, row in atlas_df.iterrows()] # all entries have ECOD id classification
     
     out_paths = []
     max_workers = min(16, os.cpu_count())
