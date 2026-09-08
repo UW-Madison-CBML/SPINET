@@ -4,7 +4,7 @@ import os
 
 
 if __name__ == "__main__":
-    np_rng = np.default_rng(seed=42)
+    np_rng = np.random.default_rng(seed=42)
     h5_path = os.path.abspath("atlas_data.h5")
     with h5py.File(h5_path, "r") as f:
         all_pdbs = list(f.keys())
