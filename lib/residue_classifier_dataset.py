@@ -136,7 +136,7 @@ class ResidueClassifierDataset(Dataset):
         def visit(name, obj):
             if isinstance(obj, h5py.Group) and all(ds in obj for ds in self.__class__.REQUIRED_DATASETS) and (use_split <= (name.split("/")[0] in split)):
                 self.groups.append(name) 
-        h5_file.visit_items(visit)
+        h5_file.visititems(visit)
 
 
     def build_dynamic_index(self, h5_file):

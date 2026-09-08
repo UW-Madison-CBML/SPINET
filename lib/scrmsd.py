@@ -18,7 +18,7 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None) -> 
     else:
         mask = mask.reshape(-1, N).to(P.dtype)
  
-    counts = mask.sum(dim=1, keepdim=True).clamp(min=1.0)          # (B,1)
+    counts = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
  
     P_centroid = (P * mask.unsqueeze(-1)).sum(1, keepdim=True) / counts.unsqueeze(-1)
     Q_centroid = (Q * mask.unsqueeze(-1)).sum(1, keepdim=True) / counts.unsqueeze(-1)
@@ -26,19 +26,19 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None) -> 
     P_c = (P - P_centroid) * mask.unsqueeze(-1)
     Q_c = (Q - Q_centroid) * mask.unsqueeze(-1)
  
-    H = torch.einsum('bni,bnj->bij', P_c, Q_c)                     # (B,3,3)
+    H = torch.einsum('bni,bnj->bij', P_c, Q_c)  
     U, _, Vt = torch.linalg.svd(H)
     V = Vt.transpose(-2, -1)
     Ut = U.transpose(-2, -1)
  
     d = torch.sign(torch.linalg.det(torch.einsum('bij,bjk->bik', V, Ut)))
     ones = torch.ones_like(d)
-    D = torch.diag_embed(torch.stack([ones, ones, d], dim=-1))     # (B,3,3)
+    D = torch.diag_embed(torch.stack([ones, ones, d], dim=-1))
  
-    R = torch.einsum('bij,bjk,bkl->bil', V, D, Ut)                 # (B,3,3)
+    R = torch.einsum('bij,bjk,bkl->bil', V, D, Ut)  
     P_aligned = torch.einsum('bij,bnj->bni', R, P_c)
  
-    sq_err = ((P_aligned - Q_c) ** 2).sum(-1) * mask                # (B,N)
+    sq_err = ((P_aligned - Q_c) ** 2).sum(-1) * mask
     mse = sq_err.sum(1) / counts.squeeze(-1)
     rmsd = torch.sqrt(mse.clamp(min=1e-12))
  
@@ -78,10 +78,6 @@ class ColabFoldValidationEngine:
         ]
 
     def _generate_single_sequence_features(self, sequence: str) -> dict:
-        """
-        Generates standard AlphaFold sequence-level feature dictionaries in-memory 
-        without spinning up external alignment servers (Zero-Shot / Single-sequence fallback).
-        """
         num_res = len(sequence)
         
         sequence_features = pipeline.make_sequence_features(
@@ -139,18 +135,18 @@ class ColabFoldValidationEngine:
 
 def evaluate_batch_rmsd(
     sequences: List[str], 
-    ground_truth_coords: torch.Tensor, # evaluate vs a ground-truth determined structure (XRC, cryo-EM, or NMR)
+    ground_truth_coords: torch.Tensor,
     gt_mask: torch.Tensor,
     colabfold_engine: 'ColabFoldValidationEngine'
-) -> Dict[str, torch.Tensor]:
-    """Evaluates SCRMSD for a given batch of inverse-folding predictions.
+):
+    """
 
     params:
-        sequences: List of predicted AA sequences.
-        ground_truth_coords: Ground-truth pdb atomic coords, shape (Traj,Residue,Atom,3)
+        sequences: lists of strings of seq1 amino acids
+        ground_truth_coords: ground_truth time-series, shape (traj, n_frames, n_residues, n_atoms,3) # n_residues is padded and batched
         gt_mask: Mask from groun-truth.
     return:
-        List of rmsd scores for at atom and backbone level."""
+        list of per-protein alignment scores (kabsch align at each timestep and then average RMSD over time)"""
 
     # alphafold prediction
     pred_coords, pred_mask = colabfold_engine.process_batch(sequences)
@@ -179,19 +175,12 @@ def evaluate_batch_rmsd(
     atom_mapping = {'C': 0, 'CA': 1, 'N': 2, 'O': 3}
     scores = {}
     
-    # Get atom-level rmsd
-    for atom_name, atom_idx in atom_mapping.items():
-        P_atom = pred_coords[:, :, atom_idx, :]
-        Q_atom = ground_truth_coords[:, :, atom_idx, :]
-        
-        scores[f"{atom_name}_rmsd"] = kabsch_rmsd(P_atom, Q_atom, mask=combined_mask)
         
     P_backbone = pred_coords.reshape(B, -1, 3)
     Q_backbone = ground_truth_coords.reshape(B, -1, 3)
     
     backbone_mask = combined_mask.unsqueeze(-1).expand(-1, -1, 4).reshape(B, -1)
     
-    # entire backbone
     scores["all_backbone_rmsd"] = kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask)
     
     return scores
