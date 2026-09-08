@@ -14,3 +14,5 @@ colabfold[alphafold]
 atom3d
 transformers
 h5py
+jax==0.4.23
+jaxlib==0.4.23

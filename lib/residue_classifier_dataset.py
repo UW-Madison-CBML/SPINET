@@ -54,7 +54,7 @@ class ResidueClassifierDataset(Dataset):
         variable_length: None if fixed length sequences else the range (inclusive) of valid sequence sizes
         epsilon: tolerance to build edge between nodes, i.e. if during the trajectory the edges ever get within epsilon from eachother
         """
-        self.h5_path = self.h5_path
+        self.h5_path = h5_path
         self.h5_file = None 
         self.groups = groups
         self.epsilon = epsilon
@@ -160,7 +160,7 @@ class ResidueClassifierDataset(Dataset):
             index = np.array(index)
         return index
 
-    def build_static_index(self, h5_path):
+    def build_static_index(self, h5_file):
         index = []
         for i, group_name in enumerate(self.groups):
             j = int(self.np_rng.random() * h5_file[group_name + "/" + "coordinates"].shape[1]) # pick random timepoints

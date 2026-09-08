@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import torch.nn.functional as F
 def get_confusion_matrix(gt_indices, pred_indices, num_classes):
     """Compute confusion matrix over 1D array of pred and target."""
