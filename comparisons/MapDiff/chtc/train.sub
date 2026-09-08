@@ -1,0 +1,61 @@
+# CHTC HTCondor submit file for MapDiff stage 2: denoising diffusion
+# network training on ATLAS (Docker universe, GPU).
+#
+# MapDiff.tar.gz should be a tarball of a *pristine* checkout of
+# peizhenbai/MapDiff -- see ../README.md. run_train.sh overlays ../overlay/
+# on top of it at run time, so the repo itself is never modified.
+#
+# Prerequisite: a stage-1 mask-prior IPA checkpoint from mask_pretrain.sub
+# (../results/mask_pretrain_<Cluster>_<Process>/outputs/.../model/*.pt).
+# HTCondor's file transfer drops files in flat (no subdirectories), so fill
+# in the actual checkpoint filename below in both transfer_input_files and
+# arguments' prior_model.path after your stage-1 job finishes.
+#
+# Setup (one-time):
+#   1. ./build_and_push.sh <dockerhub_username>   # builds+pushes the image
+#   2. Set docker_image below to that image.
+#
+# comet.use=False below because CHTC jobs have no interactive comet.ml
+# login; wandb.use=True logs the same run to Weights & Biases instead
+# (key-file auth works fine non-interactively -- see ../wandb_api.txt).
+#
+# Submit:
+#   cd chtc && mkdir -p logs && condor_submit train.sub
+
+universe                = docker
+docker_image            = cmikulski4/mapdiff:v1
+
+executable              = run_train.sh
+# Forwarded verbatim to `python main.py ...` -- see ../overlay/conf/diff_config.yaml.
+# dataset.*_dir override conf/dataset/atlas.yaml's defaults to match where
+# run_train.sh actually extracts/featurizes the staged tarball in the job's
+# scratch dir. prior_model.path points at the stage-1 IPA checkpoint
+# transferred in below -- fill in the actual filename (see FIXME).
+arguments               = --config-name=diff_config dataset=atlas dataset.train_dir=./surffold_data/atlas_process/train/ dataset.val_dir=./surffold_data/atlas_process/validation/ dataset.test_dir=./surffold_data/atlas_process/test/ dataset.marginal_train_dir=./surffold_data/train_marginal_x_atlas.pt comet.use=False wandb.use=True wandb.key_file=./wandb_api.txt experiment.name=atlas_diffusion prior_model.path=./atlas_mask_ipa_last_200_epochs_2026-09-01_11-14-03.pt
+
+# The pristine MapDiff tarball, this folder's ATLAS/wandb overlay, the
+# stage-1 IPA checkpoint (FIXME: fill in the real path from your
+# mask_pretrain.sub run), the W&B key, lib/stats_utils.py, and the
+# ATLAS-derived dataset staged on /staging.
+transfer_input_files    = ../MapDiff.tar.gz, ../overlay, ../results/mask_pretrain_6136413_0/atlas_mask_ipa_2026-09-01_03-14-19/model/atlas_mask_ipa_last_200_epochs_2026-09-01_11-14-03.pt, ../wandb_api.txt, ../../lib/stats_utils.py, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_output_files   = MapDiff/outputs
+transfer_output_remaps  = "MapDiff/outputs = ../results/diffusion_$(Cluster)_$(Process)"
+
+log                     = logs/train_$(Cluster)_$(Process).log
+output                  = logs/train_$(Cluster)_$(Process).out
+error                   = logs/train_$(Cluster)_$(Process).err
+
+request_gpus            = 2
+request_cpus            = 16
+request_memory          = 128GB
+request_disk            = 128GB
+
+# Only match GPU nodes with a modern-enough driver/CUDA for the cu117 image.
+Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
++WantGPULab             = true
++GPUJobLength           = "long"
+
+queue 1
