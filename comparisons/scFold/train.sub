@@ -1,6 +1,6 @@
 # train.sub
 
-docker_image = jenslundsgaard/scfold:v1.1
+docker_image = jenslundsgaard/scfold:v1.2
 #docker_image = pytorch/pytorch:2.9.0-cuda12.8-cudnn9-runtime
 #docker_image = pytorch/pytorch:1.1.0-cuda10.0-cudnn7.5-runtime
 universe = docker
