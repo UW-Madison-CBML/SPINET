@@ -261,9 +261,9 @@ def train_residue_classifier(args_dict):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     h5_path = os.path.abspath("atlas_data.h5")
-    all_pdbs = []
     with h5py.File(h5_path, "r") as f:
-        all_pdbs = f.keys()
+        all_pdbs = list(f.keys())
+        np_rng.shuffle(all_pdbs)
     num_pdbs = len(all_pdbs) 
     group_size = num_pdbs // 5
     val_pdbs = all_pdbs[group_size * nth_cross_val: group_size * (nth_cross_val + 1)]

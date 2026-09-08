@@ -8,7 +8,7 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.utils import dense_to_sparse
 import numpy as np
 from typing import Union, Tuple
-from load_dynamics import FEATURE_COLUMNS as features, BACKBONE_ATOMS
+from load_dynamics import BACKBONE_ATOMS
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import os
@@ -74,9 +74,10 @@ class ResidueClassifierDataset(Dataset):
         self.variable_length = variable_length
         self.traj_len = traj_len
 
-        self.build_groups()
 
         with h5py.File(self.h5_path, "r") as f:
+
+            self.build_groups(f)
             if self.paradigm == "dynamic":
                 self.index = self.build_dynamic_index(f)
             elif self.paradigm == "static":
@@ -128,31 +129,31 @@ class ResidueClassifierDataset(Dataset):
 
         return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([self.index[idx]]))
 
-    def build_groups(self):
+    def build_groups(self, h5_file):
         use_split = self.groups is not None
         split = self.groups 
         self.groups = []
         def visit(name, obj):
             if isinstance(obj, h5py.Group) and all(ds in obj for ds in self.__class__.REQUIRED_DATASETS) and (use_split <= (name.split("/")[0] in split)):
                 self.groups.append(name) 
-        h5_path.visit_items(visit)
+        h5_file.visit_items(visit)
 
 
-    def build_dynamic_index(self, h5_path):
+    def build_dynamic_index(self, h5_file):
         index = []
         if self.traj_len is not None and self.fixed_length is not None:
             index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_length + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), axis=-1).reshape(-1, 3)
         elif self.fixed_length is not None: 
             index = []
             for i, group_name in enumerate(self.groups):
-                length = h5_path[group_name + "/" + "coordinates"].shape[1]
+                length = h5_file[group_name + "/" + "coordinates"].shape[1]
                 index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
             index = np.concatenate(index, axis=0)
         else:
             index = []
             min_len, max_len = self.variable_length
             for i, group_name in enumerate(self.groups):
-                length = h5_path[group_name + "/" + "coordinates"].shape[1]
+                length = h5_file[group_name + "/" + "coordinates"].shape[1]
                 for seq_len in range(self.variable_length[0], self.variable_length[1] + 1): # upper bound on lengths is inclusive
                     for j in range(length-(seq_len - 1)):
                         index.append((i,j,j+seq_len))
@@ -162,7 +163,7 @@ class ResidueClassifierDataset(Dataset):
     def build_static_index(self, h5_path):
         index = []
         for i, group_name in enumerate(self.groups):
-            j = int(self.np_rng.random() * h5_path[group_name + "/" + "coordinates"].shape[1]) # pick random timepoints
+            j = int(self.np_rng.random() * h5_file[group_name + "/" + "coordinates"].shape[1]) # pick random timepoints
             index.append((i, j))
         return index
         
