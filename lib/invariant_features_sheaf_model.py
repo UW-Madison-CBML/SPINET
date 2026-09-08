@@ -319,7 +319,7 @@ class InitDynamicsEmbedding(MessagePassing):
 
         if not self.ablate_sheaves:
             #self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
-            self.transformer = EdgeCrossAttention(self.hiddn_dim, self.stalk_dim)
+            self.transformer = EdgeCrossAttention(self.hidden_dim, self.stalk_dim)
             self.sheaf_learner = nn.Sequential(nn.Linear(self.hidden_dim, 4 * self.hidden_dim), nn.ReLU(), nn.Linear( 4 * self.hidden_dim, self.stalk_dim**2))
 
         self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
