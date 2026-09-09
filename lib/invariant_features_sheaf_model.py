@@ -318,9 +318,9 @@ class InitDynamicsEmbedding(MessagePassing):
         self.paradigm = paradigm
 
         if not self.ablate_sheaves:
-            #self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
-            self.transformer = EdgeCrossAttention(self.hidden_dim, self.stalk_dim)
-            self.sheaf_learner = nn.Sequential(nn.Linear(self.hidden_dim, 4 * self.hidden_dim), nn.ReLU(), nn.Linear( 4 * self.hidden_dim, self.stalk_dim**2))
+            self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
+            #self.transformer = EdgeCrossAttention(self.hidden_dim, self.stalk_dim)
+            #self.sheaf_learner = nn.Sequential(nn.Linear(self.hidden_dim, 4 * self.hidden_dim), nn.ReLU(), nn.Linear( 4 * self.hidden_dim, self.stalk_dim**2))
 
         self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
         self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
@@ -363,13 +363,13 @@ class InitDynamicsEmbedding(MessagePassing):
         edge_attr = self.project_edges(edge_features)
         if not self.ablate_sheaves:
             if self.paradigm == "static":
-                #maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
-                maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr).view(edge_index.shape[1], self.hidden_dim)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+                maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+                #maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr.view(edge_attr[0], self.stalk_dim, self.channels)).view(edge_index.shape[1], self.hidden_dim)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
 
             else:
-                #maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
+                maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
 
-                maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr).view(edge_index.shape[1], x.shape[1], self.hidden_dim)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
+                #maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr).view(edge_index.shape[1], x.shape[1], self.hidden_dim)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
 
             _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
             neighbor_maps = maps[reverse_edge_indices] 
