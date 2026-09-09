@@ -44,7 +44,7 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
         d = torch.linalg.det(U) * torch.linalg.det(Vt)
 
         # this puts 1, ,...,  1, d on the diagonal
-        d_diag = torch.eye(n) * torch.cat([torch.ones(d.shape + (n-1,)), d.unsqueeze(-1)]).unsqueeze(-1)
+        d_diag = torch.diag_embed(torch.cat([torch.ones(*d.shape, n-1), d.unsqueeze(-1)], dim=-1))
         
         # calculate R
         R = torch.matmul(torch.matmul(U, d_diag), Vt)
@@ -74,7 +74,7 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
         d = torch.linalg.det(U) * torch.linalg.det(Vt)
 
         # this puts 1, 1, d on the diagonal
-        d_diag = torch.eye(n) * torch.cat([torch.ones(d.shape + (n-1,)), d.unsqueeze(-1)]).unsqueeze(-1)
+        d_diag = torch.diag_embed(torch.cat([torch.ones(*d.shape, n-1), d.unsqueeze(-1)], dim=-1)) # 3,3
         
         # calculate R
         R = torch.matmul(torch.matmul(U, d_diag), Vt)

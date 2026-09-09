@@ -428,9 +428,22 @@ def train_residue_classifier(args_dict):
                     prof.step()
         
         if use_profiler:
-            table = prof.key_averages()
             prof_results = prof.key_averages()
-            df = pd.DataFrame(map(vars, prof_results))
+            rows = []
+            for evt in prof_results:
+                rows.append({
+                    "name": evt.key,
+                    "count": evt.count,
+                    "cpu_time_total": evt.cpu_time_total,
+                    "cuda_time_total": getattr(evt, "cuda_time_total", 0),
+                    "cpu_time_avg": evt.cpu_time,
+                    "cuda_time_avg": getattr(evt, "cuda_time", 0),
+                    "self_cpu_time_total": evt.self_cpu_time_total,
+                    "self_cuda_time_total": getattr(evt, "self_cuda_time_total", 0),
+                    "cpu_memory_usage": evt.cpu_memory_usage,
+                    "cuda_memory_usage": getattr(evt, "cuda_memory_usage", 0),
+                })
+            df = pd.DataFrame(rows)
             run.log({"profiler": wandb.Table(dataframe=df)})
         times1 = torch.tensor(times2) - torch.tensor(times1)
         times2 = torch.tensor(times3) - torch.tensor(times2)

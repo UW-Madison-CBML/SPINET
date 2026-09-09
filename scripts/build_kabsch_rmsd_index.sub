@@ -13,7 +13,7 @@ output = build_kabsch_rmsd_index_$(Cluster)_$(Process).out
 when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 
-transfer_input_files = build_kabsch_rmsd_index.sh, build_kabsch_rmsd_index.py, ../lib/, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5
+transfer_input_files = build_kabsch_rmsd_index.sh, build_kabsch_rmsd_index.py, load_dynamics.py, ../lib/, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5
 transfer_output_files = rmsd_cluster_index.h5
 transfer_output_remaps = "rmsd_cluster_index.h5 = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/rmsd_cluster_index.h5"
 
