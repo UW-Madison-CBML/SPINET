@@ -481,7 +481,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.use_masking = config.use_masking
                 self.paradigm = config.paradigm
         
-        self.init_dynamics_embedding = InitDynamicsEmbedding(12, 5, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, paradigm = self.paradigm, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, paradigm = self.paradigm, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
         if self.use_masking: 
             self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 

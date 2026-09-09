@@ -109,7 +109,7 @@ class ResidueClassifierDataset(Dataset):
             pass 
         else:
             coordinates = torch.from_numpy(self.h5_file[group_name + "/coordinates"][:, idxs])
-            pos = torch.from_numpy(coordinates[:,:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]] if self.paradigm == "dynamic" else coordinates[:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]])
+            pos = coordinates[:,:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]] if self.paradigm == "dynamic" else coordinates[:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]]
             features = torch.from_numpy(self.h5_file[group_name + "/spinet_features"][:, idxs])
             frame_maps = torch.from_numpy(self.h5_file[group_name + "/frame_maps"][:, idxs])
             y = torch.tensor([self.__class__.AMINO_ACIDS.index(res.decode()[:3]) for res in self.h5_file[group_name + "/residues"][:]])
