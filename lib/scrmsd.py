@@ -18,13 +18,76 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
     """
     P = P.to(device)
     Q = Q.to(device)
+    assert Q.shape == P.shape, "P and Q do not have same shape"
+    n = P.shape[-1]
     if mask:
-        mask = mask.to(device)
-     
-    
+        assert mask.any(dim=-1).all().item(), "each molecule must have at least one atom"
 
+        mask = mask.to(device)
+
+        mask = mask.unsqueeze(-1) # so that it broadcasts
+
+        # center it 
+        # this will not fail because we check that each molecule has at least one atom, thus mask.sum(dim=-1) >= 1
+        P = P - ((P * mask).sum(dim=-2, keepdim=True) / mask.sum(-2, keepdim=True))
+        Q = Q - ((Q * mask).sum(dim=-2, keepdim=True) / mask.sum(-2, keepdim=True))
+
+        square_mask = mask * mask.mT # ... num_atoms, num_atoms
+
+        # calculate covariance
+        H = torch.einsum("...is,...js,...ij->...ij", P, Q, square_mask)
+        
+        # SVD
+        U, _, Vt = torch.linalg.svd(H)
+
+        # determinant
+        d = torch.linalg.det(U) * torch.linalg.det(Vt)
+
+        # this puts 1, ,...,  1, d on the diagonal
+        d_diag = torch.eye(n) * torch.cat([torch.ones(d.shape + (n-1,)), d.unsqueeze(-1)]).unsqueeze(-1)
+        
+        # calculate R
+        R = torch.matmul(torch.matmul(U, d_diag), Vt)
+       
+        Q_rotated = torch.matmul(Q, R.mT)
+
+        # calculate RMSD
+        errors = torch.linalg.norm(P - Q_rotated, dim=-1)
+        squared_errors = errors ** 2
+        mask = mask.squeeze(0)
+        mean_squared_errors = (squared_errors * mask).sum(dim=-1) / mask.sum(dim=-1) 
+        rmsd = torch.sqrt(mean_squared_errors) 
      
-    return 
+
+    else:
+        # center it 
+        P = P - P.mean(dim=-2, keepdim=True)
+        Q = Q - Q.mean(dim=-2, keepdim=True)
+
+        # calculate covariance
+        H = torch.einsum("...si,...sj->...ij", P, Q)
+        
+        # SVD
+        U, _, Vt = torch.linalg.svd(H)
+
+        # determinant
+        d = torch.linalg.det(U) * torch.linalg.det(Vt)
+
+        # this puts 1, 1, d on the diagonal
+        d_diag = torch.eye(n) * torch.cat([torch.ones(d.shape + (n-1,)), d.unsqueeze(-1)]).unsqueeze(-1)
+        
+        # calculate R
+        R = torch.matmul(torch.matmul(U, d_diag), Vt)
+       
+        Q_rotated = torch.matmul(Q, R.mT)
+
+        # calculate RMSD
+        errors = torch.linalg.norm(P - Q_rotated, dim=-1)
+        squared_errors = errors ** 2
+        mean_squared_errors = squared_errors.mean(dim=-1)
+        rmsd = torch.sqrt(mean_squared_errors) 
+     
+    return rmsd.cpu()
  
 
  

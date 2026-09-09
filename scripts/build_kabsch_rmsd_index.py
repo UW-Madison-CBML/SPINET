@@ -19,8 +19,10 @@ def get_timewise_rmsd_pairs(trajs, mask):
 
     return kabsch_rmsd(rows, cols, mask, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")) # we can do this quickly on the GPU I think. It should only take up ~ 4 GB
 
+
+
 if __name__ == "__main__":
-    COURSE_GRAIN = 25 # since the sims are continuous, we should not check immedatiately neighboring frames rather we can course grain it and use this index as to cluster
+    COURSE_GRAIN = 25 # since the sims are continuous, it's a waste to check immedatiately neighboring frames rather we can course grain it and use this index as to cluster
     # load data, i.e. get like the padded tensor trajs = T, num_res, 4, 3, where num_res is padded and mask reflects this
     trajs = []
     pdbs = []
