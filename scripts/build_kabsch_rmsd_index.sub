@@ -1,0 +1,29 @@
+
+docker_image = jenslundsgaard/sheaf_training:v3.1
+
+universe = docker
+
+shell = ./build_kabsch_rmsd_index.sh $(ablation)
+
+#  queue number assigned to this set of jobs at the time of submission.
+log = build_kabsch_rmsd_index_$(Cluster)_$(Process).log
+error = build_kabsch_rmsd_index_$(Cluster)_$(Process).err
+output = build_kabsch_rmsd_index_$(Cluster)_$(Process).out
+#should_transfer_files = YES
+when_to_transfer_output = ON_EXIT_OR_EVICT
+Requirements = (Target.HasCHTCStaging == true)
+
+transfer_input_files = build_kabsch_rmsd_index.sh, build_kabsch_rmsd_index.py, ../lib/, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5
+transfer_output_files = rmsd_cluster_index.h5
+transfer_output_remaps = "rmsd_cluster_index.h5 = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/rmsd_cluster_index.h5"
+
+
+
+request_cpus = 16
+request_memory = 128GB
+request_disk = 128GB
+request_gpus = 1 
+# don't use a big gpu
+
+
+queue 1
