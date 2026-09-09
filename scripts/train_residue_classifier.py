@@ -252,8 +252,8 @@ def train_residue_classifier(args_dict):
     paradigm = args_dict["paradigm"]
     num_timesteps = 128 if paradigm == "dynamic" else 1
     use_scheduler=False
-    test_val = False
-    use_profiler = False
+    test_val = True
+    use_profiler = True
     resume_model_name = args_dict["resume"]
     resume = args_dict["resume"] != ""
     nth_cross_val = args_dict["cross_val"]
@@ -277,15 +277,12 @@ def train_residue_classifier(args_dict):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     h5_path = os.path.abspath("atlas_data.h5")
-    with h5py.File(h5_path, "r") as f:
-        all_pdbs = list(f.keys())
-        np_rng.shuffle(all_pdbs)
-    num_pdbs = len(all_pdbs) 
-    group_size = num_pdbs // 5
-    val_pdbs = all_pdbs[group_size * nth_cross_val: group_size * (nth_cross_val + 1)]
-    train_pdbs = list(set(all_pdbs).difference(set(val_pdbs)))
-    print("train: ", train_pdbs)
-    print("val: ", val_pdbs)
+    index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
+
+    val_mask = index["cross_val"] == 0
+
+    val_pdbs = index[val_mask]["pdb"].to_list()
+    train_pdbs = index[~val_mask]["pdb"].to_list()
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -332,8 +329,8 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=1000)
-    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=1000)
+    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)

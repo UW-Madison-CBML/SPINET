@@ -101,7 +101,7 @@ class SheafLearner(nn.Module):
 
         return maps
 
-class SheafLearner(nn.Module):
+class SheafAttentionLearner(nn.Module):
     def __init__(self, input_dim:int, stalk_dim:int):
         super().__init__()
         self.input_dim = input_dim

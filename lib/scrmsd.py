@@ -6,43 +6,25 @@ from alphafold.common import residue_constants
 from alphafold.data import pipeline
 from alphafold.model import config, model
 
-def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-    lead_shape = P.shape[:-2]
-    N = P.shape[-2]
-    P = P.reshape(-1, N, 3)
-    Q = Q.reshape(-1, N, 3)
-    B = P.shape[0]
- 
-    if mask is None:
-        mask = torch.ones(B, N, device=P.device, dtype=P.dtype)
-    else:
-        mask = mask.reshape(-1, N).to(P.dtype)
- 
-    counts = mask.sum(dim=1, keepdim=True).clamp(min=1.0)
- 
-    P_centroid = (P * mask.unsqueeze(-1)).sum(1, keepdim=True) / counts.unsqueeze(-1)
-    Q_centroid = (Q * mask.unsqueeze(-1)).sum(1, keepdim=True) / counts.unsqueeze(-1)
- 
-    P_c = (P - P_centroid) * mask.unsqueeze(-1)
-    Q_c = (Q - Q_centroid) * mask.unsqueeze(-1)
- 
-    H = torch.einsum('bni,bnj->bij', P_c, Q_c)  
-    U, _, Vt = torch.linalg.svd(H)
-    V = Vt.transpose(-2, -1)
-    Ut = U.transpose(-2, -1)
- 
-    d = torch.sign(torch.linalg.det(torch.einsum('bij,bjk->bik', V, Ut)))
-    ones = torch.ones_like(d)
-    D = torch.diag_embed(torch.stack([ones, ones, d], dim=-1))
- 
-    R = torch.einsum('bij,bjk,bkl->bil', V, D, Ut)  
-    P_aligned = torch.einsum('bij,bnj->bni', R, P_c)
- 
-    sq_err = ((P_aligned - Q_c) ** 2).sum(-1) * mask
-    mse = sq_err.sum(1) / counts.squeeze(-1)
-    rmsd = torch.sqrt(mse.clamp(min=1e-12))
- 
-    return rmsd.reshape(lead_shape)
+@torch.no_grad()
+def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, device="cpu"):
+    """
+    P: b_1, ..., b_n, num_atoms, 3  # make sure P and Q are flat in that -2 dim, since there is no residue structre to uphold, just atoms
+    Q: b_1, ..., b_n, num_atoms, 3 
+    mask: b_1, ..., b_n, num_atoms, type=bool
+    device: if you wanna use GPU to do a big batch you can
+    returns: 
+        rmsd: b_1, ..., b_n 
+    """
+    P = P.to(device)
+    Q = Q.to(device)
+    if mask:
+        mask = mask.to(device)
+     
+    
+
+     
+    return 
  
 
  

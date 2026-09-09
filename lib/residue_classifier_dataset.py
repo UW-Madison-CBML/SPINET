@@ -147,14 +147,14 @@ class ResidueClassifierDataset(Dataset):
         elif self.fixed_length is not None: 
             index = []
             for i, group_name in enumerate(self.groups):
-                length = h5_file[group_name + "/" + "coordinates"].shape[1]
+                length = 200 # h5_file[group_name + "/" + "coordinates"].shape[1]
                 index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
             index = np.concatenate(index, axis=0)
         else:
             index = []
             min_len, max_len = self.variable_length
             for i, group_name in enumerate(self.groups):
-                length = h5_file[group_name + "/" + "coordinates"].shape[1]
+                length = 200 # h5_file[group_name + "/" + "coordinates"].shape[1]
                 for seq_len in range(self.variable_length[0], self.variable_length[1] + 1): # upper bound on lengths is inclusive
                     for j in range(length-(seq_len - 1)):
                         index.append((i,j,j+seq_len))
