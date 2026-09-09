@@ -7,10 +7,8 @@ import wandb
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
 from tqdm import tqdm
-
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data
-
 from residue_classifier_dataset import ResidueClassifierDataset
 from invariant_features_sheaf_model import NodeSheafClassifier
 import itertools
@@ -18,19 +16,12 @@ from itertools import product
 from contextlib import nullcontext
 from load_dynamics import BACKBONE_ATOMS
 from Bio.SeqUtils import seq1
-
 from colabfold.batch import get_queries
 from alphafold.common import residue_constants
-
-FEATURE_COLUMNS= [atom_name+"_"+coord for atom_name,coord in product(BACKBONE_ATOMS,["x","y","z"])] + [ "phi","psi","omega"]
 import time
-
 import json
 import subprocess
-
 from scrmsd import evaluate_batch_rmsd, ColabFoldValidationEngine
-
-
 from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download, create_repo
 from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
@@ -246,9 +237,9 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 16
-    hidden_dim = 64
-    stalk_dim = 16
+    batch_size = 8
+    hidden_dim = 32
+    stalk_dim = 8
     num_blocks = 8
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
