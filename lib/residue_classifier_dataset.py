@@ -128,7 +128,7 @@ class ResidueClassifierDataset(Dataset):
         edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
         edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1)[:,None].float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
 
-        return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, index=torch.tensor([self.index[idx]]))
+        return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id)
 
     def build_groups(self, h5_file):
         use_split = self.groups is not None

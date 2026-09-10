@@ -99,24 +99,24 @@ def run_val(run, model, loader, dataset, epoch, device, crit, colabfold_model, v
 
             for pred_prot, gt_prot in zip(data_list, gt_list):
 
-                pred_mask = ~gt_prot.node_mask                          # (R_i,) per-protein version of the batch-level pred_mask above
+                pred_mask = ~gt_prot.node_mask.bool()
 
-                log = pred_prot.x[pred_mask]                             # (R_i_masked, num_classes)
-                targ = gt_prot.y[pred_mask]                              # (R_i_masked,)
-                loss = crit(log, targ)                                  # scalar
+                log = pred_prot.x[pred_mask]
+                targ = gt_prot.y[pred_mask]     
+                loss = crit(log, targ)      
                 losses.append(loss.item())
 
                 acc_top_1.append(top_k_acc(log, targ, 1))
                 acc_top_5.append(top_k_acc(log, targ, 5))
                 acc_top_10.append(top_k_acc(log, targ,10))
 
-            batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)  # (num_classes, num_classes)
+            batch_conf_mat = get_confusion_matrix(targets_cpu, preds, num_classes)  
             global_confusion_mat += batch_conf_mat
 
-            diag = batch_conf_mat.diag()                                          # (num_classes,)
-            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)      # (num_classes,)
-            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)   # (num_classes,)
-            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)  # (num_classes,)
+            diag = batch_conf_mat.diag()                                    
+            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)      
+            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)   
+            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)  
 
 
             for k, amino_acid in enumerate(ResidueClassifierDataset.AMINO_ACIDS):
@@ -126,8 +126,8 @@ def run_val(run, model, loader, dataset, epoch, device, crit, colabfold_model, v
 
             # Calculate rmsd per-batch (evaluate_batch_rmsd scores one structure per protein,
             # so collapse the trajectory-frame axis down to frame 0)
-            gt_frame0_coords = backbone_tensor[:, 0]  # (B, T, pad_size, A, 3) -> (B, pad_size, A, 3)
-            scrmsd.append(evaluate_batch_rmsd(list(pred_seqs.values()), gt_frame0_coords, gt_seq_mask, colabfold_model))
+            #gt_frame0_coords = backbone_tensor[:, 0]  # (B, T, pad_size, A, 3) -> (B, pad_size, A, 3)
+            #scrmsd.append(evaluate_batch_rmsd(list(pred_seqs.values()), gt_frame0_coords, gt_seq_mask, colabfold_model))
 
 
 
