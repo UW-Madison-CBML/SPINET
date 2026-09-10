@@ -74,13 +74,13 @@ if __name__ == "__main__":
     assert mask.shape == (trajs.shape[0], trajs.shape[2]), "mask residue dim does not match trajs"
 
     rmsd_np = get_timewise_rmsd_pairs(trajs, mask)
-    # rmsd_np : shape should be B, (T(T-1)/2) because of upper tri
+    # rmsd_np : shape should be B, T, T because of upper tri
     assert len(pdbs) == rmsd_np.shape[0]
     assert all(len(pdb) == 6 for pdb in pdbs), "pdbs are not constant size of 6 of format PPPP_C, pdbs will be silently chopped"
     pdbs = np.array(pdbs, dtype="S6") # pdb_id with chain should be fixed at 6
     with h5py.File("rmsd_cluster_index.h5", "w") as f:
         ds = f.create_dataset("cluster_index", data=rmsd_np)
         ds.attrs["pdbs"] = pdbs
-        ds.attrs["course_grain"] = COURSE_GRAIN
+        ds.attrs["course_grain"] = np.array(COURSE_GRAIN)
     print("saved cluster index")
 
