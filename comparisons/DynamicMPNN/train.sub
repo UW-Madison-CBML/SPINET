@@ -4,9 +4,9 @@ universe = docker
 
 shell = ./train.sh 
 
-log = train_$(Cluster)_$(Process).log
-error = train_$(Cluster)_$(Process).err
-output = train_$(Cluster)_$(Process).out
+log = logs/train_$(Cluster)_$(Process).log
+error = logs/train_$(Cluster)_$(Process).err
+output = logs/train_$(Cluster)_$(Process).out
 
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
