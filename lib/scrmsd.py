@@ -2,9 +2,12 @@ import os
 import torch
 import numpy as np
 from typing import List, Tuple, Dict
-from alphafold.common import residue_constants
-from alphafold.data import pipeline
-from alphafold.model import config, model
+
+import torch
+from transformers import AutoTokenizer, EsmForProteinFolding
+
+BACKBONE_ATOM14_IDX = {"N":0, "CA":1, "C":2, "O":4}  # N, CA, C, O # TODO fix this
+from load_dynamics import BACKBONE_ATOMS
 
 @torch.no_grad()
 def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, device="cpu"):
@@ -90,114 +93,73 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
     return rmsd.cpu()
  
 
+def load_esmfold(
+    model_name: str = "facebook/esmfold_v1",
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    dtype: torch.dtype = torch.float32,
+):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = EsmForProteinFolding.from_pretrained(model_name, low_cpu_mem_usage=True)
+    model = model.to(device=device, dtype=dtype)
+    model.eval()
+
+    return tokenizer, model
+
+
+@torch.no_grad()
+def fold_sequences(
+    seqs: list[str],
+    tokenizer,
+    model,
+    device: str = None,
+):
+    
+    device = device or next(model.parameters()).device
+
+    inputs = tokenizer(
+        seqs,
+        return_tensors="pt",
+        padding=True,
+        add_special_tokens=False,  # ESMFold doesn't use BOS/EOS
+    )
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    outputs = model(**inputs)
+
+    positions = outputs.positions
+    if positions.dim() == 6:
+        positions = positions[-1]
+    atom14 = positions[-1]  # (B, L, 14, 3) — final structure-module layer
+
+    backbone_pos = atom14[:, :, [BACKBONE_ATOM14_IDX[atom] for atom in BACKBONE_ATOMS], :].float()  # (B, L, 4, 3)
+
+    mask = inputs["attention_mask"].bool()  # (B, L)
+
+    return backbone_pos, mask
  
    
 
-class ColabFoldValidationEngine:
-    def __init__(
-        self, 
-        backbone_atoms:list[str],
-        model_name: str = "model_1_ptm", 
-        data_dir: str = "./alphafold/data", 
-        num_recycles: int = 3,
-        device: str = "cuda"
-    ):
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        
-        self.cfg = config.model_config(model_name)
-        self.cfg.model.num_recycle = num_recycles
-        
-        params_path = os.path.join(data_dir, "params", f"params_{model_name}.npz")
-        if os.path.exists(params_path):
-            import pickle
-            with open(params_path, 'rb') as f:
-                self.params = pickle.load(f)
-        else:
-            print(f"Warning: Parameters not found at {params_path}. Using placeholder params for compilation initialization.")
-            self.params = None
-            
-        self.runner = model.RunModel(self.cfg, params=self.params)
-        
-        self.target_atom_indices = [
-            residue_constants.atom_order[atom] for atom in backbone_atoms # this way we have a GT ordering
-        ]
-
-    def _generate_single_sequence_features(self, sequence: str) -> dict:
-        num_res = len(sequence)
-        
-        sequence_features = pipeline.make_sequence_features(
-            sequence=sequence, 
-            description="query_seq", 
-            num_res=num_res
-        )
-        
-        msa_features = pipeline.make_msa_features(
-            msas=[[sequence]], 
-            deletion_matrices=[[[0] * num_res]]
-        )
-        
-        template_features = {
-            'template_aatype': np.zeros((0, num_res), dtype=np.int32),
-            'template_all_atom_positions': np.zeros((0, num_res, 37, 3), dtype=np.float32),
-            'template_all_atom_masks': np.zeros((0, num_res, 37), dtype=np.float32),
-            'template_domain_names': np.zeros((0,), dtype=object),
-            'template_sequence': np.zeros((0,), dtype=object),
-            'template_sum_probs': np.zeros((0,), dtype=np.float32),
-        }
-        
-        feature_dict = {**sequence_features, **msa_features, **template_features}
-        return feature_dict
-
-    @torch.no_grad()
-    def process_batch(self, sequences: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
-        batch_size = len(sequences)
-        max_len = max(len(seq) for seq in sequences)
-        
-        coordinates = torch.zeros((batch_size, max_len, 4, 3), dtype=torch.float32, device=self.device)
-        mask = torch.zeros((batch_size, max_len), dtype=torch.bool, device=self.device)
-        
-        for batch_idx, seq in enumerate(sequences):
-            seq_len = len(seq)
-            
-            mask[batch_idx, :seq_len] = True
-            
-            raw_features = self._generate_single_sequence_features(seq)
-            
-            processed_features = self.runner.process_features(raw_features, random_seed=42)
-            
-            prediction_outputs = self.runner.predict(processed_features)
-            
-            all_atom_positions = prediction_outputs['structure_module']['final_atom_positions']
-            
-            backbone_positions = all_atom_positions[:, self.target_atom_indices, :]  # Shape: (R, 4, 3)
-            
-            backbone_tensor = torch.from_numpy(backbone_positions).to(self.device)
-            
-            coordinates[batch_idx, :seq_len, :, :] = backbone_tensor
-            
-        return coordinates, mask
 
 
 def evaluate_batch_rmsd(
     sequences: List[str], 
     ground_truth_coords: torch.Tensor,
     gt_mask: torch.Tensor,
-    colabfold_engine: 'ColabFoldValidationEngine'
+    tokenizer,
+    model,
+    device="cpu"
 ):
+    pred_coords, pred_mask = fold_sequences(sequences, tokenizer, model, device=device)
 
-    pred_coords, pred_mask = colabfold_engine.process_batch(sequences)
-    
-    device = pred_coords.device
     B,    R, A, _ = pred_coords.shape
+
     _, T, _, _, _ = ground_truth_coords.shape
-    
     ground_truth_coords = ground_truth_coords.to(device)
     gt_mask = gt_mask.to(device)
-    
-    P_backbone = pred_coords.reshape(B, R*A, 3)[:, None, :, :].expand(-1, T, -1, -1)
-    Q_backbone = ground_truth_coords.reshape(B, T, R*A, 3) 
-   
-    backbone_mask = gt_mask[:,:,:,None].repeat(-1, -1, -1, A).reshape(B, T, R*A)
-    
-    return kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask)
 
+    P_backbone = pred_coords.reshape(B, R*A, 3)[:, None, :, :].expand(-1, T, -1, -1)
+    Q_backbone = ground_truth_coords.reshape(B, T, R*A, 3)
+
+    backbone_mask = gt_mask[:,:,:,None].repeat(-1, -1, -1, A).reshape(B, T, R*A)
+
+    return kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask, device=device).cpu()

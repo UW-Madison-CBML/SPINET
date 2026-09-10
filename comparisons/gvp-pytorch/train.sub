@@ -1,4 +1,4 @@
-docker_image = cmikulski4/sheaf_training:v2.8
+docker_image = jenslundsgaard/sheaf_training:v3.1
 universe = docker
 
 
@@ -14,11 +14,12 @@ Requirements = (Target.HasCHTCStaging == true)
 
 
 
-transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/surffold_data.tar.gz, ../../lib/stats_utils.py
+transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+
 
 request_cpus = 1
 request_memory = 64GB
-request_disk = 258GB
+request_disk = 256GB
 request_gpus = 1
 
 queue 1

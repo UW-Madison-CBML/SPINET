@@ -12,12 +12,7 @@ import sys
 sys.path.append("..")
 from stats_utils import get_confusion_matrix, top_k_acc
 
-AA_MAP = {
-    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C', 'GLN': 'Q',
-    'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I', 'LEU': 'L', 'LYS': 'K',
-    'MET': 'M', 'PHE': 'F', 'PRO': 'P', 'SER': 'S', 'THR': 'T', 'TRP': 'W',
-    'TYR': 'Y', 'VAL': 'V'
-}
+BACKBONE_ATOMS = ["CA", "N", "C", "O"] # this is the GT order of backbone atoms in a coordinates array
 
 def parse_pdb_folder(folder_path):
     parser = PDBParser(QUIET=True)
@@ -35,12 +30,9 @@ def parse_pdb_folder(folder_path):
                 coords_list = []
                 for residue in chain:
                     res_name = residue.get_resname()
-                    backbone_atoms = ['N', 'CA', 'C', 'O']
-                    has_all_atoms = all(atom in residue for atom in backbone_atoms)
-                    if res_name in AA_MAP and has_all_atoms:
-                        seq_chars.append(AA_MAP[res_name])
-                        res_coords = [residue[atom].get_coord() for atom in backbone_atoms]
-                        coords_list.append(res_coords)
+                    seq_chars.append(seq1(res_name))
+                    res_coords = [residue[atom].get_coord() for atom in BACKBONE_ATOMS]
+                    coords_list.append(res_coords)
                 if len(seq_chars) > 0:
                     coords_np = np.array(coords_list, dtype=np.float32)
                     parsed_structures.append({
@@ -54,26 +46,51 @@ def parse_pdb_folder(folder_path):
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def main():
-    train_raw = parse_pdb_folder("./surffold_data/train")
-    val_raw = parse_pdb_folder("./surffold_data/validation")
-    test_raw = parse_pdb_folder("./surffold_data/test")
-    
+def main(use_pdbs):
+    h5_path = os.path.abspath("atlas_data.h5")
+    index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
+
+    val_mask = index["cross_val"] == 0
+
+    val_pdbs = index[val_mask]["pdb"].to_list()
+    train_pdbs = index[~val_mask]["pdb"].to_list()
+
+
+    if use_pdbs:
+        # TODO manualy download RCSB structures, and use the above func to train on them
+        train_raw = [] #parse_pdb_folder("./surffold_data/train")
+        val_raw = [] #parse_pdb_folder("./surffold_data/validation")
+
+    else:
+        train_raw = []
+        val_raw = []
+        def visit(name, obj):
+            if isinstance(obj, h5py.Group) and all(ds in obj for ds in ["coordinates","residues"]):
+                pdb = name.split("/")[0]
+                idx = index[index["pdb"] == pdb].iloc[0]["random_indices"]
+                atom_dict = {
+                    'name': pdb,
+                    'seq': "".join([seq1(res.decode[:3]) for res in obj["residues"][:]]),
+                    'coords': obj["coordinates"][:, idx]
+                }
+                if(pdb in train_pdbs):
+                    train_raw.append(atom_dict)
+                else:
+                    val_raw.append(atom_dict)
+        with h5py.File("atlas_data.h5", "r") as f:
+            f.visititems(visit) 
+            
     train_node_counts = [len(s['seq']) for s in train_raw]
     val_node_counts = [len(s['seq']) for s in val_raw]
-    test_node_counts = [len(s['seq']) for s in val_raw]
     
     train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=3000)
     val_sampler = gvp.data.BatchSampler(val_node_counts, max_nodes=3000)
-    test_sampler = gvp.data.BatchSampler(test_node_counts, max_nodes=3000)
     
     train_dataset = gvp.data.ProteinGraphDataset(train_raw)
     val_dataset = gvp.data.ProteinGraphDataset(val_raw)
-    test_dataset = gvp.data.ProteinGraphDataset(test_raw)
     
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_sampler=val_sampler, num_workers=16)
-    test_loader = DataLoader(test_dataset, batch_sampler=test_sampler, num_workers=16)
     
     model = gvp.models.CPDModel(
         node_in_dim=(6, 3), node_h_dim=(100, 16),
@@ -149,50 +166,8 @@ def main():
         print(f"Top-5 Recovery: {val_t5_mean} \pm {val_t5_std}")
         print(f"Top-10 Recovery: {val_t10_mean} \pm {val_t10_std}")
         
-    test_acc_top_1 = []
-    test_acc_top_5 = []
-    test_acc_top_10 = []
-
-    test_losses = []
-
-    with torch.no_grad():
-        for batch in test_loader:
-            batch = batch.to(DEVICE)
-            nodes = (batch.node_s, batch.node_v)
-            edges = (batch.edge_s, batch.edge_v)
-            logits = model(nodes, batch.edge_index, edges, batch.seq)
-            
-            
-            num_proteins_in_batch = batch.batch.max().item() + 1        
-            
-            for p_idx in range(num_proteins_in_batch):
-                protein_mask = (batch.batch == p_idx) & batch.mask
-                if not protein_mask.any():
-                    continue
-                    
-                masked_logits = logits[protein_mask]
-                masked_seq = batch.seq[protein_mask]
-                loss = crit(masked_logits, masked_seq).item()
-
-                test_losses.append(loss)
-                test_acc_top_1.append(top_k_acc(masked_logits, masked_seq, 1))
-                test_acc_top_5.append(top_k_acc(masked_logits, masked_seq, 5))
-                test_acc_top_10.append(top_k_acc(masked_logits, masked_seq, 10))
-
-       
-    test_perps = np.exp(test_losses)   
-    test_ppl_mean, test_ppl_std = np.mean(test_perps), np.std(test_perps)
-    test_t1_mean, test_t1_std = np.mean(test_acc_top_1), np.std(test_acc_top_1)
-    test_t5_mean, test_t5_std = np.mean(test_acc_top_5), np.std(test_acc_top_5)
-    test_t10_mean, test_t10_std = np.mean(test_acc_top_10), np.std(test_acc_top_10)
-    
-    print(f"Test Perplexity: {test_ppl_mean} \pm {test_ppl_std}")
-    print(f"Top-1 Recovery: {test_t1_mean} \pm {test_t1_std}")
-    print(f"Top-5 Recovery: {test_t5_mean} \pm {test_t5_std}")
-    print(f"Top-10 Recovery: {test_t10_mean} \pm {test_t10_std}")
-
 
 
 if __name__ == '__main__':
-    main()
+    main(False) #  don't use pdbs
 
