@@ -28,17 +28,16 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
 
         mask = mask.to(device)
 
-        mask = mask.unsqueeze(-1) # so that it broadcasts
+        mask_extra_dim = mask.unsqueeze(-1) # so that it broadcasts
 
         # center it 
         # this will not fail because we check that each molecule has at least one atom, thus mask.sum(dim=-1) >= 1
-        P = P - ((P * mask).sum(dim=-2, keepdim=True) / mask.sum(-2, keepdim=True))
-        Q = Q - ((Q * mask).sum(dim=-2, keepdim=True) / mask.sum(-2, keepdim=True))
+        P = P - ((P * mask_extra_dim).sum(dim=-2, keepdim=True) / mask_extra_dim.sum(-2, keepdim=True))
+        Q = Q - ((Q * mask_extra_dim).sum(dim=-2, keepdim=True) / mask_extra_dim.sum(-2, keepdim=True))
 
-        square_mask = mask * mask.mT # ... num_atoms, num_atoms
 
         # calculate covariance
-        H = torch.einsum("...is,...js,...ij->...ij", P, Q, square_mask)
+        H = torch.einsum("...si,...sj,...s->...ij", P, Q, mask)
         
         # SVD
         U, _, Vt = torch.linalg.svd(H)
@@ -47,7 +46,7 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
         d = torch.linalg.det(U) * torch.linalg.det(Vt)
 
         # this puts 1, ,...,  1, d on the diagonal
-        d_diag = torch.diag_embed(torch.cat([torch.ones(*d.shape, n-1), d.unsqueeze(-1)], dim=-1))
+        d_diag = torch.diag_embed(torch.cat([torch.ones(*d.shape, n-1, device=d.device), d.unsqueeze(-1)], dim=-1))
         
         # calculate R
         R = torch.matmul(torch.matmul(U, d_diag), Vt)
@@ -57,7 +56,6 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
         # calculate RMSD
         errors = torch.linalg.norm(P - Q_rotated, dim=-1)
         squared_errors = errors ** 2
-        mask = mask.squeeze(0)
         mean_squared_errors = (squared_errors * mask).sum(dim=-1) / mask.sum(dim=-1) 
         rmsd = torch.sqrt(mean_squared_errors) 
      
@@ -77,7 +75,7 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
         d = torch.linalg.det(U) * torch.linalg.det(Vt)
 
         # this puts 1, 1, d on the diagonal
-        d_diag = torch.diag_embed(torch.cat([torch.ones(*d.shape, n-1), d.unsqueeze(-1)], dim=-1)) # 3,3
+        d_diag = torch.diag_embed(torch.cat([torch.ones(*d.shape, n-1, device=d.device), d.unsqueeze(-1)], dim=-1)) # 3,3
         
         # calculate R
         R = torch.matmul(torch.matmul(U, d_diag), Vt)
@@ -160,6 +158,6 @@ def evaluate_batch_rmsd(
     P_backbone = pred_coords.reshape(B, R*A, 3)[:, None, :, :].expand(-1, T, -1, -1)
     Q_backbone = ground_truth_coords.reshape(B, T, R*A, 3)
 
-    backbone_mask = gt_mask[:,:,:,None].repeat(-1, -1, -1, A).reshape(B, T, R*A)
+    backbone_mask = gt_mask[:,:,:,None].expand(-1, -1, -1, A).reshape(B, T, R*A)
 
     return kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask, device=device).cpu()

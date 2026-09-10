@@ -20,7 +20,7 @@ from alphafold.common import residue_constants
 import time
 import json
 import subprocess
-from scrmsd import load_esm_fold, fold_sequences
+from scrmsd import load_esmfold, fold_sequences, evaluate_batch_rmsd
 from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download, create_repo
 from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
@@ -89,7 +89,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
             gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])[:, None, :].repeat(1, backbone_tensor.shape[1], 1)  # (B, T, pad_size) bool
 
             rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask, esmfold_model, esmfold_tokenizer, device=device)
-            scrmsd.extend(rmsd.to_list())
+            scrmsd.extend(rmsd.tolist())
 
             out_batch = out_batch.cpu()
             batch = batch.cpu()
@@ -239,7 +239,7 @@ def train_residue_classifier(args_dict):
     num_timesteps = 128 if paradigm == "dynamic" else 1
     use_scheduler=False
     test_val = True
-    use_profiler = True
+    use_profiler = False
     resume_model_name = args_dict["resume"]
     resume = args_dict["resume"] != ""
     nth_cross_val = args_dict["cross_val"]

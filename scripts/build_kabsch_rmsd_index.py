@@ -67,7 +67,9 @@ if __name__ == "__main__":
         h5_file.visititems(visit)
     res_nums = [traj.shape[0] for traj in trajs]
     max_res_num = max(res_nums) 
+
     trajs = torch.stack([F.pad(traj, (0,0, 0,0, 0,0, 0,max_res_num-length), "constant", 0) for traj, length in zip(trajs, res_nums)], dim=0)
+
     trajs = trajs.permute(0,2,1,3,4)
     mask = torch.arange(max_res_num)[None, :] < torch.tensor(res_nums)[:, None] # B, num_res; constant across time
 
