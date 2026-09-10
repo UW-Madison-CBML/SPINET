@@ -1,5 +1,5 @@
 
-docker_image = jenslundsgaard/sheaf_training:v3.1
+docker_image = jenslundsgaard/sheaf_training:v3.2
 
 universe = docker
 
