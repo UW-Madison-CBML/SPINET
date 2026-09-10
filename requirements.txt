@@ -12,7 +12,8 @@ tqdm
 mdtraj
 colabfold[alphafold]
 atom3d
-transformers
+transformers==4.41.2
+accelerate
 h5py
 jax==0.4.23
 jaxlib==0.4.23
