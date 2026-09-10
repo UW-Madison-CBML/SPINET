@@ -83,7 +83,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
             print(lengths)
             pad_size = lengths.max().item() 
 
-            padded_tensors = [F.pad(traj_tensor, (0,pad_size-traj_tensor.shape[0], 0,0, 0,0, 0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
+            padded_tensors = [F.pad(traj_tensor, (0,0, 0,0, 0,0, 0,pad_size-traj_tensor.shape[0]), mode="constant", value=0.0) for traj_tensor in traj_tensors]
 
             backbone_tensor = torch.stack(padded_tensors, dim=0).permute(0,2,1,3,4)          # (B, T, num_res_padded, num_atoms, 3)
             gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])[:, None, :].repeat(1, backbone_tensor.shape[1], 1)  # (B, T, pad_size) bool

@@ -23,7 +23,7 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
     Q = Q.to(device)
     assert Q.shape == P.shape, "P and Q do not have same shape"
     n = P.shape[-1]
-    if mask:
+    if mask is not None:
         assert mask.any(dim=-1).all().item(), "each molecule must have at least one atom"
 
         mask = mask.to(device)

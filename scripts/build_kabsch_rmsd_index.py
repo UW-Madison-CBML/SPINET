@@ -58,26 +58,23 @@ if __name__ == "__main__":
     # load data, i.e. get like the padded tensor trajs = T, num_res, 4, 3, where num_res is padded and mask reflects this
     trajs = []
     pdbs = []
-    limit = 100
-    count = 0
     def visit(name, obj):
-        if count < limit and isinstance(obj, h5py.Group) and all(ds in obj for ds in ResidueClassifierDataset.REQUIRED_DATASETS):
+        if isinstance(obj, h5py.Group) and all(ds in obj for ds in ResidueClassifierDataset.REQUIRED_DATASETS):
             trajs.append(torch.from_numpy(obj["coordinates"][:, ::COURSE_GRAIN]))
             # pdbs = the list of pdbs that indexes dim_0 = B
             pdbs.append(name.split("/")[0]) # file system needs to be consistent here, at least at the start
-            count += 1
     with h5py.File("atlas_data.h5", "r") as h5_file:
         h5_file.visititems(visit)
     res_nums = [traj.shape[0] for traj in trajs]
     max_res_num = max(res_nums) 
-    trajs = torch.stack([F.pad(traj, (0,max_res_num-length, 0,0, 0,0, 0,0), "constant", 0) for traj, length in zip(trajs, res_nums)], dim=0)
+    trajs = torch.stack([F.pad(traj, (0,0, 0,0, 0,0, 0,max_res_num-length), "constant", 0) for traj, length in zip(trajs, res_nums)], dim=0)
     trajs = trajs.permute(0,2,1,3,4)
     mask = torch.arange(max_res_num)[None, :] < torch.tensor(res_nums)[:, None] # B, num_res; constant across time
 
     assert mask.shape == (trajs.shape[0], trajs.shape[2]), "mask residue dim does not match trajs"
 
     rmsd_np = get_timewise_rmsd_pairs(trajs, mask)
-    # rmsd_np : shape should be B, T, T
+    # rmsd_np : shape should be B, (T(T-1)/2) because of upper tri
     assert len(pdbs) == rmsd_np.shape[0]
     assert all(len(pdb) == 6 for pdb in pdbs), "pdbs are not constant size of 6 of format PPPP_C, pdbs will be silently chopped"
     pdbs = np.array(pdbs, dtype="S6") # pdb_id with chain should be fixed at 6
