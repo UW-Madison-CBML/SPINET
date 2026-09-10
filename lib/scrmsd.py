@@ -184,49 +184,20 @@ def evaluate_batch_rmsd(
     gt_mask: torch.Tensor,
     colabfold_engine: 'ColabFoldValidationEngine'
 ):
-    """
 
-    params:
-        sequences: lists of strings of seq1 amino acids
-        ground_truth_coords: ground_truth time-series, shape (traj, n_frames, n_residues, n_atoms,3) # n_residues is padded and batched
-        gt_mask: Mask from groun-truth.
-    return:
-        list of per-protein alignment scores (kabsch align at each timestep and then average RMSD over time)"""
-
-    # alphafold prediction
     pred_coords, pred_mask = colabfold_engine.process_batch(sequences)
     
     device = pred_coords.device
-    B, R_pred, A, _ = pred_coords.shape
-    _, R_gt, _, _ = ground_truth_coords.shape
-    R_target = max(R_pred, R_gt)
+    B,    R, A, _ = pred_coords.shape
+    _, T, _, _, _ = ground_truth_coords.shape
     
     ground_truth_coords = ground_truth_coords.to(device)
     gt_mask = gt_mask.to(device)
     
-    # determine padding
-    if R_pred < R_target:
-        pad_size = R_target - R_pred
-        pred_coords = torch.cat([pred_coords, torch.zeros((B, pad_size, A, 3), device=device)], dim=1)
-        pred_mask = torch.cat([pred_mask, torch.zeros((B, pad_size), dtype=torch.bool, device=device)], dim=1)
-        
-    if R_gt < R_target:
-        pad_size = R_target - R_gt
-        ground_truth_coords = torch.cat([ground_truth_coords, torch.zeros((B, pad_size, A, 3), device=device)], dim=1)
-        gt_mask = torch.cat([gt_mask, torch.zeros((B, pad_size), dtype=torch.bool, device=device)], dim=1)
-        
-    combined_mask = pred_mask & gt_mask  
+    P_backbone = pred_coords.reshape(B, R*A, 3)[:, None, :, :].expand(-1, T, -1, -1)
+    Q_backbone = ground_truth_coords.reshape(B, T, R*A, 3) 
+   
+    backbone_mask = gt_mask[:,:,:,None].repeat(-1, -1, -1, A).reshape(B, T, R*A)
     
-    atom_mapping = {'C': 0, 'CA': 1, 'N': 2, 'O': 3}
-    scores = {}
-    
-        
-    P_backbone = pred_coords.reshape(B, -1, 3)
-    Q_backbone = ground_truth_coords.reshape(B, -1, 3)
-    
-    backbone_mask = combined_mask.unsqueeze(-1).expand(-1, -1, 4).reshape(B, -1)
-    
-    scores["all_backbone_rmsd"] = kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask)
-    
-    return scores
+    return kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask)
 

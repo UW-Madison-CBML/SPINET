@@ -60,47 +60,41 @@ def run_val(run, model, loader, dataset, epoch, device, crit, colabfold_model, v
 
             out_batch = out_batch.cpu()
             batch = batch.cpu()
-            data_list = out_batch.to_data_list()                        # list of B per-protein Data objects (model output)
-            gt_list = batch.to_data_list()                              # list of B per-protein Data objects (ground truth)
+            data_list = out_batch.to_data_list() # list of B per-protein Data objects (model output)
+            gt_list = batch.to_data_list()  # list of B per-protein Data objects (ground truth)
 
-            pred_seqs = {}
+            pred_seqs = []
 
             for i, gt_data in enumerate(gt_list):
                 pred_data = data_list[i]
 
-                pred_idx = pred_data.x.argmax(dim=-1)                   # (R_i,) predicted class index per residue, protein i (R_i = residue count, varies per protein)
+                pred_idx = pred_data.x.argmax(dim=-1) # (R_i,) predicted class index per residue, protein i (R_i = residue count, varies per protein)
 
-                graph_mask = ~gt_data.node_mask.bool()                  # (R_i,) True at masked (prediction-target) residues
+                graph_mask = ~gt_data.node_mask.bool()  # (R_i,) True at masked (prediction-target) residues
 
-                pred_idx[~graph_mask] = gt_data.y[~graph_mask]          # unmasked residues get their known ground-truth identity instead of the prediction
+                pred_idx[~graph_mask] = gt_data.y[~graph_mask]  # unmasked residues get their known ground-truth identity instead of the prediction
 
                 seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])  # length-R_i amino-acid string
-                pred_seqs[gt_data.traj_id] = seq_str                    # accumulates to B entries, insertion order == gt_list order
+                pred_seqs.append(seq_str )  # accumulates to B entries, insertion order == gt_list order
 
             # Get gt coordinates from trajectory
-            trajs = [[dataset.groups[prot.index[0][0]][1].get_group(idx) for idx in range(prot.index[0][1], prot.index[0][2])] for prot in gt_list]  # B lists of T per-frame DataFrames, each frame has R_i residue rows
-            traj_tensors = []
-            for traj in trajs:
-                traj_atoms = []
-                for atom in BACKBONE_ATOMS:
-                    cols = [atom + "_" + coord for coord in ["x","y","z"]]
-                    traj_atoms.append(torch.stack([torch.from_numpy(conf[cols].to_numpy()) for conf in traj ], dim=0)) # T, R, 3
+            traj_tensors = [prot.pos for prot in gt_list]
 
-                traj_tensor = torch.stack(traj_atoms, dim=2) # T, R, A, 3
-                traj_tensors.append(traj_tensor)                        # B tensors, each (T, R_i, A, 3); R_i still ragged across proteins at this point
             lengths = torch.tensor([traj_tensor.shape[1] for traj_tensor in traj_tensors])  # (B,) residue count R_i per protein
             pad_size = max(lengths)                                     # scalar = max R_i in this batch
 
+            traj_tensors = [F.pad(traj_tensor, (0,pad_size-traj_tensor.shape[1], 0,0, 0,0, 0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
 
-            traj_tensors = [F.pad(traj_tensor, (0,0,0,0,0,pad_size-traj_tensor.shape[1],0,0), mode="constant", value=0.0) for traj_tensor in traj_tensors]
+            backbone_tensor = torch.stack(traj_tensors, dim=0).permute(0,2,1,3,4)          # (B, T, num_res_padded, num_atoms, 3)
+            gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])[:, None, :].repeat(1, backbone_tensor.shape[1], 1)  # (B, T, pad_size) bool
 
-            backbone_tensor = torch.stack(traj_tensors, dim=0)          # (B, T, pad_size, A, 3)
-            gt_seq_mask = lengths[:,None] > torch.arange(pad_size)[None,:]  # (B, pad_size) bool
+            #evaluate_batch_rmsd(sequences, ground_truth_coords, gt_mask, colabfold_engine)
+
 
             out_batch = out_batch.cpu()
             batch = batch.cpu()
-            preds = logits.argmax(dim=-1).cpu()                        # (N_masked,)
-            targets_cpu = targets.cpu()                                 # (N_masked,)
+            preds = logits.argmax(dim=-1).cpu() 
+            targets_cpu = targets.cpu()
 
 
             for pred_prot, gt_prot in zip(data_list, gt_list):
@@ -428,23 +422,9 @@ def train_residue_classifier(args_dict):
                     prof.step()
         
         if use_profiler:
-            prof_results = prof.key_averages()
-            rows = []
-            for evt in prof_results:
-                rows.append({
-                    "name": evt.key,
-                    "count": evt.count,
-                    "cpu_time_total": evt.cpu_time_total,
-                    "cuda_time_total": getattr(evt, "cuda_time_total", 0),
-                    "cpu_time_avg": evt.cpu_time,
-                    "cuda_time_avg": getattr(evt, "cuda_time", 0),
-                    "self_cpu_time_total": evt.self_cpu_time_total,
-                    "self_cuda_time_total": getattr(evt, "self_cuda_time_total", 0),
-                    "cpu_memory_usage": evt.cpu_memory_usage,
-                    "cuda_memory_usage": getattr(evt, "cuda_memory_usage", 0),
-                })
-            df = pd.DataFrame(rows)
-            run.log({"profiler": wandb.Table(dataframe=df)})
+            print(
+                prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)
+            )  
         times1 = torch.tensor(times2) - torch.tensor(times1)
         times2 = torch.tensor(times3) - torch.tensor(times2)
         times3 = torch.tensor(times4) - torch.tensor(times3)
