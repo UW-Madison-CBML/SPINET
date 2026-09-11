@@ -1,5 +1,5 @@
 import torch
-import torch_sparse
+# import torch_sparse
 from torch.autograd.gradcheck import gradcheck
 from typing import Tuple
 from torch_geometric.nn.conv import GATConv

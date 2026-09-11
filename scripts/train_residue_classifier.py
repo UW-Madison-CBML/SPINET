@@ -195,8 +195,8 @@ def interpret_sheaves(loader, model, run, device):
             # we just need the real components here, sheaf laplacian is real positive semi-definite
             first_eigvals = first_eigs.eigenvalues.real
             first_eigvecs = first_eigs.eigenvectors.real 
-            last_eigvals = first_eigs.eigenvalues.real
-            last_eigvecs = first_eigs.eigenvectors.real
+            last_eigvals = last_eigs.eigenvalues.real
+            last_eigvecs = last_eigs.eigenvectors.real
 
             img_dict = {}
             fig, ax = plt.subplots()  
@@ -262,13 +262,23 @@ def train_residue_classifier(args_dict):
     # set up device
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    h5_path = os.path.abspath("atlas_data.h5")
-    index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
+    # ATLAS
+    # h5_path = os.path.abspath("atlas_data.h5")
+    # index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
 
-    val_mask = index["cross_val"] == 0
+    # val_mask = index["cross_val"] == 0
 
-    val_pdbs = index[val_mask]["pdb"].to_list()
-    train_pdbs = index[~val_mask]["pdb"].to_list()
+    # val_pdbs = index[val_mask]["pdb"].to_list()
+    # train_pdbs = index[~val_mask]["pdb"].to_list()
+
+    # mdCATH
+    h5_path = os.path.abspath("mdcath_spinet_320_0.h5")
+    index = pd.read_csv(os.path.abspath("mdcath_320_0_topology_split.csv"))
+
+    # train_pdbs = index[index["split"] == "train"]["domain"].tolist()
+    # test_pdbs = index[index["split"] == "test"]["domain"].tolist()
+    train_pdbs = index[index["split"].isin(["train", "test"])]["domain"].tolist()
+    val_pdbs = index[index["split"] == "validation"]["domain"].tolist()
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -317,6 +327,11 @@ def train_residue_classifier(args_dict):
     # Initialize datasets
     train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
     val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+
+    print("Train groups in this H5:", len(train_dataset.groups))
+    print("Val groups in this H5:", len(val_dataset.groups))
+    print("Train samples:", len(train_dataset))
+    print("Val samples:", len(val_dataset))
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
@@ -368,7 +383,7 @@ def train_residue_classifier(args_dict):
     # training loop
     for epoch in range(epochs):
         model.train()
-        pbar = tqdm(train_loader if not test_val else itertools.islice(train_loader,100), desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         times1 = []
         times2 = []
         times3 = []

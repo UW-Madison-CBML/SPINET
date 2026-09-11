@@ -39,6 +39,9 @@ class ResidueClassifierDataset(Dataset):
 
     # ground truth order of amino acid indices. they must be capitalized
     AMINO_ACIDS = [code.upper() for code in IUPACData.protein_letters_3to1.keys()]
+    RESIDUE_ALIASES = {"HSD": "HIS", "HSE": "HIS", "HSP": "HIS", "HID": "HIS", 
+                       "HIE": "HIS", "HIP": "HIS", "ASH": "ASP", "GLH": "GLU",
+                       "LYN": "LYS", "CYM": "CYS", "CYX": "CYS", "MSE": "MET"}
     FRAME_ORIGIN = "CA"
     ATOMS = BACKBONE_ATOMS
     ATOM_INDICES = {atom: i for i, atom in enumerate(ATOMS)}
@@ -112,7 +115,7 @@ class ResidueClassifierDataset(Dataset):
             pos = coordinates[:,:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]] if self.paradigm == "dynamic" else coordinates[:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]]
             features = torch.from_numpy(self.h5_file[group_name + "/spinet_features"][:, idxs])
             frame_maps = torch.from_numpy(self.h5_file[group_name + "/frame_maps"][:, idxs])
-            y = torch.tensor([self.__class__.AMINO_ACIDS.index(res.decode()[:3]) for res in self.h5_file[group_name + "/residues"][:]])
+            y = torch.tensor([self.__class__.AMINO_ACIDS.index(self.__class__.RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in self.h5_file[group_name + "/residues"][:]])
             node_mask = torch.zeros(len(y))
             traj_id = group_name
 
@@ -132,34 +135,50 @@ class ResidueClassifierDataset(Dataset):
 
     def build_groups(self, h5_file):
         use_split = self.groups is not None
-        split = self.groups 
+        split = self.groups
         self.groups = []
         def visit(name, obj):
-            if isinstance(obj, h5py.Group) and all(ds in obj for ds in self.__class__.REQUIRED_DATASETS) and (use_split <= (name.split("/")[0] in split)):
-                self.groups.append(name) 
+            if (isinstance(obj, h5py.Group) and all(ds in obj for ds in self.__class__.REQUIRED_DATASETS) and ((not use_split) or (name.split("/")[0] in split))):
+                self.groups.append(name)
         h5_file.visititems(visit)
 
 
     def build_dynamic_index(self, h5_file):
-        index = []
-        if self.traj_len is not None and self.fixed_length is not None:
-            index = np.stack(np.broadcast_arrays(np.arange(len(self.groups))[:,None],np.arange(self.traj_len - (self.fixed_length - 1))[None,:], self.fixed_length + np.arange(self.traj_len - (self.fixed_length - 1))[None,:]), axis=-1).reshape(-1, 3)
-        elif self.fixed_length is not None: 
             index = []
-            for i, group_name in enumerate(self.groups):
-                length = 200 # h5_file[group_name + "/" + "coordinates"].shape[1]
-                index.append(np.stack(np.broadcast_arrays(i,np.arange(length - (self.fixed_length - 1)), self.fixed_length + np.arange(length - (self.fixed_length - 1))), axis=-1))
-            index = np.concatenate(index, axis=0)
-        else:
-            index = []
-            min_len, max_len = self.variable_length
-            for i, group_name in enumerate(self.groups):
-                length = 200 # h5_file[group_name + "/" + "coordinates"].shape[1]
-                for seq_len in range(self.variable_length[0], self.variable_length[1] + 1): # upper bound on lengths is inclusive
-                    for j in range(length-(seq_len - 1)):
-                        index.append((i,j,j+seq_len))
-            index = np.array(index)
-        return index
+
+            if self.fixed_length is not None:
+                for i, group_name in enumerate(self.groups):
+                    actual_length = h5_file[group_name + "/coordinates"].shape[1]
+                    length = (min(actual_length, self.traj_len) if self.traj_len is not None else actual_length)
+                    if length < self.fixed_length:
+                        continue
+
+                    starts = np.arange(length - self.fixed_length + 1)
+                    ends = starts + self.fixed_length
+                    index.append(np.stack([np.full(len(starts), i), starts, ends], axis=-1))
+
+                if len(index) == 0:
+                    return np.empty((0, 3), dtype=int)
+                return np.concatenate(index, axis=0)
+
+            else:
+                # variable-length sample mode
+                min_len, max_len = self.variable_length
+                for i, group_name in enumerate(self.groups):
+                    actual_length = h5_file[group_name + "/coordinates"].shape[1]
+                    length = (min(actual_length, self.traj_len) if self.traj_len is not None else actual_length)
+
+                    for seq_len in range(min_len, max_len + 1):
+                        if length < seq_len:
+                            continue
+                        starts = np.arange(length - seq_len + 1)
+                        ends = starts + seq_len
+                        index.append(np.stack([np.full(len(starts), i, dtype=np.int64), starts, ends], axis=-1))
+
+                if len(index) == 0:
+                    return np.empty((0, 3), dtype=int)
+                return np.concatenate(index, axis=0)
+
 
     def build_static_index(self, h5_file):
         index = []

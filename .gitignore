@@ -20,3 +20,6 @@ scripts/torch_geometric.nn.conv.*
 scripts/invariant_features_sheaf_model_InitDynamicsEmbedding_propagate_*
 comparisons/gvp-pytorch/gvp-pytorch.tar.gz
 comparisons/scFold/ScFold.tar.gz
+
+./scripts/*.h5
+.DS_Store

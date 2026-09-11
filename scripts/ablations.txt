@@ -1,1 +1,2 @@
 --run-name our_model --restriction-map-type arbitrary --ablate-attention
+--run-name mdcath_320_standard --epochs 8 --paradigm dynamic --restriction-map-type low_rank
