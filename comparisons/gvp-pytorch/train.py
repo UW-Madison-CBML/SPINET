@@ -1,4 +1,6 @@
 import numpy as np
+import pandas as pd
+import h5py
 import os
 import torch
 from Bio.PDB import PDBParser
@@ -47,8 +49,8 @@ def parse_pdb_folder(folder_path):
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def main(use_pdbs=False, majority_voting=False):
-    h5_path = os.path.abspath("atlas_data.h5")
-    index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
+    h5_path = os.path.join("..", "atlas_data.h5")
+    index = pd.read_csv(os.path.join("..", "atlas_cross_val_index.csv"))
 
     val_mask = index["cross_val"] == 0
 
@@ -70,14 +72,14 @@ def main(use_pdbs=False, majority_voting=False):
                 idx = index[index["pdb"] == pdb].iloc[0]["random_indices"]
                 atom_dict = {
                     'name': pdb,
-                    'seq': "".join([seq1(res.decode[:3]) for res in obj["residues"][:]]),
+                    'seq': "".join([seq1(res.decode()[:3]) for res in obj["residues"][:]]),
                     'coords': obj["coordinates"][:, idx]
                 }
                 if(pdb in train_pdbs):
                     train_raw.append(atom_dict)
                 else:
                     val_raw.append(atom_dict)
-        with h5py.File("atlas_data.h5", "r") as f:
+        with h5py.File(h5_path, "r") as f:
             f.visititems(visit) 
             
     train_node_counts = [len(s['seq']) for s in train_raw]
