@@ -12,6 +12,15 @@
 #
 set -euo pipefail
 
+# api_keys.txt: line 1 = HF_TOKEN, last line = WANDB_KEY (see
+# ../../scripts/train_residue_classifier.sh). `lib.stats_utils.init_wandb` wants a file
+# holding *only* the W&B key, so split it out here -- conf/wandb/basic.yaml's
+# `key_file: ./wandb_api.txt` then resolves without any submit-file override.
+if [[ -f api_keys.txt ]]; then
+    export HF_TOKEN=$(head -n 1 api_keys.txt)
+    tail -n 1 api_keys.txt > wandb_api.txt
+fi
+
 echo ">>> host:   $(hostname)"
 echo ">>> gpu:    $(nvidia-smi -L 2>/dev/null || echo 'no GPU visible')"
 python -c "import torch; print('>>> torch:', torch.__version__, 'cuda available:', torch.cuda.is_available())"
@@ -23,7 +32,7 @@ fi
 
 echo ">>> overlaying ATLAS dataset support + wandb/scRMSD wiring onto pristine MapDiff/"
 cp -r conf dataloader model data MapDiff/
-for f in eval_atlas.py checkpoint.pt config.yaml wandb_api.txt stats_utils.py scrmsd.py load_dynamics.py atlas_frame_pdb.py atlas_data.h5 atlas_cross_val_index.csv; do
+for f in eval_atlas.py *.pt config.yaml wandb_api.txt stats_utils.py scrmsd.py load_dynamics.py atlas_frame_pdb.py atlas_data.h5 atlas_cross_val_index.csv; do
     [[ -f "$f" ]] && cp "$f" MapDiff/
 done
 

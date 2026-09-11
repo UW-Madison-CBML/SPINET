@@ -39,10 +39,11 @@ executable              = train.sh
 arguments               = dataset=atlas dataset.train_dir=./surffold_data/atlas_process/train/ dataset.val_dir=./surffold_data/atlas_process/validation/ dataset.test_dir=./surffold_data/atlas_process/validation/ dataset.marginal_train_dir=./surffold_data/train_marginal_x_atlas.pt wandb.use=True wandb.key_file=./wandb_api.txt experiment.name=atlas_mapdiff
 
 # The pristine MapDiff tarball, this folder's ATLAS/wandb/scRMSD additions,
-# the W&B key, lib/scrmsd.py + lib/stats_utils.py + lib/atlas_frame_pdb.py (shared across
+# the API-key file (train.sh splits the W&B key out of it into wandb_api.txt),
+# lib/scrmsd.py + lib/stats_utils.py + lib/atlas_frame_pdb.py (shared across
 # all models -- see ../../lib), scripts/load_dynamics.py (BACKBONE_ATOMS), and the shared
 # ATLAS hdf5 store + cross-validation index.
-transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, wandb_api.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/atlas_frame_pdb.py, ../../scripts/load_dynamics.py, ../MapDiff.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/atlas_frame_pdb.py, ../../scripts/load_dynamics.py, MapDiff.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
@@ -61,7 +62,8 @@ request_disk            = 150GB
 # ESMFold download needs internet access -- pin to the same machine
 # scripts/train_residue_classifier.sub uses for that reason. Also only
 # match GPU nodes with a modern-enough driver/CUDA for the cu121 image.
-Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
+Requirements            = (Target.HasCHTCStaging == true) 
+#&& (Machine == "bhaskargpu4000.chtc.wisc.edu")
 +WantGPULab             = true
 +GPUJobLength           = "long"
 

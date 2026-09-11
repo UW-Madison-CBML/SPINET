@@ -12,6 +12,15 @@
 #   ./train.sh dataset=atlas wandb.use=True prior_model.path=./ipa_checkpoint.pt
 set -euo pipefail
 
+# api_keys.txt: line 1 = HF_TOKEN, last line = WANDB_KEY (see
+# ../../scripts/train_residue_classifier.sh). `lib.stats_utils.init_wandb` wants a file
+# holding *only* the W&B key, so split it out here -- conf/wandb/basic.yaml's
+# `key_file: ./wandb_api.txt` then resolves without any submit-file override.
+if [[ -f api_keys.txt ]]; then
+    export HF_TOKEN=$(head -n 1 api_keys.txt)
+    tail -n 1 api_keys.txt > wandb_api.txt
+fi
+
 python -m ruff check . --select F821,E9 || exit 1
 
 echo ">>> host:   $(hostname)"
@@ -25,7 +34,7 @@ fi
 
 echo ">>> overlaying ATLAS dataset support + wandb/scRMSD wiring onto pristine MapDiff/"
 cp -r conf dataloader model data train.py trainer.py MapDiff/
-for f in wandb_api.txt stats_utils.py scrmsd.py load_dynamics.py atlas_frame_pdb.py atlas_data.h5 atlas_cross_val_index.csv; do
+for f in api_keys.txt wandb_api.txt stats_utils.py scrmsd.py load_dynamics.py atlas_frame_pdb.py atlas_data.h5 atlas_cross_val_index.csv; do
     [[ -f "$f" ]] && cp "$f" MapDiff/
 done
 
