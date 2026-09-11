@@ -1,29 +1,34 @@
-"""Evaluate a trained MapDiff (Prior_Diff) checkpoint on the ATLAS validation split.
+"""Evaluate a trained MapDiff (Prior_Diff) checkpoint on the ATLAS validation/test split.
 
-Loads an EGNN+IPA Prior_Diff checkpoint produced by `main.py`, runs MC-DDIM
-inference over every protein in the ATLAS `validation/` folder one at a time
-(featurizing each raw .pdb the same way as `model_inference.ipynb`, via
-`data.generate_graph_cath.pdb2graph`), and computes per-protein perplexity
-and top-1/top-5/top-10 sequence recovery. Reports the mean +/- standard
-deviation (over proteins) for each metric and logs everything to Weights
-& Biases.
+Loads an EGNN+IPA Prior_Diff checkpoint produced by `train.py`, runs MC-DDIM inference over
+every protein in fold 0 of `atlas_cross_val_index.csv` one at a time (the same held-out
+fold scripts/train_residue_classifier.py and comparisons/{gvp-pytorch,DynamicMPNN}/train.py
+use), featurizing each protein's representative frame directly from `atlas_data.h5` (via
+lib/atlas_frame_pdb + `data.generate_graph_cath.pdb2graph`, same as train.py's
+data/generate_graph_atlas.py), and computes per-protein perplexity, top-1/top-5/top-10
+sequence recovery, and self-consistency RMSD (fold the predicted sequence with ESMFold and
+Kabsch-RMSD it against the protein's ground-truth backbone). Reports the mean +/- standard
+deviation (over proteins) for each metric and logs everything to Weights & Biases.
 
 Must be run in an environment with MapDiff's full dependencies (torch,
-torch_geometric, torch_scatter/torch_cluster, biopython, DSSP, wandb) --
-e.g. the CHTC docker image used for training. See chtc/eval.sub /
-chtc/run_eval.sh to run this against the staged ATLAS validation data on CHTC.
+torch_geometric, torch_scatter/torch_cluster, biopython, DSSP, wandb,
+transformers) -- e.g. the training Docker image. See eval.sub / train.sh to
+run this against the staged ATLAS data on CHTC.
 
 Usage:
     python eval_atlas.py \
         --run_dir outputs/MapDiff_atlas_run \
-        --data_root ./surffold_data/ \
+        --atlas-h5 ./atlas_data.h5 --cross-val-csv ./atlas_cross_val_index.csv \
         --wandb_key_file ./wandb_api.txt
 """
 import argparse
 import json
 import os
 import sys
+import tempfile
 
+import h5py
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
@@ -36,11 +41,13 @@ from model.ipa.ipa_net import IPANetPredictor
 from model.prior_diff import Prior_Diff
 from utils import enable_dropout
 
-# lib/stats_utils.py is transferred/copied in flat next to this file (see
-# README.md and chtc/run_eval.sh) -- fall back to walking up to a lib/
-# directory for local/dev runs from inside the source tree.
+# lib/stats_utils.py + lib/scrmsd.py + lib/atlas_frame_pdb.py are copied in flat next to
+# this file (see README.md and eval.sh) -- fall back to walking up to a lib/ directory for
+# local/dev runs from inside the source tree.
 try:
     import stats_utils
+    from scrmsd import load_esmfold, evaluate_batch_rmsd
+    from atlas_frame_pdb import get_atlas_splits, get_frame_index, index_h5_groups, extract_frame, write_frame_pdb
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
         _cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), _up, 'lib')
@@ -48,21 +55,33 @@ except ImportError:
             sys.path.insert(0, os.path.abspath(_cand))
             break
     import stats_utils
+    from scrmsd import load_esmfold, evaluate_batch_rmsd
+    from atlas_frame_pdb import get_atlas_splits, get_frame_index, index_h5_groups, extract_frame, write_frame_pdb
 
-METRIC_KEYS = stats_utils.METRIC_KEYS
+METRIC_KEYS = stats_utils.METRIC_KEYS + ('scrmsd',)
+
+# Fixed one-letter amino-acid order MapDiff's 20-dim one-hot (`data.x[:, :20]`)
+# is built in -- see (upstream) data/generate_graph_cath.py's `amino_acids_type`.
+AMINO_ACIDS = ['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I',
+               'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V']
+# `atom_pos` stacks [N, CA, C, CB, O] -- reorder to lib/scrmsd.py's expected CA, N, C, O.
+ATOM_POS_TO_BACKBONE_IDX = [1, 0, 2, 4]
 
 
 def create_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--run_dir', default='outputs/MapDiff_atlas_run',
-                         help="Hydra output dir from main.py, used to default --checkpoint/--config")
+                         help="Hydra output dir from train.py, used to default --checkpoint/--config")
     parser.add_argument('--checkpoint', default=None,
                          help="Path to the trained checkpoint .pt (default: newest *_best_*.pt under "
                               "<run_dir>/model/)")
     parser.add_argument('--config', default=None,
                          help="Path to the run's resolved Hydra config.yaml (default: <run_dir>/configs/config.yaml)")
-    parser.add_argument('--data_root', default='./surffold_data/',
-                         help="ATLAS data root containing a validation/ split of raw .pdb files")
+    parser.add_argument('--atlas-h5', default='./atlas_data.h5', help="Path to the shared ATLAS hdf5 store")
+    parser.add_argument('--cross-val-csv', default='./atlas_cross_val_index.csv',
+                         help="Path to the shared ATLAS cross-validation index")
+    parser.add_argument('--val-fold', type=int, default=0,
+                         help="cross_val fold to evaluate on (held out from training)")
     parser.add_argument('--max_length', default=None, type=int,
                          help="Skip proteins longer than this many residues")
     parser.add_argument('--ensemble_num', default=None, type=int,
@@ -87,31 +106,47 @@ def find_checkpoint(run_dir):
     return os.path.join(model_dir, chosen)
 
 
-def load_validation_entries(data_root, max_length):
-    """Featurize every raw ATLAS validation-split protein directly from `{data_root}/validation/`."""
-    split_dir = os.path.join(data_root, 'validation')
-    if not os.path.isdir(split_dir):
-        raise FileNotFoundError("Could not find a 'validation' split folder under {}".format(data_root))
+def load_validation_entries(atlas_h5_path, cross_val_csv, val_fold, max_length):
+    """Featurize fold 0's representative frame for every held-out ATLAS protein, directly
+    from atlas_data.h5 -- the same store/split scripts/train_residue_classifier.py and
+    comparisons/{gvp-pytorch,DynamicMPNN}/train.py use."""
+    index_df = pd.read_csv(cross_val_csv)
+    _, val_pdbs = get_atlas_splits(cross_val_csv, val_fold=val_fold)
 
     entries = []
-    files = sorted(f for f in os.listdir(split_dir) if f.endswith('.pdb'))
-    for fname in tqdm(files, desc='featurizing ATLAS/validation'):
-        fpath = os.path.join(split_dir, fname)
-        try:
-            graph = get_processed_graph(pdb2graph(fpath))
-        except Exception as exc:
-            print(f'skip {fname}: {exc}')
-            continue
-        if graph is None:
-            continue
-        if max_length is not None and graph.x.shape[0] > max_length:
-            continue
-        entries.append({'title': fname[:-len('.pdb')], 'graph': graph})
+    with h5py.File(atlas_h5_path, 'r') as h5_file:
+        group_lookup = index_h5_groups(h5_file)
+
+        for pdb_id in tqdm(val_pdbs, desc='featurizing ATLAS fold-{} proteins'.format(val_fold)):
+            group_name = group_lookup.get(pdb_id)
+            if group_name is None:
+                print(f'skip {pdb_id}: no matching trajectory group in {atlas_h5_path}')
+                continue
+
+            frame_idx = get_frame_index(index_df, pdb_id)
+            frame = extract_frame(h5_file, group_name, frame_idx)
+
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix='.pdb')
+            os.close(tmp_fd)
+            try:
+                write_frame_pdb(tmp_path, frame)
+                graph = get_processed_graph(pdb2graph(tmp_path))
+            except Exception as exc:
+                print(f'skip {pdb_id}: {exc}')
+                continue
+            finally:
+                os.remove(tmp_path)
+
+            if graph is None:
+                continue
+            if max_length is not None and graph.x.shape[0] > max_length:
+                continue
+            entries.append({'title': pdb_id, 'graph': graph})
     return entries
 
 
 @torch.no_grad()
-def evaluate(model, entries, collator, ensemble_num, ddim_steps, device):
+def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold_tokenizer, esmfold_model):
     per_protein = []
     for entry in tqdm(entries, desc='evaluating ATLAS validation set'):
         g_batch, ipa_batch = collator([entry['graph']])
@@ -126,6 +161,14 @@ def evaluate(model, entries, collator, ensemble_num, ddim_steps, device):
         target_onehot = g_batch.x.cpu()
         target = target_onehot.argmax(dim=1)
 
+        pred_seq = ''.join(AMINO_ACIDS[i.item()] for i in mean_logits.argmax(dim=1))
+        gt_backbone = entry['graph'].atom_pos[:, ATOM_POS_TO_BACKBONE_IDX, :]  # (R, 4, 3)
+        scrmsd = evaluate_batch_rmsd(
+            [pred_seq], gt_backbone[None, None, :, :, :],
+            torch.ones(1, 1, gt_backbone.shape[0], dtype=torch.bool),
+            esmfold_tokenizer, esmfold_model, device=device,
+        ).item()
+
         per_protein.append({
             'title': entry['title'],
             'length': target.shape[0],
@@ -133,6 +176,7 @@ def evaluate(model, entries, collator, ensemble_num, ddim_steps, device):
             'recovery_top1': stats_utils.top_k_acc(mean_logits, target, 1),
             'recovery_top5': stats_utils.top_k_acc(mean_logits, target, 5),
             'recovery_top10': stats_utils.top_k_acc(mean_logits, target, 10),
+            'scrmsd': scrmsd,
         })
     return per_protein
 
@@ -168,13 +212,17 @@ def main():
     ensemble_num = args.ensemble_num or cfg.diffusion.ensemble_num
     ddim_steps = args.ddim_steps or cfg.diffusion.ddim_steps
 
-    entries = load_validation_entries(args.data_root, args.max_length)
+    entries = load_validation_entries(args.atlas_h5, args.cross_val_csv, args.val_fold, args.max_length)
     if len(entries) == 0:
-        raise RuntimeError("No usable validation proteins found under {}".format(args.data_root))
-    print("Loaded {} ATLAS validation proteins from {}".format(len(entries), args.data_root))
+        raise RuntimeError("No usable validation proteins found in fold {} of {}".format(
+            args.val_fold, args.cross_val_csv))
+    print("Loaded {} ATLAS fold-{} proteins from {}".format(len(entries), args.val_fold, args.atlas_h5))
+
+    esmfold_tokenizer, esmfold_model = load_esmfold(device=device)
 
     collator = CollatorDiff()
-    per_protein = evaluate(model, entries, collator, ensemble_num, ddim_steps, device)
+    per_protein = evaluate(model, entries, collator, ensemble_num, ddim_steps, device,
+                            esmfold_tokenizer, esmfold_model)
     # ddof=1 (sample std) matches this script's previous hand-rolled aggregation.
     summary = stats_utils.summarize_per_protein(per_protein, METRIC_KEYS, ddof=1)
 
@@ -185,7 +233,9 @@ def main():
         config={
             'checkpoint': checkpoint_path,
             'config_path': config_path,
-            'data_root': args.data_root,
+            'atlas_h5': args.atlas_h5,
+            'cross_val_csv': args.cross_val_csv,
+            'val_fold': args.val_fold,
             'max_length': args.max_length,
             'ensemble_num': ensemble_num,
             'ddim_steps': ddim_steps,
