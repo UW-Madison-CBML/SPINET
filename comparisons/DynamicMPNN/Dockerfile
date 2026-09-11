@@ -151,4 +151,3 @@ print('KNN KERNEL OK', tuple(e.shape))"
 # Set the default command to bash with the environment activated
 ENTRYPOINT ["conda", "run", "-n", "dynamicmpnn"]
 CMD ["/bin/bash"]
-

@@ -1,16 +1,19 @@
 import os
-import gzip
+import h5py
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
 import torch.utils.data as data
-from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import protein_letters_3to1
 
 from .utils import cached_property
 
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
-BACKBONE_ATOMS = ('N', 'CA', 'C', 'O')
+# Must match scripts/load_dynamics.py's BACKBONE_ATOMS order (the order `coordinates` is
+# stored in for every group in atlas_data.h5).
+BACKBONE_ATOMS = ('CA', 'N', 'C', 'O')
+REQUIRED_DATASETS = ('coordinates', 'residues')
 
 # protein_letters_3to1 only recognizes the 20 canonical residue names; map a
 # few common variants seen in crystal/MD structures onto their canonical letter.
@@ -24,140 +27,118 @@ def _res_to_one(resname):
     return protein_letters_3to1.get(resname)
 
 
-def parse_pdb_backbone(filepath):
-    """Parse a (optionally gzipped) single-chain PDB file.
-
-    Returns a dict with keys 'seq', 'N', 'CA', 'C', 'O' (coords as [L, 3]
-    float32 arrays), using the first model and first chain in the file.
-    Residues missing any backbone atom, or that aren't standard amino acids
-    (waters, ligands, HETATMs), are dropped. Returns None if no usable
-    residues are found.
+def _get_atlas_splits(cross_val_csv, val_fold=0):
+    """(train_pdbs, val_pdbs) -- the same partition scripts/train_residue_classifier.py and
+    comparisons/{gvp-pytorch,DynamicMPNN}/train.py use (fold 0 of the `cross_val` column
+    held out). `val_pdbs` doubles as the test split too -- ATLAS only has one held-out fold.
     """
-    parser = PDBParser(QUIET=True)
-    opener = gzip.open if filepath.endswith('.gz') else open
-    with opener(filepath, 'rt') as handle:
-        structure = parser.get_structure(os.path.basename(filepath), handle)
+    index = pd.read_csv(cross_val_csv)
+    val_mask = index["cross_val"] == val_fold
+    val_pdbs = index.loc[val_mask, "pdb"].tolist()
+    train_pdbs = index.loc[~val_mask, "pdb"].tolist()
+    return train_pdbs, val_pdbs
 
-    model = next(iter(structure), None)
-    if model is None:
-        return None
 
-    chain = next(iter(model), None)
-    if chain is None:
-        return None
+def _index_h5_groups(h5_file, required=REQUIRED_DATASETS):
+    """Map top-level pdb_code -> the nested hdf5 group path actually holding the datasets."""
+    lookup = {}
 
-    seq = []
-    coords = {atom: [] for atom in BACKBONE_ATOMS}
-    for residue in chain:
-        hetflag, _, _ = residue.id
-        if hetflag.strip() != '':
-            continue  # skip waters/ligands/other HETATM records
+    def visit(name, obj):
+        if isinstance(obj, h5py.Group) and all(ds in obj for ds in required):
+            lookup.setdefault(name.split("/")[0], name)
 
-        aa = _res_to_one(residue.get_resname())
-        if aa is None:
-            continue
-        if not all(atom in residue for atom in BACKBONE_ATOMS):
-            continue  # incomplete backbone, skip this residue
+    h5_file.visititems(visit)
+    return lookup
 
-        seq.append(aa)
-        for atom in BACKBONE_ATOMS:
-            coords[atom].append(residue[atom].get_coord())
 
-    if len(seq) == 0:
-        return None
+def _extract_frame(h5_file, group_name, frame_idx):
+    """One frame of one protein's trajectory -> 1-letter sequence + backbone coordinates."""
+    raw_residues = h5_file[group_name + "/residues"][:]
+    seq = ''.join((_res_to_one(r.decode().strip()[:3]) or 'X') for r in raw_residues)
 
-    return {
-        'seq': ''.join(seq),
-        **{atom: np.asarray(coords[atom], dtype=np.float32) for atom in BACKBONE_ATOMS},
-    }
+    frame = np.asarray(h5_file[group_name + "/coordinates"][:, frame_idx])  # (R, 4, 3), BACKBONE_ATOMS order
+    coords = {atom: frame[:, i].astype(np.float32) for i, atom in enumerate(BACKBONE_ATOMS)}
+    return seq, coords
 
 
 class ATLAS(data.Dataset):
-    """PiFold-compatible dataset built from ATLAS-derived PDB files that have
-    already been split into train/valid/test folders on disk (one PDB file
-    per MD simulation, e.g. its first frame).
+    """PiFold-compatible dataset built directly from the shared ATLAS hdf5 store
+    (`atlas_data.h5`) and cross-validation index (`atlas_cross_val_index.csv`)
 
-    Expected layout under `path`:
-        {path}/train/*.pdb[.gz]
-        {path}/{valid,validation,val}/*.pdb[.gz]
-        {path}/test/*.pdb[.gz]
+    Fold 0 of the `cross_val` column is held out as the 'valid' split, and reused as
+    'test' too, since ATLAS only has one held-out fold. Each protein's representative
+    frame is its `random_indices` column entry (the same frame
+    scripts/train_residue_classifier.py / comparisons/gvp-pytorch/train.py pick).
+
+    Expects `path` to contain `atlas_data.h5` and `atlas_cross_val_index.csv` (flat
+    names, overridable via `h5_name`/`csv_name`).
 
     Produces items shaped like API.cath_dataset.CATH: dicts with
     'title', 'seq', 'N', 'CA', 'C', 'O' (and 'category'/'score' for test),
     so it plugs directly into API.featurizer.featurize_GTrans.
     """
 
-    SPLIT_DIRS = {
-        'train': ['train'],
-        'valid': ['valid', 'validation', 'val'],
-        'test': ['test'],
-    }
-
-    def __init__(self, path='./', mode='train', max_length=500, data=None):
+    def __init__(self, path='./', mode='train', max_length=500, data=None,
+                 h5_name='atlas_data.h5', csv_name='atlas_cross_val_index.csv', val_fold=0):
         self.path = path
         self.mode = mode
         self.max_length = max_length
+        self.h5_name = h5_name
+        self.csv_name = csv_name
+        self.val_fold = val_fold
         if data is None:
             self.data = self.cache_data[mode]
         else:
             self.data = data
 
-    def _resolve_split_dir(self, mode):
-        for cand in self.SPLIT_DIRS[mode]:
-            cand_path = os.path.join(self.path, cand)
-            if os.path.isdir(cand_path):
-                return cand_path
-        raise FileNotFoundError(
-            "Could not find a '{}' split folder (tried {}) under {}".format(
-                mode, self.SPLIT_DIRS[mode], self.path)
-        )
-
     @cached_property
     def cache_data(self):
-        if not os.path.exists(self.path):
-            raise FileNotFoundError("no such directory: {} !!!".format(self.path))
+        h5_path = os.path.join(self.path, self.h5_name)
+        csv_path = os.path.join(self.path, self.csv_name)
+        if not os.path.exists(h5_path):
+            raise FileNotFoundError("no such file: {} !!!".format(h5_path))
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError("no such file: {} !!!".format(csv_path))
+
+        index_df = pd.read_csv(csv_path)
+        train_pdbs, val_pdbs = _get_atlas_splits(csv_path, val_fold=self.val_fold)
+        # ATLAS only has one held-out fold -- reuse it as both 'valid' and 'test'.
+        split_pdbs = {'train': train_pdbs, 'valid': val_pdbs, 'test': val_pdbs}
 
         alphabet_set = set(ALPHABET)
         data_dict = {'train': [], 'valid': [], 'test': []}
 
-        for mode in data_dict:
-            split_dir = self._resolve_split_dir(mode)
-            files = sorted(
-                f for f in os.listdir(split_dir)
-                if f.endswith('.pdb') or f.endswith('.pdb.gz')
-            )
-            for fname in tqdm(files, desc='loading ATLAS/{}'.format(mode)):
-                fpath = os.path.join(split_dir, fname)
-                parsed = parse_pdb_backbone(fpath)
-                if parsed is None:
-                    continue
+        with h5py.File(h5_path, 'r') as h5_file:
+            group_lookup = _index_h5_groups(h5_file)
 
-                seq = parsed['seq']
-                bad_chars = set(seq).difference(alphabet_set)
-                if len(bad_chars) > 0:
-                    continue
-                if len(seq) > self.max_length:
-                    continue
+            for mode, pdb_ids in split_pdbs.items():
+                for pdb_id in tqdm(pdb_ids, desc='loading ATLAS/{}'.format(mode)):
+                    group_name = group_lookup.get(pdb_id)
+                    if group_name is None:
+                        continue
 
-                title = fname
-                for suffix in ('.pdb.gz', '.pdb'):
-                    if title.endswith(suffix):
-                        title = title[:-len(suffix)]
-                        break
+                    frame_idx = int(index_df.loc[index_df["pdb"] == pdb_id, "random_indices"].iloc[0])
+                    seq, coords = _extract_frame(h5_file, group_name, frame_idx)
 
-                entry = {
-                    'title': title,
-                    'seq': seq,
-                    'CA': parsed['CA'],
-                    'C': parsed['C'],
-                    'O': parsed['O'],
-                    'N': parsed['N'],
-                    'category': 'ATLAS',
-                }
-                if mode == 'test':
-                    entry['score'] = 100.0
+                    bad_chars = set(seq).difference(alphabet_set)
+                    if len(bad_chars) > 0:
+                        continue
+                    if len(seq) > self.max_length:
+                        continue
 
-                data_dict[mode].append(entry)
+                    entry = {
+                        'title': pdb_id,
+                        'seq': seq,
+                        'CA': coords['CA'],
+                        'C': coords['C'],
+                        'O': coords['O'],
+                        'N': coords['N'],
+                        'category': 'ATLAS',
+                    }
+                    if mode == 'test':
+                        entry['score'] = 100.0
+
+                    data_dict[mode].append(entry)
 
         return data_dict
 
