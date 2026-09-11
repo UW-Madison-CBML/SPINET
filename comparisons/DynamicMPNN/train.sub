@@ -1,4 +1,4 @@
-docker_image = # make image
+docker_image = cmikulski4/dynamicmpnn:v4
 universe = docker
 
 
@@ -14,7 +14,7 @@ Requirements = (Target.HasCHTCStaging == true)
 
 
 
-transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv, ../../scripts/load_dynamics.py
 
 
 request_cpus = 1

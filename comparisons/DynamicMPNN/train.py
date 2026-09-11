@@ -40,7 +40,7 @@ if str(DYNAMICMPNN_SRC) not in sys.path:
     sys.path.insert(0, str(DYNAMICMPNN_SRC))
 
 from load_dynamics import BACKBONE_ATOMS  # noqa: E402
-from residue_classifier_dataset import ResidueClassifierDataset  # noqa: E402
+from residue_classifier_dataset import ResidueClassifierDataset
 from scrmsd import kabsch_rmsd  # noqa: E402
 
 from dynamicmpnn import constants
