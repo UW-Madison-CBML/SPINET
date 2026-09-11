@@ -20,7 +20,7 @@ Requirements = (Target.HasCHTCStaging == true)
 
 
 transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
-transfer_output_files = plots.tar.gz
+transfer_output_files = seq_pred_df_7.csv
 
 request_cpus = 16
 request_memory = 128GB

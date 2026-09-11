@@ -13,6 +13,7 @@ from tqdm import tqdm
 import sys
 sys.path.append("..")
 from stats_utils import get_confusion_matrix, top_k_acc
+import json
 
 BACKBONE_ATOMS = ["CA", "N", "C", "O"] # this is the GT order of backbone atoms in a coordinates array
 
@@ -71,7 +72,7 @@ def main(use_pdbs=False, majority_voting=False):
                 pdb = name.split("/")[0]
                 idx = index[index["pdb"] == pdb].iloc[0]["random_indices"]
                 atom_dict = {
-                    'name': pdb,
+                    'name': (name, idx),
                     'seq': "".join([seq1(res.decode()[:3]) for res in obj["residues"][:]]),
                     'coords': obj["coordinates"][:, idx]
                 }
@@ -132,6 +133,9 @@ def main(use_pdbs=False, majority_voting=False):
 
         val_losses = []
 
+        seqs = []
+        idxs = []
+        names = []
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(DEVICE)
@@ -139,11 +143,12 @@ def main(use_pdbs=False, majority_voting=False):
                 edges = (batch.edge_s, batch.edge_v)
                 logits = model(nodes, batch.edge_index, edges, batch.seq)
                 
-                
+                if batch.mask.any():
+                    print("mask is on for val; may cause issue with downstream residue sizes")
                 num_proteins_in_batch = batch.batch.max().item() + 1        
-                
                 for p_idx in range(num_proteins_in_batch):
                     protein_mask = (batch.batch == p_idx) & batch.mask
+                    
                     if not protein_mask.any():
                         continue
                         
@@ -155,7 +160,16 @@ def main(use_pdbs=False, majority_voting=False):
                     val_acc_top_1.append(top_k_acc(masked_logits, masked_seq, 1))
                     val_acc_top_5.append(top_k_acc(masked_logits, masked_seq, 5))
                     val_acc_top_10.append(top_k_acc(masked_logits, masked_seq, 10))
+    
 
+                    name, idx = batch.name[p_idx] 
+                    names.append(name)
+                    idxs.append(idx)
+                    seq_preds = masked_logits.argmax(dim=-1).cpu().tolist()
+                    seqs.append("".join([val_dataset.num_to_letter(pred) for pred in seq_preds]))
+
+        seq_pred_df = pd.DataFrame({"seq":seqs, "idx":idxs, "name":names})
+        seq_pred_df.to_csv(os.path.join("..", f"seq_pred_df_{epoch}.csv"))
            
         val_perps = np.exp(val_losses)   
         val_ppl_mean, val_ppl_std = np.mean(val_perps), np.std(val_perps)

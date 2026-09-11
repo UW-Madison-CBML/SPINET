@@ -15,7 +15,7 @@ Requirements = (Target.HasCHTCStaging == true)
 
 
 transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
-
+transfer_output_files = seq_pred_df_7.csv
 
 request_cpus = 1
 request_memory = 64GB
