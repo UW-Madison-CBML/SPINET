@@ -29,18 +29,19 @@ docker_image = <your_dockerhub_username>/pifold:latest
 
 ## 3. Dataset
 
-The ATLAS-derived dataset (first frame of each MD simulation, pre-split
-into `train/`, `valid/`, `test/` folders of PDB files) is staged at:
+`API.atlas_dataset.ATLAS` reads directly from the same shared ATLAS store every
+other model in this repo uses: `atlas_data.h5` (one representative frame per
+protein, plus the full trajectory) and `atlas_cross_val_index.csv` (the `pdb` ->
+`cross_val` fold assignment and each protein's pre-selected `random_indices`
+frame) -- the same store/split `scripts/train_residue_classifier.py` and
+`comparisons/{gvp-pytorch,DynamicMPNN}/train.py` use, instead of a pre-split
+folder of raw PDB files. **Fold 0 is held out as the `valid` split, and reused
+as `test` too** (PiFold wants train/valid/test; ATLAS only has one held-out
+fold).
 
-```
-/staging/groups/bhaskar_group/sheaf_protein_folding/surffold_data.tar.gz
-```
-
-`pifold.sub` already references this path in `transfer_input_files`, so
-HTCondor copies it into the job's scratch directory. `run_pifold.sh`
-auto-extracts it into a top-level `surffold_data/` folder if not already
-present, and `--data_root ./surffold_data/` (set in `pifold.sub`'s
-`arguments`) points `API.atlas_dataset.ATLAS` at it.
+`pifold.sub` transfers both files in flat (staged on Pelican) via
+`transfer_input_files`; `--data_root ./` (set in `pifold.sub`'s `arguments`)
+points `API.atlas_dataset.ATLAS` at the job's scratch dir, where they land.
 
 For other/smaller datasets (e.g. CATH, TS50), tar them as `data.tar.gz`
 (expanding to a top-level `data/` folder) and add them to
