@@ -11,6 +11,7 @@ from torch_geometric.utils import softmax, sort_edge_index
 from torch.func import functional_call, vmap
 from torch.nn.utils.parametrizations import orthogonal
 from huggingface_hub import PyTorchModelHubMixin
+from torch.utils.checkpoint import checkpoint
 
 #-------------------------------------------------------
 # sheaf learners
@@ -301,6 +302,20 @@ class SheafResidualSAN(nn.Module):
 # it will be harder to not hard code some of this stuff
 # the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
+    def step(self, x_t, edge_attr_t, edge_index, reverse_edge_indices):
+        if not self.ablate_sheaves:
+            maps_t = self.sheaf_learner(
+                torch.cat([x_t[edge_index[0]], edge_attr_t, x_t[edge_index[1]]], dim=-1)
+            ).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+            neighbor_maps_t = maps_t[reverse_edge_indices]
+            maps_t = torch.stack([maps_t, neighbor_maps_t], dim=0)
+        else:
+            maps_t = torch.eye(self.stalk_dim, device=x_t.device)[None, None].expand(2, edge_index.shape[1], -1, -1)
+
+        x_stalk = x_t.view(x_t.shape[0], self.num_channels, self.stalk_dim)
+        edge_stalk = edge_attr_t.view(edge_attr_t.shape[0], self.num_channels, self.stalk_dim)
+        return self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps_t)
+        
     def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, paradigm="dynamic", frame_origin="CA", ablate_sheaves=False, restriction_map_type="arbitrary"):
         super().__init__(aggr='sum', node_dim=0)
         self.input_dim = node_dim
@@ -359,36 +374,45 @@ class InitDynamicsEmbedding(MessagePassing):
             edge_features = torch.cat([in_frame_atoms, edge_attr, pairwise_matrices], dim=1)
         else:
             edge_features = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
-
+        # get edge embeddings
         edge_attr = self.project_edges(edge_features)
-        if not self.ablate_sheaves:
-            if self.paradigm == "static":
-                maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
-                #maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr.view(edge_attr[0], self.stalk_dim, self.channels)).view(edge_index.shape[1], self.hidden_dim)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
 
-            else:
-                maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
-
-                #maps = self.sheaf_learner((self.transformer(x, edge_index) + edge_attr).view(edge_index.shape[1], x.shape[1], self.hidden_dim)).view(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim)
-
-            _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
-            neighbor_maps = maps[reverse_edge_indices] 
-            maps = torch.stack([maps, neighbor_maps], dim=0)
-            
-        else:
-            # set transport maps to identity to ablate sheaves
-            if self.paradigm == "static":
-                maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(2, edge_attr.shape[0], -1, -1)
-            else:
-                maps = torch.eye(self.stalk_dim, device=x.device)[None, None, None, :, :].expand(2, edge_attr.shape[0], edge_attr.shape[1], -1, -1)
+           
         if self.paradigm == "static":
+
+            if not self.ablate_sheaves:
+                maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+
+                _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
+                opposite_maps = maps[reverse_edge_indices]
+                maps = torch.stack([maps, opposite_maps],dim=0)
+            else:
+                maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(2, edge_attr.shape[0], -1, -1)
             x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # stalk dim to c,d
             edge_stalk = edge_attr.view(edge_attr.shape[0], self.num_channels, self.stalk_dim)
-        else:
-            x_stalk = x.view(x.shape[0], x.shape[1], self.num_channels, self.stalk_dim) # stalk dim to c,d
-            edge_stalk = edge_attr.view(edge_attr.shape[0], edge_attr.shape[1], self.num_channels, self.stalk_dim)
 
-        agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps)
+            agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps)
+
+
+        else:
+            if not self.ablate_sheaves:
+                _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
+ 
+               outs = []
+                for t in range(x.shape[1]):
+                    if t % 2 == 0:
+                        out_t = checkpoint(self.step, x[:, t], edge_attr[:, t], edge_index, reverse_edge_indices, use_reentrant=False)
+                    else:
+                        out_t = self.step(x[:, t], edge_attr[:, t], edge_index, reverse_edge_indices)
+                    outs.append(out_t)
+                agg = torch.stack(outs, dim=1) 
+                
+
+            else:
+                maps = torch.eye(self.stalk_dim, device=x.device)[None, None, None, :, :].expand(2, edge_attr.shape[0], edge_attr.shape[1], -1, -1)
+                agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps)
+
+
         if self.paradigm == "static":
             agg_flat = agg.view(x.shape[0], self.hidden_dim) # turn c,d into hidden_dim
             h = self.temporal_product(agg_flat)

@@ -11,13 +11,10 @@ WORKDIR /app
 RUN conda install -n base -c conda-forge mamba -y && \
     conda clean --all -f -y
 
-# Create the conda environment with all dependencies
-# Using mamba for faster dependency solving
 RUN mamba create -n dynamicmpnn -y \
-    -c pyg -c pytorch -c conda-forge \
+    -c conda-forge \
     python=3.10 \
     pip'>=24' \
-    pytorch \
     'numpy<2' \
     pandas \
     scipy \
@@ -31,21 +28,33 @@ RUN mamba create -n dynamicmpnn -y \
     beartype \
     jaxtyping \
     einops \
-    pytest \
-    pyg::pyg \
-    pyg::pytorch-scatter \
-    pyg::pytorch-cluster && \
+    pytest && \
     mamba clean --all -f -y
 
 # Activate the environment and install pip dependencies
 SHELL ["conda", "run", "-n", "dynamicmpnn", "/bin/bash", "-c"]
 
+# Pin PyTorch to a CUDA 12.1 build and fetch torch-scatter/torch-cluster from
+# PyG's wheel index built for that exact torch+cuda combo (must match
+# torch-${TORCH_VERSION}+cu121 exactly -- see https://data.pyg.org/whl/).
+ENV TORCH_VERSION=2.1.2
+ENV CUDA_TAG=cu121
+
+RUN pip install --no-cache-dir \
+    torch==${TORCH_VERSION} \
+    --index-url https://download.pytorch.org/whl/${CUDA_TAG} && \
+    pip install --no-cache-dir \
+    torch-scatter torch-cluster torch-geometric \
+    -f https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html
+
 RUN pip install --no-cache-dir \
     graphein==1.7.6 \
     'pytorch-lightning>=2.0' \
     lovely-tensors \
-    wandb
+    wandb \
+    transformers
 
 # Set the default command to bash with the environment activated
 ENTRYPOINT ["conda", "run", "-n", "dynamicmpnn"]
 CMD ["/bin/bash"]
+

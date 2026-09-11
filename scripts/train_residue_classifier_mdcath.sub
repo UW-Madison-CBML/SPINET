@@ -1,0 +1,32 @@
+universe = docker
+docker_image = jenslundsgaard/sheaf_training:v3.2
+executable = train_residue_classifier.sh
+arguments  = $(ablation)
+
+log    = logs/train_$(Cluster)_$(Process).log
+output = logs/train_$(Cluster)_$(Process).out
+error  = logs/train_$(Cluster)_$(Process).err
+
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+
+transfer_output_files = mdcath_320_0_topology
+
+ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+transfer_input_files = \
+    train_residue_classifier.py, \
+    load_dynamics.py, \
+    lib/, \
+    api_keys.txt, \
+    mdcath_320_0_topology_split.csv, \
+    $(ResearchDrive)/mdcath_spinet_320_0.h5
+
+request_cpus = 16
+request_memory = 128GB
+request_disk = 128GB
+request_gpus = 1
+
+requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
+
+queue ablation from ablations.txt
