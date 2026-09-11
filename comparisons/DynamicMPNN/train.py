@@ -7,9 +7,15 @@ Pipeline (see README.md for the full reasoning):
   2. Repack that pool into DynamicMPNN's `.pt` schema (`pyg_dict` + `cluster_members`), which is
      exactly what `ProteinGraphFeaturiserSingleChain` / `PTFileDataset` expect.
   3. Train using fold 0 of atlas_cross_val_index.csv as the only validation fold (folds 1-4 train).
+
+Logs to a single Weights & Biases run (a la scripts/train_residue_classifier.py /
+comparisons/MapDiff/trainer.py): per-step train loss, per-epoch validation recovery
+(top-1/5/10) + perplexity, an amino-acid confusion matrix, and scRMSD (predicted sequence
+folded with ESMFold, Kabsch-RMSD'd against the protein's ground-truth backbone).
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -18,8 +24,12 @@ import hydra
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
+import wandb
+import matplotlib.pyplot as plt
 from loguru import logger
 from omegaconf import OmegaConf
+from sklearn.metrics import ConfusionMatrixDisplay
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data
 from tqdm import tqdm
@@ -27,8 +37,9 @@ from tqdm import tqdm
 THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = THIS_DIR.parents[1]
 
-# `residue_classifier_dataset` / `scrmsd` (lib/) and `load_dynamics` (scripts/) use bare,
-# flat imports -- mirror the convention the rest of the repo's CHTC scripts rely on.
+# `residue_classifier_dataset` / `scrmsd` / `stats_utils` (lib/) and `load_dynamics`
+# (scripts/) use bare, flat imports -- mirror the convention the rest of the repo's CHTC
+# scripts rely on.
 for extra_path in (REPO_ROOT / "lib", REPO_ROOT / "scripts"):
     if str(extra_path) not in sys.path:
         sys.path.insert(0, str(extra_path))
@@ -41,7 +52,8 @@ if str(DYNAMICMPNN_SRC) not in sys.path:
 
 from load_dynamics import BACKBONE_ATOMS  # noqa: E402
 from residue_classifier_dataset import ResidueClassifierDataset
-from scrmsd import kabsch_rmsd  # noqa: E402
+from scrmsd import kabsch_rmsd, load_esmfold, evaluate_batch_rmsd
+from stats_utils import get_confusion_matrix
 
 from dynamicmpnn import constants
 from dynamicmpnn.datamodules.pt_dataset import PTFileDataset
@@ -142,13 +154,20 @@ def residues_to_type_ids(raw_residues: np.ndarray) -> torch.Tensor:
 
 def frame_to_pyg_data(frame_coords: np.ndarray, residue_type: torch.Tensor) -> Data:
     """One selected conformer -> the minimal per-conformer fields
-    `ProteinGraphFeaturiserSingleChain.stack_conformations` actually reads.
+    `ProteinGraphFeaturiserSingleChain.stack_conformations` actually reads, plus a
+    `backbone` field carrying the full 4-atom (CA, N, C, O) ground truth for scRMSD.
 
-    frame_coords: num_res, num_atoms(ATLAS order), 3
+    DynamicMPNN's own featurizer rebuilds a fresh `Data` object from only `coords` /
+    `residue_type` / `residue_index` (see `stack_conformations` upstream), so `backbone`
+    never reaches the model -- `load_ground_truth_backbones()` reads it directly from this
+    saved .pt ensemble instead, bypassing the model pipeline entirely.
+
+    frame_coords: num_res, num_atoms (ATLAS order == BACKBONE_ATOMS order, CA/N/C/O), 3
     """
     coords = torch.from_numpy(frame_coords[:, NCA_C_ATOM_IDX, :]).float()  # num_res, 3 (N,CA,C), 3
     residue_index = torch.arange(coords.shape[0], dtype=torch.long)
-    return Data(coords=coords, residue_type=residue_type, residue_index=residue_index)
+    backbone = torch.from_numpy(frame_coords.copy()).float()  # num_res, 4 (CA,N,C,O), 3
+    return Data(coords=coords, residue_type=residue_type, residue_index=residue_index, backbone=backbone)
 
 
 def build_ensemble(
@@ -227,6 +246,27 @@ def build_processed_dataset(
         )
 
 
+def load_ground_truth_backbones(processed_dir: Path, pdb_ids: list) -> dict:
+    """Ground-truth backbone (CA, N, C, O) coordinates for scRMSD, read directly from this
+    script's own `.pt` ensembles -- bypassing DynamicMPNN's featurizer entirely, since it
+    only keeps `coords`/`residue_type`/`residue_index` (see `frame_to_pyg_data`'s docstring).
+    Uses each protein's first pool conformer as the reference structure.
+    """
+    backbones = {}
+    for pdb_id in pdb_ids:
+        path = processed_dir / f"{pdb_id}.pt"
+        if not path.exists():
+            continue
+        ensemble = torch.load(path, map_location="cpu")
+        first_conf = ensemble.pyg_dict[ensemble.cluster_members[0]]
+        if not hasattr(first_conf, "backbone"):
+            logger.warning(f"{pdb_id}: .pt ensemble predates the `backbone` field -- "
+                            "rerun with --force-rebuild to enable scRMSD for it.")
+            continue
+        backbones[pdb_id] = first_conf.backbone
+    return backbones
+
+
 # --------------------------------------------------------------------------------------
 # Step 4: fold 0 held out for validation, folds 1-4 for training
 # --------------------------------------------------------------------------------------
@@ -259,10 +299,63 @@ def top_k_acc(logits: torch.Tensor, targets: torch.Tensor, k: int) -> float:
     return correct.float().mean().item()
 
 
-def run_validation(model, val_loader, crit):
+class PdbTrackingFeaturiser:
+    """Wraps a DynamicMPNN featuriser to record, in order, which pdb_codes survive
+    featurization. `PTFileDataset(..., return_pdb_codes=True, in_memory=True)` can't be used
+    for this: once any protein is skipped, `self.data` (filtered) and `self.pdb_codes`
+    (unfiltered) go out of sync but `__getitem__` still indexes both with the same
+    `real_idx` -- so we track the correspondence ourselves instead.
+    """
+
+    def __init__(self, featuriser):
+        self.featuriser = featuriser
+        self.kept_pdb_codes = []
+
+    def __call__(self, protein, pdb_code=None):
+        result = self.featuriser(protein, pdb_code=pdb_code)
+        if result is not None:
+            self.kept_pdb_codes.append(pdb_code)
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self.featuriser, name)
+
+
+def build_confusion_matrix_image(confusion_mat, title):
+    fig, ax = plt.subplots(figsize=(10, 10))
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=confusion_mat.numpy().astype(int),
+        display_labels=BASE_AMINO_ACIDS,
+    )
+    disp.plot(cmap='Blues', ax=ax, values_format='d')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    plt.title(title)
+    image = wandb.Image(fig)
+    plt.close(fig)
+    return image
+
+
+def compute_batch_scrmsd(pred_seqs, gt_backbones, esmfold_tokenizer, esmfold_model, device):
+    """Fold each protein's predicted sequence with ESMFold and Kabsch-RMSD it against that
+    protein's ground-truth backbone (CA, N, C, O) coordinates -- the same self-consistency
+    metric as scripts/train_residue_classifier.py / comparisons/MapDiff/trainer.py."""
+    lengths_t = torch.tensor([bb.shape[0] for bb in gt_backbones])
+    pad_size = lengths_t.max().item()
+    padded = [F.pad(bb, (0, 0, 0, 0, 0, pad_size - bb.shape[0])) for bb in gt_backbones]
+    backbone_tensor = torch.stack(padded, dim=0).unsqueeze(1)  # (B, 1, R_pad, 4, 3)
+    gt_mask = (lengths_t[:, None] > torch.arange(pad_size)[None, :]).unsqueeze(1)  # (B, 1, R_pad)
+
+    rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_mask, esmfold_tokenizer, esmfold_model, device=device)
+    return rmsd.tolist()
+
+
+def run_validation(model, val_loader, crit, val_pdb_order, gt_backbones, esmfold_tokenizer, esmfold_model, epoch, run):
     model.eval()
 
     val_losses, val_acc_top_1, val_acc_top_5, val_acc_top_10 = [], [], [], []
+    scrmsd_values = []
+    global_confusion_mat = torch.zeros((len(BASE_AMINO_ACIDS), len(BASE_AMINO_ACIDS)))
+    sample_offset = 0
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
@@ -271,7 +364,11 @@ def run_validation(model, val_loader, crit):
             target = batch.seq
 
             num_proteins_in_batch = batch.batch.max().item() + 1
-            for p_idx in range(num_proteins_in_batch):
+            batch_pdb_ids = val_pdb_order[sample_offset:sample_offset + num_proteins_in_batch]
+            sample_offset += num_proteins_in_batch
+
+            pred_seqs, pred_backbones = [], []
+            for p_idx, pdb_id in zip(range(num_proteins_in_batch), batch_pdb_ids):
                 protein_mask = (batch.batch == p_idx) & valid_mask
                 if not protein_mask.any():
                     continue
@@ -285,13 +382,41 @@ def run_validation(model, val_loader, crit):
                 val_acc_top_5.append(top_k_acc(masked_logits, masked_seq, 5))
                 val_acc_top_10.append(top_k_acc(masked_logits, masked_seq, 10))
 
+                pred_idx = masked_logits.argmax(dim=-1).cpu()
+                gt_idx = masked_seq.cpu()
+                keep = gt_idx < len(BASE_AMINO_ACIDS)  # drop rare GAP/UNKNOWN targets, if any slip through
+                if keep.any():
+                    global_confusion_mat += get_confusion_matrix(gt_idx[keep], pred_idx[keep], len(BASE_AMINO_ACIDS))
+
+                gt_backbone = gt_backbones.get(pdb_id)
+                if gt_backbone is not None and gt_backbone.shape[0] == pred_idx.shape[0]:
+                    pred_seqs.append(''.join(BASE_AMINO_ACIDS[i] for i in pred_idx.tolist()))
+                    pred_backbones.append(gt_backbone)
+
+            if pred_seqs:
+                scrmsd_values.extend(compute_batch_scrmsd(
+                    pred_seqs, pred_backbones, esmfold_tokenizer, esmfold_model, DEVICE))
+
     val_perps = np.exp(val_losses)
-    return {
+    metrics = {
         "ppl_mean": np.mean(val_perps), "ppl_std": np.std(val_perps),
         "top1_mean": np.mean(val_acc_top_1), "top1_std": np.std(val_acc_top_1),
         "top5_mean": np.mean(val_acc_top_5), "top5_std": np.std(val_acc_top_5),
         "top10_mean": np.mean(val_acc_top_10), "top10_std": np.std(val_acc_top_10),
     }
+    if scrmsd_values:
+        scrmsd_t = torch.tensor(scrmsd_values)
+        metrics["scrmsd_mean"] = scrmsd_t.mean().item()
+        metrics["scrmsd_std"] = scrmsd_t.std().item()
+
+    if run:
+        log_dict = {f"val_{k}": v for k, v in metrics.items()}
+        log_dict["val_aa_confusion_matrix"] = build_confusion_matrix_image(
+            global_confusion_mat, "Validation Amino Acid Confusion Matrix")
+        log_dict["epoch"] = epoch
+        run.log(log_dict)
+
+    return metrics
 
 
 def parse_args():
@@ -310,12 +435,43 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--from-scratch", action="store_true", help="skip loading a pretrained checkpoint")
     parser.add_argument("--ckpt", type=Path, default=None, help="override the default single_chain_k{k}.ckpt")
+    parser.add_argument("--run-name", type=str, default="DynamicMPNN_atlas")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+
+    # set up wandb
+    wandb.login(key=os.getenv("WANDB_KEY"))
+    run = wandb.init(
+        entity="jenslundsgaard7-uw-madison",
+        project="SheafProtein",
+        name=args.run_name,
+        config={
+            "atlas_h5": str(args.atlas_h5),
+            "k": args.k,
+            "pool_size": args.pool_size,
+            "course_grain": args.course_grain,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "lr": args.lr,
+            "seed": args.seed,
+            "from_scratch": args.from_scratch,
+            "task": "predicting residues from ATLAS conformer ensembles (DynamicMPNN)",
+        },
+    )
+
+    # WANDB artifact logging
+    artifact = wandb.Artifact(name="scripts", type="model_file")
+    artifact.add_file(os.path.abspath(__file__))
+    for dependency in (REPO_ROOT / "lib" / "scrmsd.py", REPO_ROOT / "lib" / "stats_utils.py",
+                       REPO_ROOT / "lib" / "residue_classifier_dataset.py",
+                       REPO_ROOT / "scripts" / "load_dynamics.py"):
+        if dependency.exists():
+            artifact.add_file(str(dependency))
+    run.log_artifact(artifact)
 
     atlas_index = pd.read_csv(args.cross_val_csv)
 
@@ -331,11 +487,20 @@ def main():
     train_pdbs, val_pdbs = get_fold_split(atlas_index)
     logger.info(f"Fold 0 held out for validation: {len(train_pdbs)} train / {len(val_pdbs)} val proteins")
 
+    gt_backbones = load_ground_truth_backbones(args.processed_dir, val_pdbs)
+    logger.info(f"Loaded ground-truth backbones for {len(gt_backbones)}/{len(val_pdbs)} "
+                "validation proteins (scRMSD)")
+
+    esmfold_tokenizer, esmfold_model = load_esmfold(device=DEVICE)
+
     model_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "model" / "AR1_single_chain.yaml")
     features_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "features" / "ca_bb_single_chain.yaml")
     features_cfg.k = args.k
 
     model = hydra.utils.instantiate(model_cfg).to(DEVICE)
+
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    run.log({"params": pytorch_total_params})
 
     if not args.from_scratch:
         ckpt_path = args.ckpt or (THIS_DIR / "DynamicMPNN" / "checkpoints" / f"single_chain_k{args.k}.ckpt")
@@ -353,13 +518,18 @@ def main():
         split="train",
         in_memory=True,
     )
+    # Wrapped in PdbTrackingFeaturiser so run_validation can map each batch's samples back to
+    # the pdb_code they came from (needed to look up ground-truth backbones for scRMSD).
+    val_tracker = PdbTrackingFeaturiser(
+        hydra.utils.instantiate(features_cfg, split="val", device="cpu", distance_eps=DISTANCE_EPS))
     val_dataset = PTFileDataset(
         pdb_codes=val_pdbs,
-        cfg_features=hydra.utils.instantiate(features_cfg, split="val", device="cpu", distance_eps=DISTANCE_EPS),
+        cfg_features=val_tracker,
         processed_dir=args.processed_dir,
         split="val",
         in_memory=True,
     )
+    val_pdb_order = val_tracker.kept_pdb_codes
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -373,8 +543,10 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     crit = torch.nn.CrossEntropyLoss(label_smoothing=0.05, ignore_index=GAP_TOKEN)
 
+    step = 0
     for epoch in range(args.epochs):
         model.train()
+
         total_loss = 0.0
         for batch in tqdm(train_loader, desc=f"Epoch {epoch} Train"):
             batch = batch.to(DEVICE)
@@ -386,14 +558,21 @@ def main():
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            step += 1
+            run.log({"train_loss": loss.item(), "epoch": epoch, "step": step})
 
         logger.info(f"Epoch {epoch}: train loss {total_loss / max(len(train_loader), 1):.4f}")
 
-        metrics = run_validation(model, val_loader, crit)
+        metrics = run_validation(model, val_loader, crit, val_pdb_order, gt_backbones,
+                                  esmfold_tokenizer, esmfold_model, epoch, run)
         print(f"Val Perplexity: {metrics['ppl_mean']:.4f} \\pm {metrics['ppl_std']:.4f}")
         print(f"Top-1 Recovery: {metrics['top1_mean']:.4f} \\pm {metrics['top1_std']:.4f}")
         print(f"Top-5 Recovery: {metrics['top5_mean']:.4f} \\pm {metrics['top5_std']:.4f}")
         print(f"Top-10 Recovery: {metrics['top10_mean']:.4f} \\pm {metrics['top10_std']:.4f}")
+        if "scrmsd_mean" in metrics:
+            print(f"scRMSD: {metrics['scrmsd_mean']:.4f} \\pm {metrics['scrmsd_std']:.4f}")
+
+    run.finish()
 
 
 if __name__ == "__main__":

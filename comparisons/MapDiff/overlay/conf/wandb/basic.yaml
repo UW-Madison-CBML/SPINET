@@ -1,5 +1,0 @@
-use: False
-entity: jenslundsgaard7-uw-madison
-project: SheafProtein
-run_name: MapDiff_diffusion
-key_file: ./wandb_api.txt
