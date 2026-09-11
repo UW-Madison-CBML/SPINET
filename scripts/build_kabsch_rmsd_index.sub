@@ -19,8 +19,8 @@ transfer_output_remaps = "rmsd_cluster_index.h5 = pelican://chtc.wisc.edu/resear
 
 
 request_cpus = 16
-request_memory = 128GB
-request_disk = 128GB
+request_memory = 200GB
+request_disk = 200GB
 
 
 queue 1

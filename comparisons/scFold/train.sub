@@ -15,7 +15,8 @@ error = train_$(Cluster)_$(Process).err
 output = train_$(Cluster)_$(Process).out
 
 when_to_transfer_output = ON_EXIT_OR_EVICT
-Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
+Requirements = (Target.HasCHTCStaging == true)
+#  && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
 
 transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv

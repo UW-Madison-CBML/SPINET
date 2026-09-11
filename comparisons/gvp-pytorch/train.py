@@ -46,7 +46,7 @@ def parse_pdb_folder(folder_path):
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def main(use_pdbs):
+def main(use_pdbs=False, majority_voting=False):
     h5_path = os.path.abspath("atlas_data.h5")
     index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
 

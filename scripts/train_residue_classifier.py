@@ -223,7 +223,7 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 8
+    batch_size = 64
     hidden_dim = 32
     stalk_dim = 8
     num_blocks = 8
@@ -238,7 +238,7 @@ def train_residue_classifier(args_dict):
     paradigm = args_dict["paradigm"]
     num_timesteps = 128 if paradigm == "dynamic" else 1
     use_scheduler=False
-    test_val = True
+    test_val = False
     use_profiler = False
     resume_model_name = args_dict["resume"]
     resume = args_dict["resume"] != ""
@@ -346,7 +346,7 @@ def train_residue_classifier(args_dict):
     ).to(DEVICE)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    run.log({"params":pytorch_total_params})
+    run.log({"params": pytorch_total_params})
 
     create_repo(f"JensLundsgaard/{run_name}", exist_ok=True)
     if resume:
