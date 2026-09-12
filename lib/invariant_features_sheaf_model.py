@@ -302,7 +302,7 @@ class SheafResidualSAN(nn.Module):
 # it will be harder to not hard code some of this stuff
 # the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
-    def step(self, x_t, edge_attr_t, edge_index, reverse_edge_indices):
+    """def step(self, x_t, edge_attr_t, edge_index, reverse_edge_indices):
         if not self.ablate_sheaves:
             maps_t = self.sheaf_learner(
                 torch.cat([x_t[edge_index[0]], edge_attr_t, x_t[edge_index[1]]], dim=-1)
@@ -315,7 +315,7 @@ class InitDynamicsEmbedding(MessagePassing):
         x_stalk = x_t.view(x_t.shape[0], self.num_channels, self.stalk_dim)
         edge_stalk = edge_attr_t.view(edge_attr_t.shape[0], self.num_channels, self.stalk_dim)
         return self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps_t)
-        
+    """  
     def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, paradigm="dynamic", frame_origin="CA", ablate_sheaves=False, restriction_map_type="arbitrary"):
         super().__init__(aggr='sum', node_dim=0)
         self.input_dim = node_dim
@@ -333,70 +333,70 @@ class InitDynamicsEmbedding(MessagePassing):
         self.paradigm = paradigm
 
         if not self.ablate_sheaves:
-            self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 3*self.hidden_dim), nn.ReLU(), nn.Linear(3*self.hidden_dim, self.stalk_dim**2))
+            self.sheaf_learner = nn.Sequential(nn.Linear(2*self.hidden_dim, 2*self.hidden_dim), nn.ReLU(), nn.Linear(2*self.hidden_dim, self.stalk_dim**2))
             #self.transformer = EdgeCrossAttention(self.hidden_dim, self.stalk_dim)
             #self.sheaf_learner = nn.Sequential(nn.Linear(self.hidden_dim, 4 * self.hidden_dim), nn.ReLU(), nn.Linear( 4 * self.hidden_dim, self.stalk_dim**2))
 
         self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
-        self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
+        #self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
 
         self.mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
 
         if self.paradigm == "dynamic": 
-            self.edge_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
+            #self.edge_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
             self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
         elif self.paradigm == "static":
-            self.edge_temporal_product = nn.Identity()
+            #self.edge_temporal_product = nn.Identity()
             self.node_temporal_product = nn.Identity()
         else: 
             self.node_temporal_product = lambda x: x.mean(dim=1) # TODO this is not serializable lol
-            self.edge_temporal_product = lambda x: x.mean(dim=1) # this needs to permutation invariant if using ensemble, since there is no temporal relationship between ensemble conformations
+            #self.edge_temporal_product = lambda x: x.mean(dim=1) # this needs to permutation invariant if using ensemble, since there is no temporal relationship between ensemble conformations
 
     def forward(self, x, pos, frame_maps, edge_index, edge_attr):
         x = self.project_nodes(x)
 
         # need to calc some edge features here, since we don't know the edges yet at 
-        if self.paradigm == "static":
-            origin = pos[:, ~self.not_frame_origin_mask]
-            other_atoms = pos[:, self.not_frame_origin_mask]
+        #if self.paradigm == "static":
+        #    origin = pos[:, ~self.not_frame_origin_mask]
+        #    other_atoms = pos[:, self.not_frame_origin_mask]
 
-        else: 
-            origin = pos[:, :, ~self.not_frame_origin_mask]
-            other_atoms = pos[:, :, self.not_frame_origin_mask]
+        #else: 
+        #    origin = pos[:, :, ~self.not_frame_origin_mask]
+        #    other_atoms = pos[:, :, self.not_frame_origin_mask]
 
-        in_frame_atoms = torch.matmul(other_atoms[edge_index[1]] - origin[edge_index[0]], frame_maps[edge_index[0]])
+        #in_frame_atoms = torch.matmul(other_atoms[edge_index[1]] - origin[edge_index[0]], frame_maps[edge_index[0]])
 
-        if self.paradigm == "static":
-            in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], 9)
-        else:
-            in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], pos.shape[1], 9)
+        #if self.paradigm == "static":
+        #    in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], 9)
+        #else:
+        #    in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], pos.shape[1], 9)
 
-        pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
+        #pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
 
-        if self.paradigm == "static":
-            edge_features = torch.cat([in_frame_atoms, edge_attr, pairwise_matrices], dim=1)
-        else:
-            edge_features = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
+        #if self.paradigm == "static":
+        #    edge_features = torch.cat([in_frame_atoms, edge_attr, pairwise_matrices], dim=1)
+        #else:
+        #    edge_features = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
 
         # get edge embeddings
-        edge_attr = self.project_edges(edge_features)
+        #edge_attr = self.project_edges(edge_features)
 
 
         if self.paradigm == "dynamic":
             _, x = self.node_temporal_product(x)
-            _, edge_attr = self.edge_temporal_product(edge_attr)
+            #_, edge_attr = self.edge_temporal_product(edge_attr)
             x = x.squeeze(0)
-            edge_attr = edge_attr.squeeze(0)
+            #            edge_attr = edge_attr.squeeze(0)
 
 
         elif self.paradigm == "ensemble":
             x = self.node_temporal_product(x)
-            edge_attr = self.edge_temporal_product(edge_attr)
+            #edge_attr = self.edge_temporal_product(edge_attr)
 
            
         # calculate restriction maps
         if not self.ablate_sheaves:
-            maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+            maps = self.sheaf_learner(torch.cat([x[edge_index[0]], x[edge_index[1]]], dim = -1)).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim) # edge_attr
 
             _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
             opposite_maps = maps[reverse_edge_indices]
@@ -406,17 +406,17 @@ class InitDynamicsEmbedding(MessagePassing):
 
         # reshape from h to c * d
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # stalk dim to c,d
-        edge_stalk = edge_attr.view(edge_attr.shape[0], self.num_channels, self.stalk_dim)
+        #edge_stalk = edge_attr.view(edge_attr.shape[0], self.num_channels, self.stalk_dim)
 
         # pass messages
-        agg = self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps)
+        agg = self.propagate(edge_index, x=x_stalk, maps=maps) # edge_attr=edge_stalk, 
         # flatten
         agg_flat = agg.view(x.shape[0], self.hidden_dim)
           
         # nonlinearity 
         return self.mlp(agg_flat)
 
-    def message(self, x_i, x_j, edge_attr, maps):
+    def message(self, x_i, x_j, maps): # , edge_attr,
         if not self.ablate_sheaves:
             i_maps = maps[0] 
             j_maps = maps[1]
@@ -424,13 +424,13 @@ class InitDynamicsEmbedding(MessagePassing):
             i_to_edge = torch.matmul(i_maps, x_i.mT)
             j_to_edge = torch.matmul(j_maps, x_j.mT)
 
-            edge_value = edge_attr.mT + (j_to_edge - i_to_edge)
+            edge_value =  (j_to_edge - i_to_edge) # edge_attr.mT +
 
             transported = torch.matmul(i_maps.mT, edge_value).mT # last mT so that it's c,d not d,c
         else: 
-            transported = x_j + edge_attr
+            transported = x_j # + edge_attr
     
-        return self.mlp(transported)
+        return transported
 
 #def update(self, aggr_out, x):
 #    return self.update_linear(torch.cat([x, aggr_out], dim=-1))
@@ -495,7 +495,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.use_masking = config.use_masking
                 self.paradigm = config.paradigm
         
-        self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, paradigm = self.paradigm, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(12, -1, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, paradigm = self.paradigm, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
         if self.use_masking: 
             self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
 

@@ -30,4 +30,4 @@ request_gpus = 1
 
 requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
-queue ablation from ablations.txt
+queue ablation from mdcath_ablations.txt

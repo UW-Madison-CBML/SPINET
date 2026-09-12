@@ -44,7 +44,9 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
     f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
     precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
     recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-    
+    pred_seqs = []
+    pred_pdbs = []
+
     with torch.no_grad():
         for batch in tqdm(loader if not test_val else itertools.islice(loader,100), desc=f"Epoch {epoch} {val_name}", leave=False):
 
@@ -62,10 +64,9 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
             data_list = out_batch.to_data_list() # list of B per-protein Data objects (model output)
             gt_list = batch.to_data_list()  # list of B per-protein Data objects (ground truth)
 
-            pred_seqs = []
-
             for i, gt_data in enumerate(gt_list):
                 pred_data = data_list[i]
+                pred_pdbs.append(gt_data.traj_id if isinstance(gt.traj_id, str) else gt_data.traj_id[0])
 
                 pred_idx = pred_data.x.argmax(dim=-1) # (R_i,) predicted class index per residue, protein i (R_i = residue count, varies per protein)
 
@@ -76,7 +77,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
                 seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])  # length-R_i amino-acid string
                 pred_seqs.append(seq_str )  # accumulates to B entries, insertion order == gt_list order
 
-            # Get gt coordinates from trajectory
+            """# Get gt coordinates from trajectory
             traj_tensors = [prot.pos for prot in gt_list]
 
             lengths = torch.tensor([traj_tensor.shape[0] for traj_tensor in traj_tensors])  # (B,) residue count R_i per protein
@@ -89,7 +90,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
             gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])[:, None, :].repeat(1, backbone_tensor.shape[1], 1)  # (B, T, pad_size) bool
 
             rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask, esmfold_model, esmfold_tokenizer, device=device)
-            scrmsd.extend(rmsd.tolist())
+            scrmsd.extend(rmsd.tolist())"""
 
             out_batch = out_batch.cpu()
             batch = batch.cpu()
@@ -138,15 +139,16 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
         prf_dict[f"{val_name}_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
         prf_dict[f"{val_name}_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
         prf_dict[f"{val_name}_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
+    pred_string_df = pd.DataFrame({"pdb":pred_pdbs, "seq":pred_seqs})
 
     # perplexity score
     perplexities = torch.exp(torch.tensor(losses))  # losses/perplexities: (total_proteins,) -- one scalar per protein, accumulated across every batch in the loader
     prf_dict[f"{val_name}_perp_mean"] = (pm := perplexities.mean().item())
     prf_dict[f"{val_name}_perp_std"] = (ps := perplexities.std().item())
 
-    scrmsd = torch.tensor(scrmsd)
-    prf_dict[f"{val_name}_rmsd_mean"] = scrmsd.mean().item()
-    prf_dict[f"{val_name}_rmsd_std"] = scrmsd.std().item()
+    #scrmsd = torch.tensor(scrmsd)
+    #prf_dict[f"{val_name}_rmsd_mean"] = scrmsd.mean().item()
+    #prf_dict[f"{val_name}_rmsd_std"] = scrmsd.std().item()
 
     acc_top_1 = torch.tensor(acc_top_1)
     acc_top_5 = torch.tensor(acc_top_5)
@@ -223,7 +225,7 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 1
+    batch_size = 16
     hidden_dim = 64
     stalk_dim = 16
     num_blocks = 6
@@ -238,7 +240,7 @@ def train_residue_classifier(args_dict):
     paradigm = args_dict["paradigm"]
     num_timesteps = 128 if paradigm == "dynamic" else 1
     use_scheduler=False
-    test_val = True
+    test_val = False
     use_profiler = False
     resume_model_name = args_dict["resume"]
     resume = args_dict["resume"] != ""
@@ -362,6 +364,7 @@ def train_residue_classifier(args_dict):
         use_attention=use_attention,
         use_masking=use_masking
     ).to(DEVICE)
+
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run.log({"params": pytorch_total_params})

@@ -1,0 +1,2 @@
+--run-name our_model_mdcath --restriction-map-type arbitrary --ablate-attention
+--run-name no_sheaves_mdcath --ablate-attention --ablate-sheaves

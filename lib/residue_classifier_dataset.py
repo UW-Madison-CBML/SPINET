@@ -111,11 +111,12 @@ class ResidueClassifierDataset(Dataset):
         if self.paradigm == "ensemble":
             pass 
         else:
-            coordinates = torch.from_numpy(self.h5_file[group_name + "/coordinates"][:, idxs])
+            coordinates = torch.from_numpy(self.h5_file[group_name]["coordinates"][:, idxs])
             pos = coordinates[:,:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]] if self.paradigm == "dynamic" else coordinates[:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]]
-            features = torch.from_numpy(self.h5_file[group_name + "/spinet_features"][:, idxs])
-            frame_maps = torch.from_numpy(self.h5_file[group_name + "/frame_maps"][:, idxs])
-            y = torch.tensor([self.__class__.AMINO_ACIDS.index(self.__class__.RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in self.h5_file[group_name + "/residues"][:]])
+            features = torch.from_numpy(self.h5_file[group_name]["coordinates"][:, idxs])
+            features = features.reshape(features.shape[0], features.shape[1], -1)
+            frame_maps = torch.from_numpy(self.h5_file[group_name]["frame_maps"][:, idxs])
+            y = torch.tensor([self.__class__.AMINO_ACIDS.index(self.__class__.RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in self.h5_file[group_name]["residues"][:]])
             node_mask = torch.zeros(len(y))
             traj_id = group_name
 
