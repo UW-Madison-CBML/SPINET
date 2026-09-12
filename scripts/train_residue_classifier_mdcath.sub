@@ -17,9 +17,9 @@ ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_prote
 transfer_input_files = \
     train_residue_classifier.py, \
     load_dynamics.py, \
-    lib/, \
-    api_keys.txt, \
-    mdcath_320_0_topology_split.csv, \
+    ../lib/, \
+    ../api_keys.txt, \
+    $(ResearchDrive)/mdcath_320_0_topology_split.csv, \
     $(ResearchDrive)/mdcath_spinet_320_0.h5
 
 +wantGPULab = true
