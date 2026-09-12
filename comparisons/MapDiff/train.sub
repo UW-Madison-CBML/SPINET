@@ -1,0 +1,70 @@
+# CHTC HTCondor submit file for training MapDiff on ATLAS end-to-end:
+# mask-prior IPA pretraining + denoising diffusion training, in one job
+# (Docker universe, GPU). See train.py / trainer.py.
+#
+# MapDiff.tar.gz should be a tarball of a *pristine* checkout of
+# peizhenbai/MapDiff (`git clone https://github.com/peizhenbai/MapDiff &&
+# tar czf MapDiff.tar.gz MapDiff/`) -- train.sh overlays this folder's
+# ATLAS/wandb/scRMSD additions on top of it at run time, so the repo itself
+# is never modified. See README.md.
+#
+# Setup (one-time):
+#   1. ./build_and_push.sh <dockerhub_username>   # builds+pushes the image
+#   2. Set docker_image below to that image.
+#
+# Dataset: the shared ATLAS hdf5 store (atlas_data.h5) + cross-validation index
+# (atlas_cross_val_index.csv) -- the same store/split scripts/train_residue_classifier.py
+# and comparisons/{gvp-pytorch,DynamicMPNN}/train.py use, transferred in via
+# transfer_input_files below. train.sh featurizes one representative frame per protein
+# (data/generate_graph_atlas.py) into MapDiff graphs before training starts; fold 0 doubles
+# as both validation and test (see conf/dataset/atlas.yaml).
+#
+# wandb.use=True below logs both stages to a single Weights & Biases run
+# (key-file auth works fine non-interactively -- see wandb_api.txt, not
+# checked in). ESMFold (self-consistency RMSD) needs internet access to
+# download facebook/esmfold_v1 -- pinned to a machine that has it.
+#
+# Submit:
+#   mkdir -p logs && condor_submit train.sub
+
+universe                = docker
+docker_image            = cmikulski4/mapdiff:v1
+
+executable              = train.sh
+# Forwarded verbatim to `python train.py ...` -- see conf/train.yaml.
+# dataset.*_dir override conf/dataset/atlas.yaml's defaults to match where
+# train.sh actually extracts/featurizes the staged tarball in the job's
+# scratch dir. Pass prior_model.path=<ckpt> to skip stage 1 and load an
+# already-trained mask-prior IPA checkpoint instead.
+arguments               = dataset=atlas dataset.train_dir=./surffold_data/atlas_process/train/ dataset.val_dir=./surffold_data/atlas_process/validation/ dataset.test_dir=./surffold_data/atlas_process/validation/ dataset.marginal_train_dir=./surffold_data/train_marginal_x_atlas.pt wandb.use=True wandb.key_file=./wandb_api.txt experiment.name=atlas_mapdiff
+
+# The pristine MapDiff tarball, this folder's ATLAS/wandb/scRMSD additions,
+# the API-key file (train.sh splits the W&B key out of it into wandb_api.txt),
+# lib/scrmsd.py + lib/stats_utils.py + lib/atlas_frame_pdb.py (shared across
+# all models -- see ../../lib), scripts/load_dynamics.py (BACKBONE_ATOMS), and the shared
+# ATLAS hdf5 store + cross-validation index.
+transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/atlas_frame_pdb.py, ../../scripts/load_dynamics.py, MapDiff.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_output_files   = MapDiff/outputs
+transfer_output_remaps  = "MapDiff/outputs = ./results/atlas_mapdiff_$(Cluster)_$(Process)"
+
+log                     = logs/train_$(Cluster)_$(Process).log
+output                  = logs/train_$(Cluster)_$(Process).out
+error                   = logs/train_$(Cluster)_$(Process).err
+
+request_gpus            = 2
+request_cpus            = 16
+request_memory          = 128GB
+request_disk            = 150GB
+
+# ESMFold download needs internet access -- pin to the same machine
+# scripts/train_residue_classifier.sub uses for that reason. Also only
+# match GPU nodes with a modern-enough driver/CUDA for the cu121 image.
+Requirements            = (Target.HasCHTCStaging == true) 
+#&& (Machine == "bhaskargpu4000.chtc.wisc.edu")
++WantGPULab             = true
++GPUJobLength           = "long"
+
+queue 1

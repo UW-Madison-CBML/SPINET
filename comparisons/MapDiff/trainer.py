@@ -1,0 +1,484 @@
+"""Single trainer driving both of MapDiff's training stages against ATLAS:
+
+  1. `fit_prior()`  -- mask-prior IPA pretraining (was `mask_ipa_pretrain.py` +
+     `trainer/mask_ipa_trainer.py`).
+  2. `train()` / `test()` -- denoising diffusion training (was `main.py` +
+     `trainer/trainer.py`), fine-tuning the same prior model in place.
+
+Both stages log to a single Weights & Biases run (no more comet_ml), and both
+validation (`train()`) and `test()` additionally compute self-consistency
+RMSD: fold the predicted sequence with ESMFold and Kabsch-RMSD it against the
+protein's ground-truth backbone, mirroring
+`scripts/train_residue_classifier.py`'s `run_val`.
+"""
+import copy
+import datetime
+import os
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import wandb
+import matplotlib.pyplot as plt
+from omegaconf import OmegaConf
+from pathlib import Path
+from prettytable import PrettyTable
+from sklearn.metrics import f1_score, ConfusionMatrixDisplay
+from tqdm import tqdm
+
+from evaluator import Evaluator
+from utils import inf_iterator, enable_dropout, cal_stats_metric
+
+# lib/scrmsd.py + lib/stats_utils.py are copied in flat next to this file (see
+# ../README.md and train.sh) -- fall back to walking up to a lib/ directory
+# for local/dev runs from inside the source tree.
+try:
+    import stats_utils
+    from scrmsd import evaluate_batch_rmsd
+except ImportError:
+    import sys
+    for _up in ('.', '..', '../..', '../../..'):
+        _cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), _up, 'lib')
+        if os.path.isdir(_cand):
+            sys.path.insert(0, os.path.abspath(_cand))
+            break
+    import stats_utils
+    from scrmsd import evaluate_batch_rmsd
+
+# Fixed one-letter amino-acid order MapDiff's 20-dim one-hot (`data.x[:, :20]`)
+# is built in -- see (upstream) data/generate_graph_cath.py's
+# `amino_acids_type` / evaluator.py's `blosum_aa_order`, both of which use
+# this exact order.
+AMINO_ACIDS = ['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I',
+               'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V']
+
+# `atom_pos` (dataloader.large_dataset.Cath / data.generate_graph_cath) stacks
+# [N, CA, C, CB, O] along dim=1 -- reorder to lib/scrmsd.py's expected
+# CA, N, C, O (see scripts/load_dynamics.py's BACKBONE_ATOMS).
+ATOM_POS_TO_BACKBONE_IDX = [1, 0, 2, 4]
+
+
+def build_confusion_matrix_image(confusion_mat, title):
+    fig, ax = plt.subplots(figsize=(12, 12))
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=confusion_mat.numpy().astype(int),
+        display_labels=AMINO_ACIDS,
+    )
+    disp.plot(cmap='Blues', ax=ax, values_format='d')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    plt.title(title)
+    image = wandb.Image(fig)
+    plt.close(fig)
+    return image
+
+
+def compute_batch_scrmsd(g_batch, batch_logits, esmfold_tokenizer, esmfold_model, device):
+    """Fold every protein's predicted sequence with ESMFold and Kabsch-RMSD it
+    against that protein's ground-truth backbone (CA, N, C, O) coordinates.
+
+    g_batch: a `Batch` of per-protein graphs (has `.batch`, `.atom_pos`).
+    batch_logits: (N_total_nodes_in_batch, 20) predicted amino-acid logits,
+        same node ordering as `g_batch`.
+    """
+    batch_idx = g_batch.batch.cpu().numpy()
+    atom_pos = g_batch.atom_pos.cpu()
+
+    pred_seqs = []
+    gt_backbones = []
+    lengths = []
+    for i in range(batch_idx.max() + 1):
+        idx = np.where(batch_idx == i)[0]
+        pred_idx = batch_logits[idx].argmax(dim=1)
+        pred_seqs.append(''.join(AMINO_ACIDS[j.item()] for j in pred_idx))
+        gt_backbones.append(atom_pos[idx][:, ATOM_POS_TO_BACKBONE_IDX, :])
+        lengths.append(len(idx))
+
+    lengths_t = torch.tensor(lengths)
+    pad_size = lengths_t.max().item()
+    padded = [F.pad(bb, (0, 0, 0, 0, 0, pad_size - bb.shape[0])) for bb in gt_backbones]
+    backbone_tensor = torch.stack(padded, dim=0).unsqueeze(1)  # (B, 1, R_pad, 4, 3)
+    gt_mask = (lengths_t[:, None] > torch.arange(pad_size)[None, :]).unsqueeze(1)  # (B, 1, R_pad)
+
+    rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_mask, esmfold_tokenizer, esmfold_model, device=device)
+    return rmsd.tolist()
+
+
+class MapDiffTrainer:
+    def __init__(
+            self,
+            config,
+            prior_model,
+            prior_optimizer,
+            mask_train_dataloader,
+            diffusion_model,
+            optimizer,
+            train_dataloader,
+            val_dataloader,
+            test_dataloader,
+            device,
+            output_dir,
+            esmfold_tokenizer,
+            esmfold_model,
+            wandb_run,
+            prior_scheduler=None,
+            scheduler=None,
+            train_batch_size=512,
+            train_num_steps=200000,
+            save_and_sample_every=100,
+            num_samples=25,
+            ensemble_num=50,
+            ddim_steps=50,
+            sample_method='ddim',
+    ):
+        self.config = config
+        self.device = device
+        self.output_dir = output_dir
+        self.wandb_run = wandb_run
+        self.esmfold_tokenizer = esmfold_tokenizer
+        self.esmfold_model = esmfold_model
+        self.evaluator = Evaluator()
+
+        Path(self.output_dir + '/model/').mkdir(parents=True, exist_ok=True)
+
+        # ---- stage 1: mask-prior IPA pretraining ----
+        self.prior_model = prior_model.to(self.device)
+        self.prior_optimizer = prior_optimizer
+        self.prior_scheduler = prior_scheduler
+        self.mask_train_dataloader = mask_train_dataloader
+        self.prior_epoch = 0
+        self.prior_step = 0
+        self.prior_train_table = PrettyTable(["# Epoch", "# Step", "Train_loss"])
+
+        # ---- stage 2: denoising diffusion training ----
+        self.model = diffusion_model.to(self.device)
+        self.num_samples = num_samples
+        self.ensemble_num = ensemble_num
+        self.ddim_steps = ddim_steps
+        self.save_and_sample_every = save_and_sample_every
+        self.batch_size = train_batch_size
+        self.train_num_steps = train_num_steps
+        self.sample_method = sample_method
+
+        self.train_dataloader = train_dataloader
+        self.iter_one_epoch = len(train_dataloader)
+        self.train_iterator = inf_iterator(train_dataloader)
+        self.val_dataloader = val_dataloader
+        self.test_dataloader = test_dataloader
+
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.best_val_step = 0
+        self.best_val_epoch = 0
+        self.step = 0
+        self.epoch = 0
+        self.best_val_recovery, self.best_val_perplexity = 0, float('inf')
+        self.best_model = None
+
+        self.train_table = PrettyTable(["# Epoch", "# Step", "Train_loss"])
+        self.val_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity", "scRMSD"])
+        self.test_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity", "scRMSD"])
+
+    # ------------------------------------------------------------------
+    # Stage 1: mask-prior IPA pretraining
+    # ------------------------------------------------------------------
+
+    def _prior_train_epoch(self):
+        self.prior_model.train()
+        self.prior_epoch += 1
+        all_logits, all_labels, all_index = [], [], []
+        loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
+
+        for idx, data in enumerate(tqdm(self.mask_train_dataloader, desc=f"[Pretrain] Epoch {self.prior_epoch}")):
+            x, x_pos, x_pad, x_mask, aa_label = (t.to(self.device) for t in data)
+            logits = self.prior_model(x, x_pos, x_mask, x_pad)
+            loss = loss_fn(logits[x_mask >= 1], aa_label[x_mask >= 1]).mean()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.prior_model.parameters(), self.config.mask_train.clip_grad_norm)
+
+            self.prior_optimizer.step()
+            if self.prior_scheduler:
+                self.prior_scheduler.step()
+            self.prior_optimizer.zero_grad()
+            self.prior_step += 1
+
+            all_logits.append(logits.view(-1, 20).detach().cpu())
+            all_labels.append(aa_label.view(-1).detach().cpu())
+            all_index.append(x_mask.view(-1).detach().cpu())
+
+            if self.wandb_run and idx % 10 == 0:
+                self.wandb_run.log({'pretrain_loss': loss.item(), 'pretrain_step': self.prior_step,
+                                     'pretrain_epoch': self.prior_epoch})
+
+        all_logits = torch.cat(all_logits, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+        all_index = torch.cat(all_index, dim=0)
+        return self._prior_log_metrics(all_labels, all_logits, all_index, loss_fn)
+
+    def _prior_log_metrics(self, sl_labels, sl_predictions, sl_index, loss_fn):
+        all_loss = loss_fn(sl_predictions[sl_index >= 1], sl_labels[sl_index >= 1]).mean()
+        mask_loss = loss_fn(sl_predictions[sl_index == 1], sl_labels[sl_index == 1]).mean()
+        replace_loss = loss_fn(sl_predictions[sl_index == 2], sl_labels[sl_index == 2]).mean()
+        keep_loss = loss_fn(sl_predictions[sl_index == 3], sl_labels[sl_index == 3]).mean()
+
+        pred_labels = np.argmax(sl_predictions.numpy(), axis=-1)
+        labels = sl_labels.numpy()
+        index = sl_index.numpy()
+
+        metrics = {}
+        for name, mask_val in (('mask', 1), ('replace', 2), ('keep', 3)):
+            metrics[f'macro_{name}_f1'] = f1_score(labels[index == mask_val], pred_labels[index == mask_val],
+                                                    average='macro')
+            metrics[f'micro_{name}_f1'] = f1_score(labels[index == mask_val], pred_labels[index == mask_val],
+                                                    average='micro')
+
+        print(f"[Pretrain] Epoch {self.prior_epoch}: all_loss={all_loss.item():.4f} mask_loss={mask_loss.item():.4f} "
+              f"replace_loss={replace_loss.item():.4f} keep_loss={keep_loss.item():.4f}")
+        return all_loss, metrics
+
+    def _save_prior(self, mode='last'):
+        config_dict = OmegaConf.to_container(self.config, resolve=True)
+        data = {
+            'config': config_dict,
+            'epoch': self.prior_epoch,
+            'model': self.prior_model.state_dict(),
+            'opt': self.prior_optimizer.state_dict(),
+        }
+        save_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = os.path.join(self.output_dir, 'model',
+                             f'{self.config.experiment.name}_prior_{mode}_{self.prior_epoch}_epochs_{save_time}.pt')
+        torch.save(data, path)
+        return path
+
+    def fit_prior(self):
+        """Stage 1: mask-prior IPA pretraining. Trains `self.prior_model` in
+        place -- since `self.model` (the diffusion model) already holds a
+        reference to the same module, stage 2 automatically sees these
+        trained weights with no checkpoint round-trip needed."""
+        epochs = self.config.mask_train.train_epochs
+        save_epochs = self.config.mask_train.save_epochs
+        for _ in range(epochs):
+            train_loss, metrics = self._prior_train_epoch()
+            self.prior_train_table.add_row([self.prior_epoch, self.prior_step, train_loss.item()])
+            if self.wandb_run:
+                self.wandb_run.log({f'pretrain_{k}': v for k, v in metrics.items()} | {'pretrain_epoch': self.prior_epoch})
+            if self.prior_epoch % save_epochs == 0 and self.prior_epoch > 10:
+                self._save_prior(mode='curr')
+            torch.cuda.empty_cache()
+        self._save_prior(mode='last')
+        print("Stage 1 (mask-prior IPA pretraining) complete")
+
+    # ------------------------------------------------------------------
+    # Stage 2: denoising diffusion training
+    # ------------------------------------------------------------------
+
+    def save(self, save_epochs, save_steps, mode='best'):
+        config_dict = OmegaConf.to_container(self.config, resolve=True)
+        state = self.best_model.state_dict() if mode == 'best' else self.model.state_dict()
+        data = {
+            'config': config_dict,
+            'step': save_steps,
+            'epoch': save_epochs,
+            'model': state,
+            'opt': self.optimizer.state_dict(),
+        }
+        save_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        torch.save(data, os.path.join(self.output_dir, 'model',
+                                      f'{self.config.experiment.name}_{mode}_{save_epochs}_epochs_{save_steps}_steps_{save_time}.pt'))
+
+    def save_table_results(self):
+        with open(os.path.join(self.output_dir, 'pretrain_markdowntable.txt'), 'w') as f:
+            f.write(self.prior_train_table.get_string())
+        with open(os.path.join(self.output_dir, 'train_markdowntable.txt'), 'w') as f:
+            f.write(self.train_table.get_string())
+        with open(os.path.join(self.output_dir, 'val_markdowntable.txt'), 'w') as f:
+            f.write(self.val_table.get_string())
+        with open(os.path.join(self.output_dir, 'test_markdowntable.txt'), 'w') as f:
+            f.write(self.test_table.get_string())
+
+    def _run_validation(self):
+        self.model.eval()
+        enable_dropout(self.model)
+        with torch.no_grad():
+            all_logits = torch.tensor([])
+            all_seq = torch.tensor([])
+            recovery = []
+            scrmsd_values = []
+            global_confusion_mat = torch.zeros((20, 20))
+
+            for g_batch, ipa_batch in tqdm(self.val_dataloader, desc=f"Epoch {self.epoch} [Val]", leave=False):
+                g_batch = g_batch.to(self.device)
+                ipa_batch = ipa_batch.to(self.device) if ipa_batch is not None else None
+                ens_logits = []
+                if self.sample_method == 'ddim':
+                    for _ in range(self.ensemble_num):
+                        logits, sample_graph = self.model.mc_ddim_sample(g_batch, ipa_batch, diverse=True,
+                                                                          step=self.ddim_steps)
+                        ens_logits.append(logits)
+                ens_logits_tensor = torch.stack(ens_logits)
+                batch_logits = ens_logits_tensor.mean(dim=0).cpu()
+                all_logits = torch.cat([all_logits, batch_logits])
+                all_seq = torch.cat([all_seq, g_batch.x.cpu()])
+
+                batch_idx = g_batch.batch.cpu().numpy()
+                for i in range(batch_idx.max() + 1):
+                    idx = np.where(batch_idx == i)
+                    sample_logits = batch_logits[idx].argmax(dim=1)
+                    sample_seq = g_batch.x.cpu()[idx].argmax(dim=1)
+                    recovery.append(self.evaluator.cal_recovery(sample_logits, sample_seq))
+
+                global_confusion_mat += stats_utils.get_confusion_matrix(
+                    g_batch.x.cpu().argmax(dim=1), batch_logits.argmax(dim=1), num_classes=20)
+
+                scrmsd_values.extend(compute_batch_scrmsd(
+                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model, self.device))
+
+            mean_recovery, median_recovery = cal_stats_metric(recovery)
+            full_recovery = ((all_logits.argmax(dim=1) == all_seq.argmax(dim=1)).sum() / all_seq.shape[0]).item()
+            perplexity = self.evaluator.cal_perplexity(all_logits, all_seq)
+            scrmsd_t = torch.tensor(scrmsd_values)
+
+            print(f'Val median recovery rate (step: {self.step}) is {median_recovery}')
+            print(f'Val perplexity (step: {self.step}): {perplexity}')
+            print(f'Val scRMSD (step: {self.step}): {scrmsd_t.mean().item():.3f} +/- {scrmsd_t.std().item():.3f}')
+            self.val_table.add_row([self.epoch, self.step, median_recovery, perplexity, scrmsd_t.mean().item()])
+
+            if self.wandb_run:
+                self.wandb_run.log({
+                    'val_full_recovery': full_recovery, 'val_perplexity': perplexity,
+                    'val_median_recovery': median_recovery, 'val_mean_recovery': mean_recovery,
+                    'val_scrmsd_mean': scrmsd_t.mean().item(), 'val_scrmsd_std': scrmsd_t.std().item(),
+                    'val_aa_confusion_matrix': build_confusion_matrix_image(
+                        global_confusion_mat, 'Validation Amino Acid Confusion Matrix'),
+                    'epoch': self.epoch,
+                })
+
+            if median_recovery > self.best_val_recovery:
+                self.best_model = copy.deepcopy(self.model)
+                self.best_val_step = self.step
+                self.best_val_epoch = self.epoch
+                self.best_val_recovery = median_recovery
+                self.best_val_perplexity = perplexity
+
+    def train(self):
+        """Stage 2: denoising diffusion training, seeded by (and jointly
+        fine-tuning) the mask-prior IPA model trained in `fit_prior()`."""
+        epoch_total_loss = 0
+        with tqdm(initial=self.step, total=self.train_num_steps, desc="[Diffusion]") as pbar:
+            while self.step < self.train_num_steps:
+                self.model.train()
+                g_batch, ipa_batch = next(self.train_iterator)
+                g_batch = g_batch.to(self.device)
+                ipa_batch = ipa_batch.to(self.device) if ipa_batch is not None else None
+                base_loss, mask_loss = self.model(g_batch, ipa_batch)
+                loss = base_loss + mask_loss
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+
+                self.optimizer.step()
+                if self.scheduler:
+                    self.scheduler.step()
+                self.optimizer.zero_grad()
+
+                self.step += 1
+                epoch_total_loss += loss.item()
+
+                if self.wandb_run:
+                    self.wandb_run.log({'train_base_loss': base_loss.item(), 'train_mask_loss': mask_loss.item(),
+                                         'train_loss': loss.item(), 'step': self.step, 'epoch': self.epoch})
+
+                if self.step % self.iter_one_epoch == 0 and self.step != 0:
+                    self.epoch += 1
+                    self.train_table.add_row([self.epoch, self.step, epoch_total_loss / self.iter_one_epoch])
+                    epoch_total_loss = 0
+                    torch.cuda.empty_cache()
+
+                if self.step != 0 and self.step % (self.save_and_sample_every * self.iter_one_epoch) == 0:
+                    self._run_validation()
+                pbar.update(1)
+
+        print('Stage 2 (diffusion) training complete')
+        if self.wandb_run:
+            self.wandb_run.log({'best_val_median_recovery': self.best_val_recovery,
+                                 'best_val_perplexity': self.best_val_perplexity,
+                                 'best_val_epoch': self.best_val_epoch})
+        self.save(self.best_val_epoch, self.best_val_step, mode='best')
+        self.save(self.epoch, self.train_num_steps, mode='last')
+
+    def test(self):
+        model = self.best_model if self.best_model is not None else self.model
+        model.eval()
+        enable_dropout(model)
+        with torch.no_grad():
+            print('Testing best model')
+            all_logits = torch.tensor([])
+            all_seq = torch.tensor([])
+            recovery = []
+            scrmsd_values = []
+            nssr42, nssr62, nssr80, nssr90 = [], [], [], []
+            global_confusion_mat = torch.zeros((20, 20))
+
+            for g_batch, ipa_batch in tqdm(self.test_dataloader, desc="[Test]"):
+                g_batch = g_batch.to(self.device)
+                ipa_batch = ipa_batch.to(self.device) if ipa_batch is not None else None
+                ens_logits = []
+                if self.sample_method == 'ddim':
+                    for _ in range(self.ensemble_num):
+                        logits, sample_graph = model.mc_ddim_sample(g_batch, ipa_batch, diverse=True,
+                                                                     step=self.ddim_steps)
+                        ens_logits.append(logits)
+                ens_logits_tensor = torch.stack(ens_logits)
+                batch_logits = ens_logits_tensor.mean(dim=0).cpu()
+                all_logits = torch.cat([all_logits, batch_logits])
+                all_seq = torch.cat([all_seq, g_batch.x.cpu()])
+
+                batch_idx = g_batch.batch.cpu().numpy()
+                for i in range(batch_idx.max() + 1):
+                    idx = np.where(batch_idx == i)
+                    sample_logits = batch_logits[idx].argmax(dim=1)
+                    sample_seq = g_batch.x.cpu()[idx].argmax(dim=1)
+                    sample_nssr42, sample_nssr62, sample_nssr80, sample_nssr90 = self.evaluator.cal_all_blosum_nssr(
+                        sample_logits, sample_seq)
+                    nssr42.append(sample_nssr42)
+                    nssr62.append(sample_nssr62)
+                    nssr80.append(sample_nssr80)
+                    nssr90.append(sample_nssr90)
+                    recovery.append(self.evaluator.cal_recovery(sample_logits, sample_seq))
+
+                global_confusion_mat += stats_utils.get_confusion_matrix(
+                    g_batch.x.cpu().argmax(dim=1), batch_logits.argmax(dim=1), num_classes=20)
+
+                scrmsd_values.extend(compute_batch_scrmsd(
+                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model, self.device))
+
+            test_mean_recovery, test_median_recovery = cal_stats_metric(recovery)
+            test_mean_nssr42, test_median_nssr42 = cal_stats_metric(nssr42)
+            test_mean_nssr62, test_median_nssr62 = cal_stats_metric(nssr62)
+            test_mean_nssr80, test_median_nssr80 = cal_stats_metric(nssr80)
+            test_mean_nssr90, test_median_nssr90 = cal_stats_metric(nssr90)
+
+            test_recovery = ((all_logits.argmax(dim=1) == all_seq.argmax(dim=1)).sum() / all_seq.shape[0]).item()
+            test_perplexity = self.evaluator.cal_perplexity(all_logits, all_seq)
+            scrmsd_t = torch.tensor(scrmsd_values)
+
+            print(f'test median recovery rate with best model (step: {self.best_val_step}) is {test_median_recovery}')
+            print(f'test perplexity with the best model (step: {self.best_val_step}) is: {test_perplexity}')
+            print(f'test scRMSD with the best model (step: {self.best_val_step}) is: '
+                  f'{scrmsd_t.mean().item():.3f} +/- {scrmsd_t.std().item():.3f}')
+            self.test_table.add_row([self.best_val_epoch, self.best_val_step, test_median_recovery, test_perplexity,
+                                      scrmsd_t.mean().item()])
+
+            if self.wandb_run:
+                self.wandb_run.log({
+                    'test_full_recovery_with_best_model': test_recovery,
+                    'test_perplexity_with_best_model': test_perplexity,
+                    'test_median_recovery_with_best_model': test_median_recovery,
+                    'test_mean_recovery_with_best_model': test_mean_recovery,
+                    'test_median_nssr42_with_best_model': test_median_nssr42,
+                    'test_median_nssr62_with_best_model': test_median_nssr62,
+                    'test_median_nssr80_with_best_model': test_median_nssr80,
+                    'test_median_nssr90_with_best_model': test_median_nssr90,
+                    'test_scrmsd_mean_with_best_model': scrmsd_t.mean().item(),
+                    'test_scrmsd_std_with_best_model': scrmsd_t.std().item(),
+                    'test_aa_confusion_matrix': build_confusion_matrix_image(
+                        global_confusion_mat, 'Test Amino Acid Confusion Matrix'),
+                })

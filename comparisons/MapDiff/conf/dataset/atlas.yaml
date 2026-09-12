@@ -1,0 +1,14 @@
+name: ATLAS
+train_dir: ./surffold_data/atlas_process/train/
+# Fold 0 of atlas_cross_val_index.csv doubles as both validation and test -- the same
+# split scripts/train_residue_classifier.py and comparisons/{gvp-pytorch,DynamicMPNN}/train.py
+# use, which only holds out one fold. See ../../data/generate_graph_atlas.py.
+val_dir: ./surffold_data/atlas_process/validation/
+test_dir: ./surffold_data/atlas_process/validation/
+
+# Proteins longer than this (in residues) are dropped -- must match
+# model.ipa_pe_max_len, which sizes the IPA node encoder's fixed
+# positional-encoding table.
+max_length: 1200
+
+marginal_train_dir: ./surffold_data/train_marginal_x_atlas.pt

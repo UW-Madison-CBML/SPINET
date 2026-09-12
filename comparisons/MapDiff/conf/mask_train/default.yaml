@@ -1,0 +1,16 @@
+# Stage-1 hyperparameters: mask-prior IPA pretraining (MapDiffTrainer.fit_prior).
+# Matches upstream conf/train/train_mask_ipa.yaml, with train_epochs trimmed
+# down to match the diffusion stage's quick-iteration default (conf/train/train_diff.yaml).
+lr: 5e-4
+weight_decay: 0
+scheduler: True
+
+train_epochs: 8
+batch_size: 8
+clip_grad_norm: 1.0
+save_epochs: 50
+
+candi_rate: 0.6
+mask_rate: 0.8
+replace_rate: 0.1
+keep_rate: 0.1

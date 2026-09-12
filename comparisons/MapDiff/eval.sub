@@ -1,0 +1,62 @@
+# CHTC HTCondor submit file for evaluating a trained MapDiff checkpoint on
+# the ATLAS validation/test split (fold 0, Docker universe, GPU), logging
+# results (including self-consistency RMSD) to W&B.
+#
+# Setup (one-time): same image as training -- see train.sub / README.md.
+#
+# Prerequisite: a trained diffusion checkpoint from train.sub
+# (./results/atlas_mapdiff_<Cluster>_<Process>/outputs/.../model/*.pt) and
+# that same run's resolved config (.../outputs/.../configs/config.yaml).
+# HTCondor's file transfer drops files in flat (no subdirectories), so
+# fill in the actual paths below (see FIXME) after your training job
+# finishes -- rename the local copies to checkpoint.pt / config.yaml.
+#
+# Submit:
+#   mkdir -p logs && condor_submit eval.sub
+
+universe                = docker
+docker_image            = cmikulski4/mapdiff:v1
+
+executable              = eval.sh
+# Forwarded verbatim to `python eval_atlas.py ...` -- see eval_atlas.py.
+# --checkpoint/--config point at the files transferred in flat below (HTCondor
+# flattens transferred paths, so $(CHECKPOINT) lands in the job's scratch root).
+arguments               = --checkpoint ./$(CHECKPOINT) --config ./config.yaml --atlas-h5 ./atlas_data.h5 --cross-val-csv ./atlas_cross_val_index.csv --wandb_key_file ./wandb_api.txt
+
+# Which trained run to evaluate. RUN_DIR is one of train.sub's output
+# directories (transfer_output_remaps drops them under ./results/) and
+# CHECKPOINT is the .pt inside its model/ subdir -- override both on the
+# command line rather than editing this file:
+#
+#   condor_submit eval.sub \
+#       RUN_DIR=./results/atlas_mapdiff_6200001_0/atlas_mapdiff_2026-09-12_10-00-00 \
+#       CHECKPOINT=atlas_mapdiff_best_8_epochs_10641_steps_2026-09-12_12-30-00.pt
+RUN_DIR                 = ./results/diffusion_6144182_0/atlas_diffusion_2026-09-01_20-11-39
+CHECKPOINT              = atlas_mapdiff_best.pt
+
+# The pristine MapDiff tarball, this folder's ATLAS/wandb/scRMSD additions,
+# the eval script, the trained checkpoint + its resolved Hydra config, the
+# API-key file (eval.sh splits the W&B key out of it into wandb_api.txt),
+# lib/scrmsd.py + lib/stats_utils.py + lib/atlas_frame_pdb.py, scripts/load_dynamics.py,
+# and the shared ATLAS hdf5 store + cross-validation index.
+transfer_input_files    = eval.sh, eval_atlas.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/atlas_frame_pdb.py, ../../scripts/load_dynamics.py, MapDiff.tar.gz, $(RUN_DIR)/model/$(CHECKPOINT), $(RUN_DIR)/configs/config.yaml, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+
+log                     = logs/eval_$(Cluster)_$(Process).log
+output                  = logs/eval_$(Cluster)_$(Process).out
+error                   = logs/eval_$(Cluster)_$(Process).err
+
+request_gpus            = 1
+request_cpus            = 4
+request_memory          = 16GB
+request_disk            = 30GB
+
+# ESMFold download needs internet access -- pin to the same machine
+# scripts/train_residue_classifier.sub uses for that reason.
+Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
++WantGPULab             = true
++GPUJobLength           = "short"
+
+queue 1
