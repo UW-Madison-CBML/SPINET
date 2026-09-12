@@ -414,7 +414,7 @@ class InitDynamicsEmbedding(MessagePassing):
         agg_flat = agg.view(x.shape[0], self.hidden_dim)
           
         # nonlinearity 
-        return self.mlp(agg)
+        return self.mlp(agg_flat)
 
     def message(self, x_i, x_j, edge_attr, maps):
         if not self.ablate_sheaves:

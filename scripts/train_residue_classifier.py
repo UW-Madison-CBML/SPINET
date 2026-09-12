@@ -223,7 +223,7 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 64
+    batch_size = 1
     hidden_dim = 64
     stalk_dim = 16
     num_blocks = 6
@@ -238,7 +238,7 @@ def train_residue_classifier(args_dict):
     paradigm = args_dict["paradigm"]
     num_timesteps = 128 if paradigm == "dynamic" else 1
     use_scheduler=False
-    test_val = False
+    test_val = True
     use_profiler = False
     resume_model_name = args_dict["resume"]
     resume = args_dict["resume"] != ""
