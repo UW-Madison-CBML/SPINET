@@ -169,7 +169,9 @@ class SheafAttentionConv(MessagePassing):
             nn.init.xavier_uniform_(self.att)
         self.leaky = nn.LeakyReLU(0.2)
 
-        self.project_concat = nn.Sequential(nn.Linear(self.num_heads * self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
+
+        self.update_linear = nn.Sequential(nn.Linear((self.num_heads + 1) * self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
+
         if not self.ablate_sheaves:
             if self.restriction_map_type == "low_rank":
                 self.sheaf_learner = SheafLearnerLowRank(self.hidden_dim, self.stalk_dim, self.stalk_dim//2)
@@ -197,10 +199,9 @@ class SheafAttentionConv(MessagePassing):
          
         out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps) # num_edges, num_heads, c, d
         if return_sheaf and not self.ablate_sheaves:
-            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim)), maps[:,0,:,:]
+            return out, maps[:,0,:,:]
         else:
-            return self.project_concat(out.view(x.shape[0], self.num_heads * self.hidden_dim))
-
+            return out 
     def message(self, x_i, x_j, x_stalk_i, x_stalk_j, maps, index, ptr, size_i):
         
         edge_features = torch.cat([x_i, x_j], dim=-1) 
@@ -234,6 +235,16 @@ class SheafAttentionConv(MessagePassing):
             transported = transformed_j
         alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
         return (alpha * transported).permute(1,0,2,3).contiguous() # multiplication by alpha serves as our dropout here
+
+        def update(self, aggr_out, x):
+            if(x.ndim > 2):
+                x = x.view(x.shape[0], self.hidden_dim)
+            if(aggr_out.ndim > 2):
+                aggr_out = aggr_out.view(aggr_out.shape[0], self.hidden_dim * self.num_heads)
+
+            return self.update_linear(torch.cat([x, aggr_out], dim=-1))
+
+
     
 class SheafResidualSANBlock(nn.Module):
     def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):
@@ -432,9 +443,6 @@ class InitDynamicsEmbedding(MessagePassing):
     
         return transported
 
-#def update(self, aggr_out, x):
-#    return self.update_linear(torch.cat([x, aggr_out], dim=-1))
-
 
 class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config=None, atoms=["CA", "N", "C", "O"], paradigm="dynamic", frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True, use_masking=True):
@@ -495,9 +503,11 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.use_masking = config.use_masking
                 self.paradigm = config.paradigm
         
-        self.init_dynamics_embedding = InitDynamicsEmbedding(12, -1, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, paradigm = self.paradigm, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
-        if self.use_masking: 
-            self.label_embedding = nn.Embedding(self.num_classes, self.hidden_dim)
+        #self.init_dynamics_embedding = InitDynamicsEmbedding(12, -1, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, paradigm = self.paradigm, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
+        
+        self.project_nodes = nn.Linear(12, self.hidden_dim)
+        self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
+
 
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
 
@@ -511,12 +521,12 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         )
 
     def forward(self, data, return_sheaf=False):
-            
-        data.x = self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
 
-        if self.use_masking:
-            # add the residue label embedding to unmasked nodes
-            data.x = data.x + self.label_embedding(data.y) * data.node_mask[:,None]
+        #self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
+    
+        data.x = self.project_node(data.x) 
+        _, h = self.node_temporal_product(data.x)
+        data.x = h.squeeze(0)
 
         # run sheaf attention
         if return_sheaf:

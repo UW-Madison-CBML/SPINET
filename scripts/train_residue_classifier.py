@@ -66,7 +66,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
 
             for i, gt_data in enumerate(gt_list):
                 pred_data = data_list[i]
-                pred_pdbs.append(gt_data.traj_id if isinstance(gt.traj_id, str) else gt_data.traj_id[0])
+                pred_pdbs.append(gt_data.traj_id if isinstance(gt_data.traj_id, str) else gt_data.traj_id[0])
 
                 pred_idx = pred_data.x.argmax(dim=-1) # (R_i,) predicted class index per residue, protein i (R_i = residue count, varies per protein)
 
@@ -140,6 +140,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
         prf_dict[f"{val_name}_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
         prf_dict[f"{val_name}_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
     pred_string_df = pd.DataFrame({"pdb":pred_pdbs, "seq":pred_seqs})
+    prf_dict["pred_seqs"] = wandb.Table(dataframe=pred_string_df)
 
     # perplexity score
     perplexities = torch.exp(torch.tensor(losses))  # losses/perplexities: (total_proteins,) -- one scalar per protein, accumulated across every batch in the loader
@@ -463,8 +464,8 @@ def train_residue_classifier(args_dict):
         # Validation Check
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
 
-        if not ablate_sheaves:
-            interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
+        #if not ablate_sheaves:
+        ##    interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
 
     run.finish()
 
