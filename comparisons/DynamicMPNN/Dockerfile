@@ -147,13 +147,14 @@ import numpy, pandas, scipy, sklearn, matplotlib; matplotlib.use('Agg');\
 import matplotlib.pyplot, h5py, mdtraj, requests, urllib3, tqdm, joblib;\
 import Bio, biopandas, aiofiles, aiohttp, dotenv, rich, loguru, omegaconf, hydra;\
 import beartype, jaxtyping, einops, wandb, lovely_tensors, typing_extensions;\
+from importlib.metadata import version as _v;\
 import torch, torch_geometric, torch_scatter, torch_cluster, pytorch_lightning;\
 import graphein, graphein.protein.tensor.data, graphein.protein.tensor.edges;\
 from torch_geometric.nn.pool import knn_graph;\
 from sklearn.metrics import ConfusionMatrixDisplay;\
 from transformers import AutoTokenizer, EsmForProteinFolding;\
 print('numpy', numpy.__version__, '| pandas', pandas.__version__);\
-print('wandb', wandb.__version__, '| typing-extensions', typing_extensions.__version__);\
+print('wandb', wandb.__version__, '| typing-extensions', _v('typing_extensions'));\
 print('torch', torch.__version__, torch.version.cuda, '| pyg', torch_geometric.__version__);\
 print('DEP CHECK OK')"
 

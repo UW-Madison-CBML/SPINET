@@ -1,8 +1,14 @@
-docker_image = cmikulski4/dynamicmpnn:v7
+docker_image = cmikulski4/dynamicmpnn:v8
 universe = docker
 
 
-shell = ./train.sh 
+# --from-scratch is a DELIBERATE experimental choice, not a workaround. checkpoints/
+# single_chain_k*.ckpt does work here (36.0% recovery on our ATLAS data via zenodo_compare.py,
+# matching 35.8% on upstream's own val set) -- but it was pretrained on upstream's
+# train_pt_single_chain set, which the sheaf model this is benchmarked against never sees.
+# Fine-tuning from it would make the comparison measure pretraining, not architecture.
+# Both models train on ATLAS alone.
+shell = ./train.sh --from-scratch
 
 log = logs/train_$(Cluster)_$(Process).log
 error = logs/train_$(Cluster)_$(Process).err
@@ -12,8 +18,7 @@ should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 # ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time, so this
 # needs a machine with internet access -- same one scripts/train_residue_classifier.sub uses.
-Requirements = (Target.HasCHTCStaging == true) 
-# && (Machine == "bhaskargpu4000.chtc.wisc.edu")
+Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
 
 
@@ -21,8 +26,11 @@ transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, ../../lib/scrmsd.
 
 
 request_cpus = 8
-request_memory = 64GB
+request_memory = 128GB
 request_disk = 128GB
 request_gpus = 1
+
++WantGPULab             = true
++GPUJobLength           = "long"
 
 queue 1

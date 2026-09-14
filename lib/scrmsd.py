@@ -26,7 +26,9 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
     if mask is not None:
         assert mask.any(dim=-1).all().item(), "each molecule must have at least one atom"
 
-        mask = mask.to(device)
+        # einsum's CUDA path has no bool kernel ("baddbmm_cuda" not implemented for 'Bool'),
+        # and callers pass a bool validity mask -- match P's dtype up front.
+        mask = mask.to(device=device, dtype=P.dtype)
 
         mask_extra_dim = mask.unsqueeze(-1) # so that it broadcasts
 
@@ -95,11 +97,21 @@ def load_esmfold(
     model_name: str = "facebook/esmfold_v1",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     dtype: torch.dtype = torch.float32,
+    chunk_size: int = 64,
 ):
+    """`chunk_size` chunks ESMFold's triangular attention/multiplication along the residue axis.
+
+    The folding trunk's attention logits are ~B*heads*L^3 floats, so a single ~1100-residue
+    protein asks for a 44 GiB softmax and OOMs even a 140 GiB GPU. Chunking trades a modest
+    slowdown for a large drop in peak memory; `None` restores the unchunked default.
+    """
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = EsmForProteinFolding.from_pretrained(model_name, low_cpu_mem_usage=True)
     model = model.to(device=device, dtype=dtype)
     model.eval()
+    trunk = getattr(model, "trunk", None)
+    if chunk_size is not None and hasattr(trunk, "set_chunk_size"):
+        trunk.set_chunk_size(chunk_size)
 
     return tokenizer, model
 
@@ -112,26 +124,45 @@ def fold_sequences(
     device: str = None,
 ):
     
-    device = device or next(model.parameters()).device
+    device = torch.device(device) if device is not None else next(model.parameters()).device
+    bb_idx = [BACKBONE_ATOM14_IDX[atom] for atom in BACKBONE_ATOMS]
 
-    inputs = tokenizer(
-        seqs,
-        return_tensors="pt",
-        padding=True,
-        add_special_tokens=False,  # ESMFold doesn't use BOS/EOS
-    )
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    # Folded one at a time, then padded back to the batch's longest. Folding the padded batch
+    # in one call costs B * L_max^3 in the trunk's attention -- a short sequence batched with a
+    # long one gets folded at the long one's length. Peak memory here is that of the single
+    # longest sequence instead, and the (B, L_max, ...) return contract is unchanged.
+    per_seq = []
+    for seq in seqs:
+        inputs = tokenizer(
+            [seq],
+            return_tensors="pt",
+            padding=False,
+            add_special_tokens=False,  # ESMFold doesn't use BOS/EOS
+        )
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    outputs = model(**inputs)
+        outputs = model(**inputs)
 
-    positions = outputs.positions
-    if positions.dim() == 6:
-        positions = positions[-1]
-    atom14 = positions[-1]  # (B, L, 14, 3) — final structure-module layer
+        positions = outputs.positions
+        if positions.dim() == 6:
+            positions = positions[-1]
+        atom14 = positions[-1]  # (1, L, 14, 3) — final structure-module layer
 
-    backbone_pos = atom14[:, :, [BACKBONE_ATOM14_IDX[atom] for atom in BACKBONE_ATOMS], :].float()  # (B, L, 4, 3)
+        per_seq.append((atom14[:, :, bb_idx, :].float().squeeze(0),      # (L, 4, 3)
+                        inputs["attention_mask"].bool().squeeze(0)))     # (L,)
+        del outputs, positions, atom14, inputs
+        if device.type == "cuda":
+            # the trunk's transient pair tensors fragment the caching allocator badly enough
+            # that the next, longer sequence can OOM on otherwise-free memory
+            torch.cuda.empty_cache()
 
-    mask = inputs["attention_mask"].bool()  # (B, L)
+    L_max = max(int(m.shape[0]) for _, m in per_seq)
+    backbone_pos = torch.zeros(len(per_seq), L_max, len(bb_idx), 3,
+                               dtype=per_seq[0][0].dtype, device=device)
+    mask = torch.zeros(len(per_seq), L_max, dtype=torch.bool, device=device)
+    for i, (bb, m) in enumerate(per_seq):
+        backbone_pos[i, : bb.shape[0]] = bb
+        mask[i, : m.shape[0]] = m
 
     return backbone_pos, mask
  

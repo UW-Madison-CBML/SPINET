@@ -4,12 +4,14 @@ Pipeline (see README.md for the full reasoning):
   1. For every pdb in atlas_cross_val_index.csv, pull its trajectory out of the ATLAS hdf5
      store, compute a pairwise (Kabsch) CA/backbone RMSD matrix, and farthest-point-sample a
      small pool of structurally distinct frames.
+     * Should replace pairwise matrix calculation with Jens' script.
   2. Repack that pool into DynamicMPNN's `.pt` schema (`pyg_dict` + `cluster_members`), which is
      exactly what `ProteinGraphFeaturiserSingleChain` / `PTFileDataset` expect.
   3. Train using fold 0 of atlas_cross_val_index.csv as the only validation fold (folds 1-4 train).
+     * Must update to use full 5-fold CV 
 
-Logs to a single Weights & Biases run (a la scripts/train_residue_classifier.py /
-comparisons/MapDiff/trainer.py): per-step train loss, per-epoch validation recovery
+Logs to a single Weights & Biases run:
+per-step train loss, per-epoch validation recovery
 (top-1/5/10) + perplexity, an amino-acid confusion matrix, and scRMSD (predicted sequence
 folded with ESMFold, Kabsch-RMSD'd against the protein's ground-truth backbone).
 """
@@ -69,6 +71,16 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ATLAS hdf5 stores backbone atoms in this order; DynamicMPNN's "ca_bb" representation
 # expects the first 3 atom channels to be N, CA, C (graphein's PROTEIN_ATOMS convention).
 NCA_C_ATOM_IDX = [BACKBONE_ATOMS.index(atom) for atom in ("N", "CA", "C")]
+
+# ATLAS coordinates come from `traj.xyz` (scripts/load_dynamics.py:81), and mdtraj stores xyz
+# in NANOMETRES -- process_traj never converts. DynamicMPNN was trained on Angstroms: upstream's
+# own val_pt_single_chain files measure N-CA 1.459 / CA-C 1.525 / C(i)-N(i+1) 1.329 A. Feeding nm
+# leaves knn topology and all the angle features (alpha/kappa/dihedrals) untouched -- they are
+# scale-invariant -- but compresses every `edge_distance` / `rbf_16` channel into the lowest bin,
+# which is why single_chain_k2.ckpt scored 35.8% recovery on upstream .pt files and 7.3% (loss
+# 116) on ours. It is also why 38/40 trajectories tripped the "near-flat RMSD < 1.0 A" warning:
+# that threshold was being compared against nanometre RMSDs.
+NM_TO_ANGSTROM = 10.0
 GAP_TOKEN = len(BASE_AMINO_ACIDS)      # 20
 UNKNOWN_TOKEN = len(BASE_AMINO_ACIDS) + 1  # 21
 
@@ -184,9 +196,10 @@ def build_ensemble(
     subsample `k` of them at train/val time -- exactly how the multi-chain codnas pipeline
     defers pair/subset selection to the featurizer instead of preprocessing.
     """
-    coords_ds = h5_file[group_name + "/coordinates"]  # num_res, T, num_atoms, 3
+    coords_ds = h5_file[group_name + "/coordinates"]  # num_res, T, num_atoms, 3 (NANOMETRES)
 
-    coarse_coords = torch.from_numpy(coords_ds[:, ::course_grain]).permute(1, 0, 2, 3).float()
+    coarse_coords = (torch.from_numpy(coords_ds[:, ::course_grain]).permute(1, 0, 2, 3).float()
+                     * NM_TO_ANGSTROM)
     T_coarse = coarse_coords.shape[0]
     i_idx, j_idx = torch.triu_indices(T_coarse, T_coarse, offset=1)
 
@@ -197,7 +210,7 @@ def build_ensemble(
     real_frame_idx = sorted(int(c) * course_grain for c in coarse_states)
 
     residue_type = residues_to_type_ids(h5_file[group_name + "/residues"][:])
-    pool_frames = coords_ds[:, real_frame_idx]  # num_res, pool, num_atoms, 3
+    pool_frames = coords_ds[:, real_frame_idx] * NM_TO_ANGSTROM  # num_res, pool, num_atoms, 3
 
     pyg_dict = {}
     for pool_pos, frame_idx in enumerate(real_frame_idx):
@@ -282,12 +295,23 @@ def load_pretrained_weights(model: torch.nn.Module, ckpt_path: Path) -> None:
     state_dict = checkpoint.get("state_dict", checkpoint)
     prefix = "GNN_model."
     stripped = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
+    if not stripped:
+        raise RuntimeError(f"No '{prefix}' keys found in {ckpt_path.name}; nothing to load.")
     missing, unexpected = model.load_state_dict(stripped, strict=False)
-    if missing:
-        logger.warning(f"Missing keys loading {ckpt_path.name}: {missing}")
-    if unexpected:
-        logger.warning(f"Unexpected keys loading {ckpt_path.name}: {unexpected}")
-    logger.info(f"Loaded pretrained weights from {ckpt_path}")
+    # `strict=False` is needed only to tolerate the checkpoint's Lightning wrapper keys; any
+    # remaining delta means part of the model is still randomly initialised. Fail here rather
+    # than train on it. NB: a clean load is necessary but NOT sufficient -- both released
+    # checkpoints load 100% cleanly into this architecture and still score at chance, so
+    # validate any new checkpoint by eval recovery, not by key counts (see probe_init.py).
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Partial load of {ckpt_path.name} ({len(stripped)} checkpoint tensors): "
+            f"{len(missing)} missing key(s) {sorted(missing)}, "
+            f"{len(unexpected)} unexpected key(s) {sorted(unexpected)}. "
+            "Reconcile the model config with the checkpoint's hyper_parameters, "
+            "or pass --from-scratch."
+        )
+    logger.info(f"Loaded pretrained weights from {ckpt_path} ({len(stripped)} tensors)")
 
 
 def top_k_acc(logits: torch.Tensor, targets: torch.Tensor, k: int) -> float:
@@ -496,6 +520,16 @@ def main():
     model_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "model" / "AR1_single_chain.yaml")
     features_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "features" / "ca_bb_single_chain.yaml")
     features_cfg.k = args.k
+    # Used exactly as shipped -- this pairing IS the repo's own `experiment=single_chain_k_conf`
+    # (configs/experiment/single_chain_k_conf.yaml overrides nothing but `features.k`), i.e. the
+    # architecture the authors train for single-chain. We train it from scratch on ATLAS; see
+    # train.sub for why we deliberately do not fine-tune from checkpoints/single_chain_k*.ckpt.
+    #
+    # That checkpoint needs a DIFFERENT config than this one (26 node / 17 edge scalars, 4+4
+    # layers, representation=ca -- recorded in its own hyper_parameters, and reproduced by
+    # zenodo_compare.py:match_single_chain_ckpt). It is a useful instrument for validating the
+    # ATLAS conversion -- a pretrained model scoring ~36% recovery proves our features are real
+    # protein geometry, which a from-scratch run cannot tell you -- but it is not our init.
 
     model = hydra.utils.instantiate(model_cfg).to(DEVICE)
 
