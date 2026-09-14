@@ -248,6 +248,7 @@ def train_residue_classifier(args_dict):
     nth_cross_val = args_dict["cross_val"]
     assert nth_cross_val >= 0 and nth_cross_val < 5
     ds_name = args_dict["ds_name"]
+    ablate_to_rgnn = args_dict["ablate_to_rgnn"]
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -350,22 +351,25 @@ def train_residue_classifier(args_dict):
     # set up new diffusion model # TODO fix all this
     # ---------------------------------------------
 
-    model = NodeSheafClassifier(
-        paradigm=paradigm,
-        atoms=BACKBONE_ATOMS,
-        frame_origin="CA",
-        num_classes=num_classes,
-        hidden_dim=hidden_dim,
-        stalk_dim=stalk_dim,
-        num_blocks=num_blocks,
-        num_heads=num_heads,
-        ablate_sheaves=ablate_sheaves,
-        num_timesteps=num_timesteps,
-        restriction_map_type=restriction_map_type,
-        use_attention=use_attention,
-        use_masking=use_masking
-    ).to(DEVICE)
+    if not ablate_to_rgnn:
+        model = NodeSheafClassifier(
+            paradigm=paradigm,
+            atoms=BACKBONE_ATOMS,
+            frame_origin="CA",
+            num_classes=num_classes,
+            hidden_dim=hidden_dim,
+            stalk_dim=stalk_dim,
+            num_blocks=num_blocks,
+            num_heads=num_heads,
+            ablate_sheaves=ablate_sheaves,
+            num_timesteps=num_timesteps,
+            restriction_map_type=restriction_map_type,
+            use_attention=use_attention,
+            use_masking=use_masking
+        ).to(DEVICE)
 
+    else:
+        model = RGNN(15, 13, hidden_dim, hidden_dim).to(device)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run.log({"params": pytorch_total_params})
@@ -464,8 +468,8 @@ def train_residue_classifier(args_dict):
         # Validation Check
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
 
-        #if not ablate_sheaves:
-        ##    interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
+        if not ablate_sheaves and not ablate_to_rgnn:
+            interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
 
     run.finish()
 
@@ -478,11 +482,11 @@ if __name__ == "__main__":
     parser.add_argument('--ablate-sheaves', action="store_true")
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
-    parser.add_argument('--paradigm', type=str, default="dynamic", choices = ['dynamic', 'static', 'ensemble'])
     parser.add_argument('--resume', type=str, default="")
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--cross-val', type=int, default=0)
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
+    parser.add_argument('--ablate-to-rgnn', action="store_true")
 
     args = parser.parse_args()
     train_residue_classifier(vars(args))
