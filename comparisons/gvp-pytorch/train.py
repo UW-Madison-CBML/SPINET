@@ -143,7 +143,7 @@ def main(use_pdbs=False, majority_voting=False):
                 edges = (batch.edge_s, batch.edge_v)
                 logits = model(nodes, batch.edge_index, edges, batch.seq)
                 
-                if batch.mask.any():
+                if batch.mask.any().item():
                     print("mask is on for val; may cause issue with downstream residue sizes")
                 num_proteins_in_batch = batch.batch.max().item() + 1        
                 for p_idx in range(num_proteins_in_batch):
@@ -166,7 +166,7 @@ def main(use_pdbs=False, majority_voting=False):
                     names.append(name)
                     idxs.append(idx)
                     seq_preds = masked_logits.argmax(dim=-1).cpu().tolist()
-                    seqs.append("".join([val_dataset.num_to_letter(pred) for pred in seq_preds]))
+                    seqs.append("".join([val_dataset.num_to_letter[pred] for pred in seq_preds]))
 
         seq_pred_df = pd.DataFrame({"seq":seqs, "idx":idxs, "name":names})
         seq_pred_df.to_csv(os.path.join("..", f"seq_pred_df_{epoch}.csv"))

@@ -44,7 +44,9 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
     f1s = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
     precisions = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
     recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
-    
+    pred_seqs = []
+    pred_pdbs = []
+
     with torch.no_grad():
         for batch in tqdm(loader if not test_val else itertools.islice(loader,100), desc=f"Epoch {epoch} {val_name}", leave=False):
 
@@ -62,10 +64,9 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
             data_list = out_batch.to_data_list() # list of B per-protein Data objects (model output)
             gt_list = batch.to_data_list()  # list of B per-protein Data objects (ground truth)
 
-            pred_seqs = []
-
             for i, gt_data in enumerate(gt_list):
                 pred_data = data_list[i]
+                pred_pdbs.append(gt_data.traj_id if isinstance(gt_data.traj_id, str) else gt_data.traj_id[0])
 
                 pred_idx = pred_data.x.argmax(dim=-1) # (R_i,) predicted class index per residue, protein i (R_i = residue count, varies per protein)
 
@@ -76,7 +77,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
                 seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])  # length-R_i amino-acid string
                 pred_seqs.append(seq_str )  # accumulates to B entries, insertion order == gt_list order
 
-            # Get gt coordinates from trajectory
+            """# Get gt coordinates from trajectory
             traj_tensors = [prot.pos for prot in gt_list]
 
             lengths = torch.tensor([traj_tensor.shape[0] for traj_tensor in traj_tensors])  # (B,) residue count R_i per protein
@@ -89,7 +90,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
             gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])[:, None, :].repeat(1, backbone_tensor.shape[1], 1)  # (B, T, pad_size) bool
 
             rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask, esmfold_model, esmfold_tokenizer, device=device)
-            scrmsd.extend(rmsd.tolist())
+            scrmsd.extend(rmsd.tolist())"""
 
             out_batch = out_batch.cpu()
             batch = batch.cpu()
@@ -138,15 +139,17 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
         prf_dict[f"{val_name}_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
         prf_dict[f"{val_name}_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
         prf_dict[f"{val_name}_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
+    pred_string_df = pd.DataFrame({"pdb":pred_pdbs, "seq":pred_seqs})
+    prf_dict["pred_seqs"] = wandb.Table(dataframe=pred_string_df)
 
     # perplexity score
     perplexities = torch.exp(torch.tensor(losses))  # losses/perplexities: (total_proteins,) -- one scalar per protein, accumulated across every batch in the loader
     prf_dict[f"{val_name}_perp_mean"] = (pm := perplexities.mean().item())
     prf_dict[f"{val_name}_perp_std"] = (ps := perplexities.std().item())
 
-    scrmsd = torch.tensor(scrmsd)
-    prf_dict[f"{val_name}_rmsd_mean"] = scrmsd.mean().item()
-    prf_dict[f"{val_name}_rmsd_std"] = scrmsd.std().item()
+    #scrmsd = torch.tensor(scrmsd)
+    #prf_dict[f"{val_name}_rmsd_mean"] = scrmsd.mean().item()
+    #prf_dict[f"{val_name}_rmsd_std"] = scrmsd.std().item()
 
     acc_top_1 = torch.tensor(acc_top_1)
     acc_top_5 = torch.tensor(acc_top_5)
@@ -223,10 +226,10 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 64
-    hidden_dim = 32
-    stalk_dim = 8
-    num_blocks = 8
+    batch_size = 16
+    hidden_dim = 64
+    stalk_dim = 16
+    num_blocks = 6
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
@@ -244,6 +247,7 @@ def train_residue_classifier(args_dict):
     resume = args_dict["resume"] != ""
     nth_cross_val = args_dict["cross_val"]
     assert nth_cross_val >= 0 and nth_cross_val < 5
+    ds_name = args_dict["ds_name"]
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -263,22 +267,24 @@ def train_residue_classifier(args_dict):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ATLAS
-    # h5_path = os.path.abspath("atlas_data.h5")
-    # index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
+    if ds_name == "atlas":
+        h5_path = os.path.abspath("atlas_data.h5")
+        index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
 
-    # val_mask = index["cross_val"] == 0
+        val_mask = index["cross_val"] == 0
 
-    # val_pdbs = index[val_mask]["pdb"].to_list()
-    # train_pdbs = index[~val_mask]["pdb"].to_list()
+        val_pdbs = index[val_mask]["pdb"].to_list()
+        train_pdbs = index[~val_mask]["pdb"].to_list()
 
     # mdCATH
-    h5_path = os.path.abspath("mdcath_spinet_320_0.h5")
-    index = pd.read_csv(os.path.abspath("mdcath_320_0_topology_split.csv"))
+    else:
+        h5_path = os.path.abspath("mdcath_spinet_320_0.h5")
+        index = pd.read_csv(os.path.abspath("mdcath_320_0_topology_split.csv"))
 
-    # train_pdbs = index[index["split"] == "train"]["domain"].tolist()
-    # test_pdbs = index[index["split"] == "test"]["domain"].tolist()
-    train_pdbs = index[index["split"].isin(["train", "test"])]["domain"].tolist()
-    val_pdbs = index[index["split"] == "validation"]["domain"].tolist()
+        # train_pdbs = index[index["split"] == "train"]["domain"].tolist()
+        # test_pdbs = index[index["split"] == "test"]["domain"].tolist()
+        train_pdbs = index[index["split"].isin(["train", "test"])]["domain"].tolist()
+        val_pdbs = index[index["split"] == "validation"]["domain"].tolist()
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -325,8 +331,8 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
-    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len=200)
+    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
+    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
 
     print("Train groups in this H5:", len(train_dataset.groups))
     print("Val groups in this H5:", len(val_dataset.groups))
@@ -359,6 +365,7 @@ def train_residue_classifier(args_dict):
         use_attention=use_attention,
         use_masking=use_masking
     ).to(DEVICE)
+
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run.log({"params": pytorch_total_params})
@@ -457,8 +464,8 @@ def train_residue_classifier(args_dict):
         # Validation Check
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
 
-        if not ablate_sheaves:
-            interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
+        #if not ablate_sheaves:
+        ##    interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
 
     run.finish()
 
@@ -475,5 +482,7 @@ if __name__ == "__main__":
     parser.add_argument('--resume', type=str, default="")
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--cross-val', type=int, default=0)
+    parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
+
     args = parser.parse_args()
     train_residue_classifier(vars(args))
