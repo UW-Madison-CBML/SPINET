@@ -32,6 +32,7 @@ from trainer import MapDiffTrainer
 # ../README.md and train.sh) -- fall back to walking up to a lib/ directory
 # for local/dev runs from inside the source tree.
 try:
+    import dataset_splits
     import stats_utils
     from scrmsd import load_esmfold
 except ImportError:
@@ -40,12 +41,53 @@ except ImportError:
         if os.path.isdir(_cand):
             sys.path.insert(0, os.path.abspath(_cand))
             break
+    import dataset_splits
     import stats_utils
     from scrmsd import load_esmfold
+
+# cfg.dataset.name -> lib/dataset_splits.py dataset name. CATH is upstream's own benchmark
+# and carries its own three directories, so it is not in the table.
+SPLIT_DATASETS = {'ATLAS': 'atlas', 'MDCATH': 'mdcath'}
 
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def split_file_ids(ds_name, index_csv, val_fold, directories):
+    """``{split: [<protein_id>.pt, ...]}`` for each processed graph directory.
+
+    Deliberately *not* ``os.listdir(dir)``: that trusts whatever happens to be on disk (a
+    stale file from an earlier fold, a half-finished featurization run) and returns it in
+    filesystem order. Driving the lists from the split index instead means this run trains on
+    fold-!=`val_fold` and evaluates on fold-`val_fold` exactly as
+    scripts/train_residue_classifier.py and comparisons/{PiFold,DynamicMPNN} do, whatever the
+    directories contain -- and the returned order is the index csv's, not the filesystem's.
+
+    Proteins the featurizer could not produce a graph for (no deposited entry, DSSP failure)
+    are reported rather than silently skipped: they are the main way two models' held-out sets
+    drift apart.
+    """
+    train_ids, val_ids = dataset_splits.get_splits(ds_name, index_csv, val_fold=val_fold)
+    # ATLAS and mdCATH both evaluate on the held-out split only -- 'val' and 'test' are the
+    # same proteins, and conf/dataset/*.yaml points both dirs at the same featurized copy.
+    wanted = {'train': train_ids, 'val': val_ids, 'test': val_ids}
+
+    present = {}
+    for split, protein_ids in wanted.items():
+        directory = directories[split]
+        files = [f'{protein_id}.pt' for protein_id in protein_ids
+                 if os.path.exists(os.path.join(directory, f'{protein_id}.pt'))]
+        missing = [p for p in protein_ids if f'{p}.pt' not in files]
+        if missing:
+            print(f'{split}: {len(missing)}/{len(protein_ids)} proteins in the split index have no '
+                  f'graph in {directory} and are skipped: {missing}')
+        if not files:
+            raise FileNotFoundError(
+                f'{split}: none of the {len(protein_ids)} proteins in the split index were featurized '
+                f'into {directory} -- run data/generate_graph_relaxed.py --ds-name {ds_name} first')
+        present[split] = files
+    return present
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="train")
@@ -55,7 +97,9 @@ def main(cfg: DictConfig):
     print(f"Output directory: {output_dir}")
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    set_seed()
+    # The one seed every comparison run uses (lib/dataset_splits.SEED), rather than each
+    # model's own upstream default.
+    set_seed(dataset_splits.SEED)
 
     if cfg.wandb.use:
         wandb_run = stats_utils.init_wandb(
@@ -76,15 +120,31 @@ def main(cfg: DictConfig):
     if cfg.dataset.name not in ('CATH', 'ATLAS', 'MDCATH'):
         raise ValueError(f"unknown dataset {cfg.dataset.name}")
 
-    train_ID = os.listdir(cfg.dataset.train_dir)
-    val_ID = os.listdir(cfg.dataset.val_dir)
-    test_ID = os.listdir(cfg.dataset.test_dir)
+    if cfg.dataset.name == 'CATH':
+        train_ID = sorted(os.listdir(cfg.dataset.train_dir))
+        val_ID = sorted(os.listdir(cfg.dataset.val_dir))
+        test_ID = sorted(os.listdir(cfg.dataset.test_dir))
+    else:
+        split_ids = split_file_ids(
+            SPLIT_DATASETS[cfg.dataset.name], cfg.dataset.get('index_csv') or None,
+            cfg.dataset.get('val_fold', dataset_splits.DEFAULT_VAL_FOLD),
+            {'train': cfg.dataset.train_dir, 'val': cfg.dataset.val_dir, 'test': cfg.dataset.test_dir})
+        train_ID, val_ID, test_ID = split_ids['train'], split_ids['val'], split_ids['test']
 
     train_dataset = Cath(train_ID, cfg.dataset.train_dir, max_length=cfg.dataset.max_length)
     val_dataset = Cath(val_ID, cfg.dataset.val_dir, max_length=cfg.dataset.max_length)
     test_dataset = Cath(test_ID, cfg.dataset.test_dir, max_length=cfg.dataset.max_length)
     print(f'Train on {cfg.dataset.name} dataset with {len(train_dataset)} training data, {len(val_dataset)} '
           f'val data, {len(test_dataset)} test data')
+
+    if wandb_run:
+        # The exact proteins this run trained and scored on, *after* the max_length filter --
+        # logged so PiFold's and DynamicMPNN's manifests can be diffed against it rather than
+        # assumed identical (all three cut the same split, but each drops what it cannot
+        # featurize).
+        wandb_run.summary['split_counts'] = {'train': len(train_dataset), 'val': len(val_dataset),
+                                              'test': len(test_dataset)}
+        wandb_run.summary['test_split_ids'] = [ID[:-3] for ID in test_dataset.list_IDs]
 
     # ---- stage 1: mask-prior IPA pretraining dataloader ----
     mask_collator = CollatorIPAPretrain(candi_rate=cfg.mask_train.candi_rate, mask_rate=cfg.mask_train.mask_rate,

@@ -111,6 +111,29 @@ Splits come from `lib/dataset_splits.py`, identical to
   **evaluation is on the `validation` rows only**, which likewise double as the test
   split (see `conf/dataset/mdcath.yaml`).
 
+`train.py` builds its three file lists *from the split index*, not from `os.listdir` of the
+processed-graph directories, so a stale `.pt` left behind by a run with a different
+`--val-fold` can never wander into the training set. The train-split amino-acid marginal
+(the diffusion model's `marginal` noise prior) is computed over that same id list for the
+same reason.
+
+### Keeping the comparison apples-to-apples
+
+`lib/dataset_splits.py` owns not just the partition but the three knobs that would
+otherwise silently make two models score different proteins, and every comparison model
+reads its defaults from there:
+
+| constant | value | why it has to be shared |
+| --- | --- | --- |
+| `DEFAULT_VAL_FOLD` | 0 | the fold `scripts/train_residue_classifier.py` hardcodes |
+| `MAX_LENGTH` | 1200 | MapDiff's IPA positional-encoding table is the binding limit; PiFold and DynamicMPNN apply the same cutoff so nobody is scored on proteins the others dropped. Keep it in step with `model.ipa_pe_max_len`. |
+| `SEED` | 42 | anything still drawing from an RNG (weight init, batch order, DynamicMPNN's k-of-pool conformer draw) |
+
+Cutting the same split is necessary but not sufficient: each model additionally drops
+whatever it cannot featurize (no deposited RCSB entry, a DSSP failure, too few usable
+conformers). So every run logs `split_counts` and `test_split_ids` to its W&B summary --
+diff those across runs to confirm the held-out sets really are the same proteins.
+
 The dataset's trajectory store and split index are staged on Pelican (see
 `train.sub`/`eval.sub`'s `transfer_input_files`); the store is read *only* for the
 reference residue sequences. `train.sh` runs `data/generate_graph_relaxed.py`, which for

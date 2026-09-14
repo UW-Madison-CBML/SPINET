@@ -119,6 +119,31 @@ class Exp:
 
     def _get_data(self):
         self.train_loader, self.valid_loader, self.test_loader = get_dataset(self.config)
+        self._log_split_manifest()
+
+    def _log_split_manifest(self):
+        """Record the exact protein ids in each split.
+
+        The split itself comes from `lib/dataset_splits.py`, so it is identical to
+        MapDiff's and DynamicMPNN's by construction -- but each model additionally drops
+        whatever it cannot featurize, and those drops are what make two held-out sets
+        silently diverge. Logging the surviving ids per run makes that diff checkable
+        instead of assumed.
+        """
+        datasets = {'train': self.train_loader.dataset, 'valid': self.valid_loader.dataset,
+                    'test': self.test_loader.dataset}
+        if not all(hasattr(ds, 'split_ids') for ds in datasets.values()):
+            return  # CATH/TS: upstream's own splits, nothing to reconcile
+
+        manifest = {name: ds.split_ids(name) for name, ds in datasets.items()}
+        for name, ids in manifest.items():
+            print_log('{} split: {} proteins'.format(name, len(ids)))
+        print_log('held-out (test) split ids: {}'.format(manifest['test']))
+
+        if self.run is not None:
+            self.run.summary['split_counts'] = {name: len(ids) for name, ids in manifest.items()}
+            self.run.summary['test_split_ids'] = manifest['test']
+            self.run.summary['dropped_proteins'] = getattr(datasets['test'], 'dropped', {})
 
     def train(self):
         recorder = Recorder(self.args.patience, verbose=True)

@@ -7,6 +7,16 @@ or `--ds-name mdcath` — matching `scripts/train_residue_classifier.py`. Splits
 `lib/dataset_splits.py`: ATLAS holds out one `cross_val` fold; mdCATH trains on its topology
 split's `train`+`test` rows and **evaluates on the `validation` rows only**.
 
+`--val-fold` (default 0, the fold `scripts/train_residue_classifier.py` hardcodes) selects
+which ATLAS fold is held out; the other four train, and the held-out fold is the only split
+scored. `--max-length` (default `lib/dataset_splits.MAX_LENGTH`) drops the same long proteins
+MapDiff and PiFold drop, and `--seed` (default `lib/dataset_splits.SEED`) seeds `random` and
+`np.random` as well as torch -- the featurizer picks which *k* of each protein's saved
+conformer pool to use with `random.sample`, once, at dataset-construction time, so leaving
+those unseeded would change the validation set itself from run to run. Each run logs
+`split_counts` and `test_split_ids` to its W&B summary, as MapDiff and PiFold do, so the
+three held-out sets can be diffed rather than assumed identical.
+
 `comparisons/{MapDiff,PiFold}` are static-structure models, so they were retargeted onto each
 protein's relaxed (deposited) PDB entry. DynamicMPNN is **not**: it consumes an ensemble of
 conformers sampled from the trajectory, and that ensemble input is exactly the thing being

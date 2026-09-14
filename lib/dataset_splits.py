@@ -13,10 +13,30 @@ are indexed differently:
   ``1a0aA02``), column `split` with values train/test/validation. `train` and `test` are a
   *topology-based* split of the training pool, so both train; **evaluation is on
   `validation` only**, matching train_residue_classifier.py.
+
+The module also owns the handful of *non-split* knobs that have to agree across models for
+the comparison to stay apples-to-apples -- which cross-validation fold is held out, how long
+a protein may be before it is dropped, and the RNG seed -- so that changing one of them
+changes it everywhere rather than in one model's argparse default.
 """
 import pandas as pd
 
 DATASETS = ("atlas", "mdcath")
+
+# Which ATLAS cross_val fold is held out. scripts/train_residue_classifier.py hardcodes fold
+# 0 (it reads `index["cross_val"] == 0`), so every comparison model defaults to the same one.
+# mdCATH ignores this -- its split column is categorical, not a fold index.
+DEFAULT_VAL_FOLD = 0
+
+# Proteins longer than this (in residues) are dropped, by every model, from every split.
+# The binding constraint is MapDiff's IPA node encoder, whose fixed positional-encoding table
+# is sized by `model.ipa_pe_max_len` (conf/model/egnn.yaml) -- but the cutoff has to be shared
+# or the models are scored on different proteins. Keep this and `ipa_pe_max_len` in step.
+MAX_LENGTH = 1200
+
+# One seed for every comparison run, so that anything still drawing from an RNG (DynamicMPNN's
+# k-of-pool conformer subsampling, weight init, batch order) is reproducible run to run.
+SEED = 42
 
 # Default file names as staged by the submit files (see scripts/train_residue_classifier.sub
 # and scripts/train_residue_classifier_mdcath.sub).
@@ -52,7 +72,7 @@ def _check(ds_name):
     return ds_name
 
 
-def get_splits(ds_name, index_csv=None, val_fold=0):
+def get_splits(ds_name, index_csv=None, val_fold=DEFAULT_VAL_FOLD):
     """``(train_ids, val_ids)`` for ``ds_name``.
 
     ``val_ids`` is the *only* evaluation split for both datasets -- for ATLAS it is the

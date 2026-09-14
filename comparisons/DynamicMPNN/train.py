@@ -16,9 +16,11 @@ Pipeline (see README.md for the full reasoning):
   2. Repack that pool into DynamicMPNN's `.pt` schema (`pyg_dict` + `cluster_members`), which is
      exactly what `ProteinGraphFeaturiserSingleChain` / `PTFileDataset` expect.
   3. Train on the dataset's training split, validate on its held-out split (lib/dataset_splits.py):
-     ATLAS holds out one `cross_val` fold; mdCATH trains on its topology split's train+test
-     rows and evaluates on `validation` ONLY.
-     * ATLAS must update to use full 5-fold CV
+     ATLAS holds out one `cross_val` fold (`--val-fold`, 0 by default -- the fold
+     scripts/train_residue_classifier.py and comparisons/{MapDiff,PiFold} also hold out);
+     mdCATH trains on its topology split's train+test rows and evaluates on `validation` ONLY.
+     Validation is also the only split scored: there is no further held-out test set.
+     * Running the other four ATLAS folds is a matter of repeating the job with --val-fold 1..4.
 
 ATLAS and mdCATH are trained and evaluated separately -- one run each (`--ds-name`) --
 matching scripts/train_residue_classifier.py.
@@ -31,6 +33,7 @@ folded with ESMFold, Kabsch-RMSD'd against the protein's ground-truth *relaxed* 
 
 import argparse
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -269,6 +272,35 @@ def build_processed_dataset(
         )
 
 
+def filter_by_length(pdb_ids: list, traj_h5_path: Path, max_length: int) -> list:
+    """Drop proteins longer than the shared residue cutoff (lib/dataset_splits.MAX_LENGTH).
+
+    DynamicMPNN itself has no length limit, but MapDiff does (its IPA node encoder's fixed
+    positional-encoding table) and PiFold applies the same cutoff so that the two see the same
+    proteins. Applying it here too is what keeps the *held-out set* identical across all three
+    -- otherwise DynamicMPNN would be scored on a handful of long proteins nothing else sees.
+    """
+    if not max_length:
+        return list(pdb_ids)
+
+    with h5py.File(traj_h5_path, "r") as h5_file:
+        group_lookup = index_h5_groups(h5_file)
+        lengths = {}
+        for pdb_id in pdb_ids:
+            group_name = resolve_group(pdb_id, group_lookup)
+            if group_name is not None:
+                lengths[pdb_id] = h5_file[group_name + "/residues"].shape[0]
+
+    # Ids with no trajectory group keep a length of 0 and pass here; `build_processed_dataset`
+    # is the one that warns about and skips them.
+    kept = [p for p in pdb_ids if lengths.get(p, 0) <= max_length]
+    dropped = [p for p in pdb_ids if lengths.get(p, 0) > max_length]
+    if dropped:
+        logger.info(f"Dropped {len(dropped)}/{len(pdb_ids)} proteins over max_length={max_length} "
+                     f"residues: {dropped}")
+    return kept
+
+
 def load_scrmsd_references(traj_h5_path: Path, pdb_ids: list, pdb_cache: Path) -> dict:
     """Ground-truth *relaxed* (deposited) structures to score designs against.
 
@@ -479,11 +511,17 @@ def parse_args():
                               "(default: the dataset's standard file name)")
     parser.add_argument("--index-csv", type=Path, default=None,
                          help="Split index csv (default: the dataset's standard file name)")
+    parser.add_argument("--val-fold", type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
+                         help="ATLAS only: cross_val fold held out for validation (folds != this train). "
+                              "mdCATH ignores it -- its split column is categorical.")
     parser.add_argument("--pdb-cache", type=Path, default=THIS_DIR / "pdb_cache",
                          help="Where relaxed (deposited) RCSB entries are cached for scRMSD")
     parser.add_argument("--processed-dir", type=Path, default=None,
                          help="Where the .pt conformer ensembles live (default: ./processed_data_<ds>)")
-    parser.add_argument("--k", type=int, default=5, help="conformers sampled per protein at train/val time")
+    parser.add_argument("--max-length", type=int, default=dataset_splits.MAX_LENGTH,
+                         help="Drop proteins longer than this many residues, the cutoff MapDiff and "
+                              "PiFold also apply (lib/dataset_splits.MAX_LENGTH). Pass 0 to disable.")
+    parser.add_argument("--k", type=int, default=2, help="conformers sampled per protein at train/val time")
     parser.add_argument("--pool-size", type=int, default=10, help="conformer pool saved per protein's .pt file")
     parser.add_argument("--course-grain", type=int, default=25, help="time subsampling for the RMSD matrix")
     parser.add_argument("--force-rebuild", action="store_true")
@@ -491,7 +529,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=dataset_splits.SEED)
     parser.add_argument("--from-scratch", action="store_true", help="skip loading a pretrained checkpoint")
     parser.add_argument("--ckpt", type=Path, default=None, help="override the default single_chain_k{k}.ckpt")
     parser.add_argument("--run-name", type=str, default=None)
@@ -500,6 +538,13 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # `random` and `np.random`, not just torch: DynamicMPNN's featurizer picks which k of each
+    # protein's saved conformer pool to use with `random.sample` / `np.random.choice`
+    # (ProteinGraphFeaturiserSingleChain.get_entries). Because the datasets below are built
+    # with in_memory=True, that draw happens once and then holds for every epoch -- so leaving
+    # these unseeded would mean the *validation set itself* differed between runs.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     traj_h5 = args.traj_h5 or Path(dataset_splits.default_h5(args.ds_name))
@@ -517,6 +562,8 @@ def main():
             "ds_name": args.ds_name,
             "traj_h5": str(traj_h5),
             "index_csv": str(index_csv),
+            "val_fold": args.val_fold,
+            "max_length": args.max_length,
             "k": args.k,
             "pool_size": args.pool_size,
             "course_grain": args.course_grain,
@@ -540,8 +587,11 @@ def main():
             artifact.add_file(str(dependency))
     run.log_artifact(artifact)
 
-    train_pdbs, val_pdbs = dataset_splits.get_splits(args.ds_name, index_csv)
-    logger.info(f"{args.ds_name}: {len(train_pdbs)} train / {len(val_pdbs)} held-out proteins")
+    train_pdbs, val_pdbs = dataset_splits.get_splits(args.ds_name, index_csv, val_fold=args.val_fold)
+    train_pdbs = filter_by_length(train_pdbs, traj_h5, args.max_length)
+    val_pdbs = filter_by_length(val_pdbs, traj_h5, args.max_length)
+    logger.info(f"{args.ds_name}: {len(train_pdbs)} train / {len(val_pdbs)} held-out proteins "
+                f"(fold {args.val_fold} held out, max_length={args.max_length})")
 
     build_processed_dataset(
         pdb_ids=train_pdbs + val_pdbs,
@@ -607,6 +657,14 @@ def main():
         in_memory=True,
     )
     val_pdb_order = val_tracker.kept_pdb_codes
+    # The proteins actually scored, after the featurizer dropped whatever it could not use.
+    # MapDiff and PiFold log the same summary key, so the three held-out sets can be diffed
+    # rather than assumed identical -- they are cut from the same split index, but each model
+    # drops its own failures.
+    logger.info(f"{args.ds_name}: featurized {len(val_pdb_order)}/{len(val_pdbs)} held-out proteins; "
+                f"dropped {sorted(set(val_pdbs) - set(val_pdb_order))}")
+    run.summary["split_counts"] = {"train": len(train_dataset), "val": len(val_dataset)}
+    run.summary["test_split_ids"] = list(val_pdb_order)
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,

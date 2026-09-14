@@ -3,8 +3,25 @@
 Adds the dataset-selection flags our two datasets need (`--data_name ATLAS|MDCATH`, plus the
 split index / trajectory store / PDB cache locations) and the Weights & Biases wiring
 `main.py` uses to log recovery, perplexity and scRMSD.
+
+The defaults that have to agree with the other comparison models (held-out fold, max protein
+length, RNG seed) are read straight out of `lib/dataset_splits.py` rather than spelled out
+here, so there is exactly one place to change them. That module is copied in flat next to
+this file (see ../README.md and ../run_pifold.sh).
 """
 import argparse
+import os
+import sys
+
+try:
+    import dataset_splits
+except ImportError:
+    for _up in ('.', '..', '../..', '../../..'):
+        _cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), _up, 'lib')
+        if os.path.isdir(_cand):
+            sys.path.insert(0, os.path.abspath(_cand))
+            break
+    import dataset_splits
 
 
 def create_parser():
@@ -16,7 +33,9 @@ def create_parser():
     parser.add_argument('--ex_name', default='debug', type=str)
     parser.add_argument('--use_gpu', default=True, type=bool)
     parser.add_argument('--gpu', default=0, type=int)
-    parser.add_argument('--seed', default=111, type=int)
+    # Shared with MapDiff/DynamicMPNN (lib/dataset_splits.SEED) so every comparison run
+    # draws the same stream -- weight init, batch order, dropout.
+    parser.add_argument('--seed', default=dataset_splits.SEED, type=int)
 
     # dataset parameters. ATLAS and MDCATH are trained/evaluated separately, one run each --
     # see API/relaxed_dataset.py and lib/dataset_splits.py.
@@ -30,8 +49,12 @@ def create_parser():
                               "whole deposited chains uncropped.")
     parser.add_argument('--pdb_cache', default='', type=str,
                          help='Where downloaded RCSB entries are cached (default: <data_root>/pdb_cache)')
-    parser.add_argument('--val_fold', default=0, type=int, help='ATLAS only: cross_val fold held out')
-    parser.add_argument('--max_length', default=500, type=int, help='Max sequence length')
+    parser.add_argument('--val_fold', default=dataset_splits.DEFAULT_VAL_FOLD, type=int,
+                         help='ATLAS only: cross_val fold held out (and reused as the test split)')
+    parser.add_argument('--max_length', default=dataset_splits.MAX_LENGTH, type=int,
+                         help='Proteins longer than this (in residues) are dropped from every split. '
+                              'Shared with MapDiff (lib/dataset_splits.MAX_LENGTH) -- raising it here '
+                              'alone would score PiFold on proteins MapDiff never sees.')
     parser.add_argument('--batch_size', default=8, type=int)
     parser.add_argument('--num_workers', default=8, type=int)
 

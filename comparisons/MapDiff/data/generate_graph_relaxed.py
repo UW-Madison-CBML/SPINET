@@ -74,7 +74,7 @@ def create_parser():
                          help="Trajectory store, read only for each protein's reference residue "
                               "sequence (default: the dataset's standard file name). Pass '' to "
                               "featurize whole deposited chains uncropped.")
-    parser.add_argument('--val-fold', type=int, default=0,
+    parser.add_argument('--val-fold', type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
                          help="ATLAS only: cross_val fold held out for validation/test (folds != this train)")
     parser.add_argument('--pdb-cache', default='./pdb_cache',
                          help="Where downloaded RCSB entries are cached")
@@ -115,15 +115,23 @@ def process_split(records, split_name, save_dir):
     return errors
 
 
-def compute_marginal(save_dir, out_path):
+def compute_marginal(save_dir, out_path, train_ids):
+    """Amino-acid marginal over the *training* split only.
+
+    Driven by `train_ids` rather than `os.listdir(save_dir)`: this distribution is the
+    diffusion model's `marginal` noise prior, so folding in a stale graph left over from a
+    run with a different --val-fold would leak held-out statistics into training.
+    """
     counts = torch.zeros(20)
-    for filename in tqdm(os.listdir(save_dir), desc='computing amino-acid marginal'):
+    filenames = [f'{p}.pt' for p in train_ids if os.path.exists(os.path.join(save_dir, f'{p}.pt'))]
+    for filename in tqdm(filenames, desc='computing amino-acid marginal'):
         graph = torch.load(os.path.join(save_dir, filename))
         counts += graph.x[:, :20].sum(dim=0)
     marginal = counts / counts.sum()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     torch.save(marginal, out_path)
-    print(f'Saved amino-acid marginal ({int(counts.sum())} residues) to {out_path}')
+    print(f'Saved amino-acid marginal over {len(filenames)} training proteins '
+          f'({int(counts.sum())} residues) to {out_path}')
 
 
 def main():
@@ -164,7 +172,7 @@ def main():
 
     train_save_dir = os.path.join(save_root, 'train')
     if os.path.isdir(train_save_dir) and len(os.listdir(train_save_dir)) > 0:
-        compute_marginal(train_save_dir, marginal_out)
+        compute_marginal(train_save_dir, marginal_out, train_ids)
 
 
 if __name__ == '__main__':

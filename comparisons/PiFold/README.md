@@ -69,6 +69,23 @@ ATLAS and mdCATH are trained and evaluated **separately**, one job each, matchin
 Neither dataset has a further held-out set, so the held-out split serves as both PiFold's
 `valid` and `test` split.
 
+### Keeping the comparison apples-to-apples
+
+`lib/dataset_splits.py` owns not just the partition but the three knobs that would
+otherwise silently make two models score different proteins, and every comparison model
+reads its defaults from there:
+
+| constant | value | why it has to be shared |
+| --- | --- | --- |
+| `DEFAULT_VAL_FOLD` | 0 | the fold `scripts/train_residue_classifier.py` hardcodes |
+| `MAX_LENGTH` | 1200 | MapDiff's IPA positional-encoding table is the binding limit; PiFold and DynamicMPNN apply the same cutoff so nobody is scored on proteins the others dropped |
+| `SEED` | 42 | anything still drawing from an RNG (weight init, batch order, DynamicMPNN's k-of-pool conformer draw) |
+
+Cutting the same split is necessary but not sufficient: each model additionally drops
+whatever it cannot featurize (no deposited RCSB entry, a DSSP failure, too few usable
+conformers). So every run logs `split_counts` and `test_split_ids` to its W&B summary --
+diff those across runs to confirm the held-out sets really are the same proteins.
+
 The trajectory store and split index csv are staged on Pelican and transferred in flat
 (see `pifold.sub`'s `transfer_input_files`); `--data_root ./` points
 `API/relaxed_dataset.py` at the job's scratch dir, where they land. The store is read

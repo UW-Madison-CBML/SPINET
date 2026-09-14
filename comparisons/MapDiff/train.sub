@@ -68,7 +68,7 @@ log                     = logs/train_$(DS_NAME)_$(Cluster)_$(Process).log
 output                  = logs/train_$(DS_NAME)_$(Cluster)_$(Process).out
 error                   = logs/train_$(DS_NAME)_$(Cluster)_$(Process).err
 
-request_gpus            = 2
+request_gpus            = 1
 request_cpus            = 16
 request_memory          = 128GB
 request_disk            = 150GB

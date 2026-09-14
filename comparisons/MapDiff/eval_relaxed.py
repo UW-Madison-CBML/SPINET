@@ -88,10 +88,13 @@ def create_parser():
                          help="Trajectory store, read only for each protein's reference residue "
                               "sequence (default: the dataset's standard file name)")
     parser.add_argument('--pdb-cache', default='./pdb_cache', help="Where downloaded RCSB entries are cached")
-    parser.add_argument('--val-fold', type=int, default=0,
+    parser.add_argument('--val-fold', type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
                          help="ATLAS only: cross_val fold to evaluate on (held out from training)")
-    parser.add_argument('--max_length', default=None, type=int,
-                         help="Skip proteins longer than this many residues")
+    parser.add_argument('--max_length', default=dataset_splits.MAX_LENGTH, type=int,
+                         help="Skip proteins longer than this many residues. Defaults to the cutoff "
+                              "every model trains under (lib/dataset_splits.MAX_LENGTH) -- evaluating "
+                              "without it would score MapDiff on proteins it never saw and that PiFold "
+                              "dropped too. Pass 0 to disable.")
     parser.add_argument('--ensemble_num', default=None, type=int,
                          help="Override cfg.diffusion.ensemble_num (number of MC-dropout DDIM samples averaged "
                               "per protein)")
@@ -144,7 +147,7 @@ def load_validation_entries(ds_name, index_csv, traj_h5, pdb_cache, val_fold, ma
 
         if graph is None:
             continue
-        if max_length is not None and graph.x.shape[0] > max_length:
+        if max_length and graph.x.shape[0] > max_length:
             continue
         entries.append({'title': protein_id, 'graph': graph})
     return entries

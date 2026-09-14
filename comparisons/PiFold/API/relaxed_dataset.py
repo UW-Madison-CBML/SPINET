@@ -58,8 +58,9 @@ class RelaxedStructures(data.Dataset):
     (`--data_root`); downloaded RCSB entries are cached under `pdb_cache` inside it.
     """
 
-    def __init__(self, path='./', mode='train', max_length=500, data=None,
-                 ds_name='atlas', index_csv=None, traj_h5=None, pdb_cache=None, val_fold=0):
+    def __init__(self, path='./', mode='train', max_length=dataset_splits.MAX_LENGTH, data=None,
+                 ds_name='atlas', index_csv=None, traj_h5=None, pdb_cache=None,
+                 val_fold=dataset_splits.DEFAULT_VAL_FOLD):
         self.path = path
         self.mode = mode
         self.max_length = max_length
@@ -97,17 +98,25 @@ class RelaxedStructures(data.Dataset):
 
         alphabet_set = set(ALPHABET)
         data_dict = {'train': [], 'valid': [], 'test': []}
+        # Every reason a protein in the split index does *not* make it into the dataset, kept
+        # so the run can report exactly which ids it scored -- MapDiff and DynamicMPNN drop
+        # proteins for their own reasons (DSSP failures, too few conformers), and the held-out
+        # sets only line up if each model says out loud what it dropped.
+        self.dropped = {'no_structure': [], 'nonstandard_residue': [], 'too_long': []}
 
         for mode, protein_ids in split_ids.items():
             for protein_id in protein_ids:
                 record = records.get(protein_id)
                 if record is None:
+                    self.dropped['no_structure'].append(protein_id)
                     continue
 
                 seq = record['seq']
                 if set(seq).difference(alphabet_set):
+                    self.dropped['nonstandard_residue'].append(protein_id)
                     continue
                 if len(seq) > self.max_length:
+                    self.dropped['too_long'].append(protein_id)
                     continue
 
                 coords = record['coords']
@@ -124,9 +133,22 @@ class RelaxedStructures(data.Dataset):
                     entry['score'] = 100.0
                 data_dict[mode].append(entry)
 
-        print('{}: {} train / {} valid / {} test structures loaded'.format(
-            self.ds_name, len(data_dict['train']), len(data_dict['valid']), len(data_dict['test'])))
+        # 'valid' and 'test' are the same proteins, so each drop is counted twice there --
+        # de-duplicate before reporting.
+        self.dropped = {reason: sorted(set(ids)) for reason, ids in self.dropped.items()}
+
+        print('{}: {} train / {} valid / {} test structures loaded (fold {} held out)'.format(
+            self.ds_name, len(data_dict['train']), len(data_dict['valid']), len(data_dict['test']),
+            self.val_fold))
+        for reason, ids in self.dropped.items():
+            if ids:
+                print('{}: dropped {} protein(s) -- {}: {}'.format(self.ds_name, len(ids), reason, ids))
         return data_dict
+
+    def split_ids(self, mode=None):
+        """The protein ids actually in one split, in dataset order -- logged per run so the
+        held-out sets of all four models can be diffed after the fact."""
+        return [entry['title'] for entry in self.cache_data[mode or self.mode]]
 
     def change_mode(self, mode):
         self.mode = mode
