@@ -1,17 +1,7 @@
 # ATLAS → DynamicMPNN: 5-fold CV eval script
 
-Big-picture guide for `hdf5_data.py`. No real code below, just the shape of the
-script and the reasoning behind the data-loading decisions, since that's what
-was confusing.
-
-## The core question: raw PDBs or a max-RMSD pair per trajectory?
-
-**Use the max-pairwise-RMSD pair (or farthest-point k-tuple), not raw frames.**
-This falls directly out of how DynamicMPNN's data pipeline is built — it's not
-a stylistic choice.
-
-Everywhere DynamicMPNN touches data, a "protein" is a small **cluster of
-discrete conformers**, not a trajectory:
+Everywhere DynamicMPNN touches data, a "protein" is a small cluster of
+discrete conformers rather than a trajectory.
 
 - `PTFileDataset.__getitem__` loads one `{pdb_code}.pt` file, which is a PyG
   `Data` object with exactly two fields: `cluster_members` (a list of
@@ -35,18 +25,9 @@ So DynamicMPNN was trained and is evaluated on **pairs (or small sets) of
 structurally distinct states** — think apo/holo, open/closed — never on a
 dense time series. If you feed it raw consecutive ATLAS frames:
 
-- Most adjacent frames are near-identical, so the "multi-state" task
-  DynamicMPNN is built around becomes trivial / meaningless for it.
-- The dataloader literally can't accept more than 2 (or k) conformers per
-  example anyway — you'd have to subsample regardless.
-
 The RMSD-pair approach is also just the MD analogue of what DynamicMPNN
 already does with static structures: pick the two (or k) frames that best
-represent "distinct conformational states" of the trajectory. That's the
-fair, apples-to-apples comparison point against your time-series/sheaf model,
-which *does* see the full trajectory — you're comparing "best case discrete
-snapshot" model vs. "full temporal" model, which is the interesting
-comparison anyway.
+represent "distinct conformational states" of the trajectory.
 
 ## Big-picture pipeline
 
@@ -141,16 +122,3 @@ and it's the one that scales to "run this over every fold." Build `.pt` files
 in that schema and you get the existing dataloader, batching, and metric
 code for free — you only need to write the ATLAS → `.pt` conversion
 (Steps 1–3 above) and the fold loop (Step 4).
-
-## Open decisions before you fill in `hdf5_data.py`
-
-- **k for the state pair**: match whichever checkpoint you're comparing
-  against (`single_chain_k2/k3/k5.ckpt` or the multi-chain 2-state
-  checkpoints). Farthest-point sampling generalizes cleanly to any k.
-- **No-distinct-conformation trajectories**: if a trajectory barely moves
-  (rmsd_matrix is ~flat), decide whether to drop it from the benchmark or
-  keep it as an easy case — worth flagging separately in results either way,
-  since it's an easy win for any model, not just DynamicMPNN.
-- **Zero-shot vs. fine-tune per fold**: decide (a) vs (b) above based on
-  whether you're benchmarking generalization of the pretrained checkpoints or
-  running a true retrain-per-fold comparison against your time-series model.

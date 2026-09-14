@@ -111,9 +111,26 @@ RUN pip install --no-cache-dir \
     'pydantic<2' \
     pytorch-lightning==2.4.0 \
     lovely-tensors \
-    wandb \
     transformers==4.41.2 \
     accelerate
+
+## wandb is installed on its own, AFTER the block above, and that ordering is
+## the whole point. graphein 1.7.6 hard-pins `typing-extensions==4.5.0`; every
+## wandb >=0.20 asks for `typing-extensions>=4.8`. Listed together, pip cannot
+## satisfy both, so it silently backtracks wandb down to a release old enough to
+## predate that requirement -- which is how the v7 image ended up with a wandb
+## whose `apikey.write_key` enforces `len(key) == 40` and killed the job with
+## "API key must be 40 characters long, yours was 86". W&B now issues longer
+## keys; 0.22.3 is the first line to relax that to "at least 40" (and it is what
+## comparisons/MapDiff already runs).
+##
+## Installing it separately lets pip upgrade typing-extensions past graphein's
+## pin. pip prints a dependency-conflict warning for graphein and continues --
+## typing-extensions is additive and backward compatible, so graphein 1.7.6 runs
+## unchanged on 4.8+ (the import check below is what actually proves that).
+## pydantic stays at v1: wandb declares only `pydantic<3` and ships
+## `wandb/_pydantic/v1_compat.py` for exactly this case.
+RUN pip install --no-cache-dir wandb==0.22.3
 
 # Fail the *build* rather than the job. The pip steps above freely downgrade
 # packages conda already placed (numpy, pandas, typing-extensions, and whatever
@@ -129,13 +146,15 @@ RUN python -m ruff --version && \
 import numpy, pandas, scipy, sklearn, matplotlib; matplotlib.use('Agg');\
 import matplotlib.pyplot, h5py, mdtraj, requests, urllib3, tqdm, joblib;\
 import Bio, biopandas, aiofiles, aiohttp, dotenv, rich, loguru, omegaconf, hydra;\
-import beartype, jaxtyping, einops, wandb, lovely_tensors;\
+import beartype, jaxtyping, einops, wandb, lovely_tensors, typing_extensions;\
+from importlib.metadata import version as _v;\
 import torch, torch_geometric, torch_scatter, torch_cluster, pytorch_lightning;\
 import graphein, graphein.protein.tensor.data, graphein.protein.tensor.edges;\
 from torch_geometric.nn.pool import knn_graph;\
 from sklearn.metrics import ConfusionMatrixDisplay;\
 from transformers import AutoTokenizer, EsmForProteinFolding;\
 print('numpy', numpy.__version__, '| pandas', pandas.__version__);\
+print('wandb', wandb.__version__, '| typing-extensions', _v('typing_extensions'));\
 print('torch', torch.__version__, torch.version.cuda, '| pyg', torch_geometric.__version__);\
 print('DEP CHECK OK')"
 
@@ -147,6 +166,18 @@ import torch; from torch_geometric.nn.pool import knn_graph;\
 e = knn_graph(torch.randn(64, 3), k=8);\
 assert e.shape[0] == 2 and e.shape[1] == 64 * 8, e.shape;\
 print('KNN KERNEL OK', tuple(e.shape))"
+
+# The key-length rule lives inside wandb's own source, not in its metadata, so
+# a version pin alone does not prove the fix is present -- and pip is free to
+# resolve wandb elsewhere if a future edit reshuffles the install order above.
+# Read the installed `write_key` back and require the relaxed wording, so a
+# regression to the exact-40 check fails the build instead of the GPU job.
+RUN python -c "\
+import wandb; from wandb.sdk.lib import apikey;\
+print('wandb', wandb.__version__);\
+src = __import__('inspect').getsource(apikey.write_key);\
+assert 'at least 40' in src, 'wandb reintroduced the exact-40-character API key check';\
+print('WANDB LONG KEY OK')"
 
 # Set the default command to bash with the environment activated
 ENTRYPOINT ["conda", "run", "-n", "dynamicmpnn"]

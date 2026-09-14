@@ -28,7 +28,7 @@
 #   mkdir -p logs && condor_submit train.sub
 
 universe                = docker
-docker_image            = cmikulski4/mapdiff:v1
+docker_image            = cmikulski4/mapdiff:v2
 
 executable              = train.sh
 # Forwarded verbatim to `python train.py ...` -- see conf/train.yaml.
@@ -62,8 +62,7 @@ request_disk            = 150GB
 # ESMFold download needs internet access -- pin to the same machine
 # scripts/train_residue_classifier.sub uses for that reason. Also only
 # match GPU nodes with a modern-enough driver/CUDA for the cu121 image.
-Requirements            = (Target.HasCHTCStaging == true) 
-#&& (Machine == "bhaskargpu4000.chtc.wisc.edu")
+Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 +WantGPULab             = true
 +GPUJobLength           = "long"
 
