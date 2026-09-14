@@ -1,24 +1,27 @@
-"""Evaluate a trained MapDiff (Prior_Diff) checkpoint on the ATLAS validation/test split.
+"""Evaluate a trained MapDiff (Prior_Diff) checkpoint on a dataset's held-out split.
 
 Loads an EGNN+IPA Prior_Diff checkpoint produced by `train.py`, runs MC-DDIM inference over
-every protein in fold 0 of `atlas_cross_val_index.csv` one at a time (the same held-out
-fold scripts/train_residue_classifier.py and comparisons/{gvp-pytorch,DynamicMPNN}/train.py
-use), featurizing each protein's representative frame directly from `atlas_data.h5` (via
-lib/atlas_frame_pdb + `data.generate_graph_cath.pdb2graph`, same as train.py's
-data/generate_graph_atlas.py), and computes per-protein perplexity, top-1/top-5/top-10
-sequence recovery, and self-consistency RMSD (fold the predicted sequence with ESMFold and
-Kabsch-RMSD it against the protein's ground-truth backbone). Reports the mean +/- standard
-deviation (over proteins) for each metric and logs everything to Weights & Biases.
+every protein in the held-out split one at a time, and computes per-protein perplexity,
+top-1/top-5/top-10 sequence recovery, and self-consistency RMSD (fold the predicted sequence
+with ESMFold and Kabsch-RMSD it against the protein's ground-truth relaxed backbone). Reports
+the mean +/- standard deviation (over proteins) for each metric and logs everything to
+Weights & Biases.
 
-Must be run in an environment with MapDiff's full dependencies (torch,
-torch_geometric, torch_scatter/torch_cluster, biopython, DSSP, wandb,
-transformers) -- e.g. the training Docker image. See eval.sub / train.sh to
-run this against the staged ATLAS data on CHTC.
+Both shared datasets are supported and evaluated separately (`--ds-name`), the same splits
+scripts/train_residue_classifier.py uses: ATLAS's held-out `cross_val` fold, or mdCATH's
+`validation` rows. Each protein is featurized on the fly from its *relaxed* (deposited)
+structure -- `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset id
+names and crops it to the residues the trajectory covers -- then run through
+`data.generate_graph_cath.pdb2graph`, exactly as train.py's data/generate_graph_relaxed.py
+does. No precomputed graph directory is needed.
+
+Must be run in an environment with MapDiff's full dependencies (torch, torch_geometric,
+torch_scatter/torch_cluster, biopython, DSSP, wandb, transformers) -- e.g. the training
+Docker image. See eval.sub / eval.sh to run this on CHTC.
 
 Usage:
-    python eval_atlas.py \
-        --run_dir outputs/MapDiff_atlas_run \
-        --atlas-h5 ./atlas_data.h5 --cross-val-csv ./atlas_cross_val_index.csv \
+    python eval_relaxed.py --run_dir outputs/MapDiff_atlas_run --ds-name atlas \
+        --index-csv ./atlas_cross_val_index.csv --traj-h5 ./atlas_data.h5 \
         --wandb_key_file ./wandb_api.txt
 """
 import argparse
@@ -27,8 +30,6 @@ import os
 import sys
 import tempfile
 
-import h5py
-import pandas as pd
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
@@ -41,22 +42,24 @@ from model.ipa.ipa_net import IPANetPredictor
 from model.prior_diff import Prior_Diff
 from utils import enable_dropout
 
-# lib/stats_utils.py + lib/scrmsd.py + lib/atlas_frame_pdb.py are copied in flat next to
-# this file (see README.md and eval.sh) -- fall back to walking up to a lib/ directory for
-# local/dev runs from inside the source tree.
+# lib/{stats_utils,scrmsd,relaxed_pdb,dataset_splits}.py are copied in flat next to this file
+# (see README.md and eval.sh) -- fall back to walking up to a lib/ directory for local/dev
+# runs from inside the source tree.
 try:
+    import dataset_splits
+    import relaxed_pdb
     import stats_utils
-    from scrmsd import load_esmfold, evaluate_batch_rmsd
-    from atlas_frame_pdb import get_atlas_splits, get_frame_index, index_h5_groups, extract_frame, write_frame_pdb
+    from scrmsd import load_esmfold, evaluate_scrmsd
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
         _cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), _up, 'lib')
         if os.path.isdir(_cand):
             sys.path.insert(0, os.path.abspath(_cand))
             break
+    import dataset_splits
+    import relaxed_pdb
     import stats_utils
-    from scrmsd import load_esmfold, evaluate_batch_rmsd
-    from atlas_frame_pdb import get_atlas_splits, get_frame_index, index_h5_groups, extract_frame, write_frame_pdb
+    from scrmsd import load_esmfold, evaluate_scrmsd
 
 METRIC_KEYS = stats_utils.METRIC_KEYS + ('scrmsd',)
 
@@ -77,13 +80,21 @@ def create_parser():
                               "<run_dir>/model/)")
     parser.add_argument('--config', default=None,
                          help="Path to the run's resolved Hydra config.yaml (default: <run_dir>/configs/config.yaml)")
-    parser.add_argument('--atlas-h5', default='./atlas_data.h5', help="Path to the shared ATLAS hdf5 store")
-    parser.add_argument('--cross-val-csv', default='./atlas_cross_val_index.csv',
-                         help="Path to the shared ATLAS cross-validation index")
-    parser.add_argument('--val-fold', type=int, default=0,
-                         help="cross_val fold to evaluate on (held out from training)")
-    parser.add_argument('--max_length', default=None, type=int,
-                         help="Skip proteins longer than this many residues")
+    parser.add_argument('--ds-name', default='atlas', choices=dataset_splits.DATASETS,
+                         help="Which shared dataset's held-out split to evaluate on")
+    parser.add_argument('--index-csv', default=None,
+                         help="Split index csv (default: the dataset's standard file name)")
+    parser.add_argument('--traj-h5', default=None,
+                         help="Trajectory store, read only for each protein's reference residue "
+                              "sequence (default: the dataset's standard file name)")
+    parser.add_argument('--pdb-cache', default='./pdb_cache', help="Where downloaded RCSB entries are cached")
+    parser.add_argument('--val-fold', type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
+                         help="ATLAS only: cross_val fold to evaluate on (held out from training)")
+    parser.add_argument('--max_length', default=dataset_splits.MAX_LENGTH, type=int,
+                         help="Skip proteins longer than this many residues. Defaults to the cutoff "
+                              "every model trains under (lib/dataset_splits.MAX_LENGTH) -- evaluating "
+                              "without it would score MapDiff on proteins it never saw and that PiFold "
+                              "dropped too. Pass 0 to disable.")
     parser.add_argument('--ensemble_num', default=None, type=int,
                          help="Override cfg.diffusion.ensemble_num (number of MC-dropout DDIM samples averaged "
                               "per protein)")
@@ -92,7 +103,7 @@ def create_parser():
     parser.add_argument('--wandb_key_file', default='./wandb_api.txt')
     parser.add_argument('--wandb_entity', default='jenslundsgaard7-uw-madison')
     parser.add_argument('--wandb_project', default='SheafProtein')
-    parser.add_argument('--wandb_run_name', default='Eval_ATLAS_MapDiff')
+    parser.add_argument('--wandb_run_name', default=None)
     return parser.parse_args()
 
 
@@ -106,49 +117,46 @@ def find_checkpoint(run_dir):
     return os.path.join(model_dir, chosen)
 
 
-def load_validation_entries(atlas_h5_path, cross_val_csv, val_fold, max_length):
-    """Featurize fold 0's representative frame for every held-out ATLAS protein, directly
-    from atlas_data.h5 -- the same store/split scripts/train_residue_classifier.py and
-    comparisons/{gvp-pytorch,DynamicMPNN}/train.py use."""
-    index_df = pd.read_csv(cross_val_csv)
-    _, val_pdbs = get_atlas_splits(cross_val_csv, val_fold=val_fold)
+def load_validation_entries(ds_name, index_csv, traj_h5, pdb_cache, val_fold, max_length):
+    """Featurize the relaxed (deposited) structure of every held-out protein."""
+    _, val_ids = dataset_splits.get_splits(ds_name, index_csv, val_fold=val_fold)
+    traj_h5 = dataset_splits.default_h5(ds_name) if traj_h5 is None else traj_h5
+
+    reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, val_ids) if traj_h5 else {}
+    records, failures = relaxed_pdb.load_relaxed_structures(
+        val_ids, cache_dir=pdb_cache, reference_seqs=reference_seqs)
+    if failures:
+        print(f'{len(failures)}/{len(val_ids)} held-out proteins had no usable deposited structure')
 
     entries = []
-    with h5py.File(atlas_h5_path, 'r') as h5_file:
-        group_lookup = index_h5_groups(h5_file)
+    for protein_id in tqdm(val_ids, desc=f'featurizing {ds_name} held-out proteins'):
+        record = records.get(protein_id)
+        if record is None:
+            continue
 
-        for pdb_id in tqdm(val_pdbs, desc='featurizing ATLAS fold-{} proteins'.format(val_fold)):
-            group_name = group_lookup.get(pdb_id)
-            if group_name is None:
-                print(f'skip {pdb_id}: no matching trajectory group in {atlas_h5_path}')
-                continue
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.pdb')
+        os.close(tmp_fd)
+        try:
+            relaxed_pdb.write_record_pdb(record, tmp_path)
+            graph = get_processed_graph(pdb2graph(tmp_path))
+        except Exception as exc:
+            print(f'skip {protein_id}: {exc}')
+            continue
+        finally:
+            os.remove(tmp_path)
 
-            frame_idx = get_frame_index(index_df, pdb_id)
-            frame = extract_frame(h5_file, group_name, frame_idx)
-
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix='.pdb')
-            os.close(tmp_fd)
-            try:
-                write_frame_pdb(tmp_path, frame)
-                graph = get_processed_graph(pdb2graph(tmp_path))
-            except Exception as exc:
-                print(f'skip {pdb_id}: {exc}')
-                continue
-            finally:
-                os.remove(tmp_path)
-
-            if graph is None:
-                continue
-            if max_length is not None and graph.x.shape[0] > max_length:
-                continue
-            entries.append({'title': pdb_id, 'graph': graph})
+        if graph is None:
+            continue
+        if max_length and graph.x.shape[0] > max_length:
+            continue
+        entries.append({'title': protein_id, 'graph': graph})
     return entries
 
 
 @torch.no_grad()
 def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold_tokenizer, esmfold_model):
     per_protein = []
-    for entry in tqdm(entries, desc='evaluating ATLAS validation set'):
+    for entry in tqdm(entries, desc='evaluating held-out set'):
         g_batch, ipa_batch = collator([entry['graph']])
         g_batch, ipa_batch = g_batch.to(device), ipa_batch.to(device)
 
@@ -162,12 +170,11 @@ def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold
         target = target_onehot.argmax(dim=1)
 
         pred_seq = ''.join(AMINO_ACIDS[i.item()] for i in mean_logits.argmax(dim=1))
+        # The graph was featurized from the deposited structure, so `atom_pos` is the relaxed
+        # reference, residue-for-residue aligned with the prediction.
         gt_backbone = entry['graph'].atom_pos[:, ATOM_POS_TO_BACKBONE_IDX, :]  # (R, 4, 3)
-        scrmsd = evaluate_batch_rmsd(
-            [pred_seq], gt_backbone[None, None, :, :, :],
-            torch.ones(1, 1, gt_backbone.shape[0], dtype=torch.bool),
-            esmfold_tokenizer, esmfold_model, device=device,
-        ).item()
+        scrmsd = evaluate_scrmsd([pred_seq], [gt_backbone], esmfold_tokenizer, esmfold_model,
+                                  device=device).item()
 
         per_protein.append({
             'title': entry['title'],
@@ -212,11 +219,11 @@ def main():
     ensemble_num = args.ensemble_num or cfg.diffusion.ensemble_num
     ddim_steps = args.ddim_steps or cfg.diffusion.ddim_steps
 
-    entries = load_validation_entries(args.atlas_h5, args.cross_val_csv, args.val_fold, args.max_length)
+    entries = load_validation_entries(args.ds_name, args.index_csv, args.traj_h5, args.pdb_cache,
+                                       args.val_fold, args.max_length)
     if len(entries) == 0:
-        raise RuntimeError("No usable validation proteins found in fold {} of {}".format(
-            args.val_fold, args.cross_val_csv))
-    print("Loaded {} ATLAS fold-{} proteins from {}".format(len(entries), args.val_fold, args.atlas_h5))
+        raise RuntimeError("No usable held-out proteins found for dataset {}".format(args.ds_name))
+    print("Loaded {} held-out {} proteins".format(len(entries), args.ds_name))
 
     esmfold_tokenizer, esmfold_model = load_esmfold(device=device)
 
@@ -229,12 +236,13 @@ def main():
     print(json.dumps(summary, indent=2))
 
     run = stats_utils.init_wandb(
-        args.wandb_key_file, args.wandb_entity, args.wandb_project, args.wandb_run_name,
+        args.wandb_key_file, args.wandb_entity, args.wandb_project,
+        args.wandb_run_name or 'Eval_{}_MapDiff'.format(args.ds_name.upper()),
         config={
             'checkpoint': checkpoint_path,
             'config_path': config_path,
-            'atlas_h5': args.atlas_h5,
-            'cross_val_csv': args.cross_val_csv,
+            'ds_name': args.ds_name,
+            'index_csv': args.index_csv or dataset_splits.default_index_csv(args.ds_name),
             'val_fold': args.val_fold,
             'max_length': args.max_length,
             'ensemble_num': ensemble_num,

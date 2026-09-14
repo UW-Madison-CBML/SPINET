@@ -8,8 +8,11 @@
 Both stages log to a single Weights & Biases run (no more comet_ml), and both
 validation (`train()`) and `test()` additionally compute self-consistency
 RMSD: fold the predicted sequence with ESMFold and Kabsch-RMSD it against the
-protein's ground-truth backbone, mirroring
-`scripts/train_residue_classifier.py`'s `run_val`.
+protein's ground-truth *relaxed* (deposited) backbone, mirroring
+`scripts/train_residue_classifier.py`'s `run_val`. The graphs MapDiff trains
+and evaluates on are themselves built from those deposited structures (see
+data/generate_graph_relaxed.py), so `atom_pos` below already *is* the relaxed
+reference -- no separate lookup or alignment is needed here.
 """
 import copy
 import datetime
@@ -17,7 +20,6 @@ import os
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import wandb
 import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
@@ -34,7 +36,7 @@ from utils import inf_iterator, enable_dropout, cal_stats_metric
 # for local/dev runs from inside the source tree.
 try:
     import stats_utils
-    from scrmsd import evaluate_batch_rmsd
+    from scrmsd import evaluate_scrmsd
 except ImportError:
     import sys
     for _up in ('.', '..', '../..', '../../..'):
@@ -43,7 +45,7 @@ except ImportError:
             sys.path.insert(0, os.path.abspath(_cand))
             break
     import stats_utils
-    from scrmsd import evaluate_batch_rmsd
+    from scrmsd import evaluate_scrmsd
 
 # Fixed one-letter amino-acid order MapDiff's 20-dim one-hot (`data.x[:, :20]`)
 # is built in -- see (upstream) data/generate_graph_cath.py's
@@ -74,33 +76,27 @@ def build_confusion_matrix_image(confusion_mat, title):
 
 def compute_batch_scrmsd(g_batch, batch_logits, esmfold_tokenizer, esmfold_model, device):
     """Fold every protein's predicted sequence with ESMFold and Kabsch-RMSD it
-    against that protein's ground-truth backbone (CA, N, C, O) coordinates.
+    against that protein's ground-truth relaxed backbone (CA, N, C, O).
 
-    g_batch: a `Batch` of per-protein graphs (has `.batch`, `.atom_pos`).
+    g_batch: a `Batch` of per-protein graphs (has `.batch`, `.atom_pos`). Those
+        graphs are featurized straight from the deposited PDB entry
+        (data/generate_graph_relaxed.py), so `atom_pos` is the relaxed
+        reference structure, residue-for-residue aligned with the prediction.
     batch_logits: (N_total_nodes_in_batch, 20) predicted amino-acid logits,
         same node ordering as `g_batch`.
     """
     batch_idx = g_batch.batch.cpu().numpy()
     atom_pos = g_batch.atom_pos.cpu()
 
-    pred_seqs = []
-    gt_backbones = []
-    lengths = []
+    pred_seqs, gt_backbones = [], []
     for i in range(batch_idx.max() + 1):
         idx = np.where(batch_idx == i)[0]
         pred_idx = batch_logits[idx].argmax(dim=1)
         pred_seqs.append(''.join(AMINO_ACIDS[j.item()] for j in pred_idx))
         gt_backbones.append(atom_pos[idx][:, ATOM_POS_TO_BACKBONE_IDX, :])
-        lengths.append(len(idx))
 
-    lengths_t = torch.tensor(lengths)
-    pad_size = lengths_t.max().item()
-    padded = [F.pad(bb, (0, 0, 0, 0, 0, pad_size - bb.shape[0])) for bb in gt_backbones]
-    backbone_tensor = torch.stack(padded, dim=0).unsqueeze(1)  # (B, 1, R_pad, 4, 3)
-    gt_mask = (lengths_t[:, None] > torch.arange(pad_size)[None, :]).unsqueeze(1)  # (B, 1, R_pad)
-
-    rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_mask, esmfold_tokenizer, esmfold_model, device=device)
-    return rmsd.tolist()
+    return evaluate_scrmsd(pred_seqs, gt_backbones, esmfold_tokenizer, esmfold_model,
+                            device=device).tolist()
 
 
 class MapDiffTrainer:

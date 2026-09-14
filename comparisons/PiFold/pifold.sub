@@ -3,41 +3,67 @@
 # Setup (one-time):
 #   1. ./build_and_push.sh <dockerhub_username>   # builds+pushes the image
 #   2. Set docker_image below to that image.
+#   3. git clone https://github.com/A4Bio/PiFold && tar czf PiFold.tar.gz PiFold/
+#      (a *pristine* checkout -- run_pifold.sh overlays this folder's API/, main.py
+#      and parser.py on top of it at run time, so upstream is never modified.)
 #
-# Dataset: the shared ATLAS hdf5 store (atlas_data.h5) + cross-validation index
-# (atlas_cross_val_index.csv) -- the same store/split scripts/train_residue_classifier.py
-# and comparisons/{gvp-pytorch,DynamicMPNN}/train.py use -- transferred in flat via
-# transfer_input_files below. atlas_dataset.py (baked into PiFold.tar.gz's API/) reads
-# them directly: fold 0 of `cross_val` is held out as validation, and reused as the test
-# split too (ATLAS only has one held-out fold).
+# Dataset: PiFold is a static-structure model, so it trains and evaluates on each
+# protein's *relaxed* (deposited) PDB entry, downloaded from RCSB by lib/relaxed_pdb.py
+# and cropped to the residues its MD trajectory covers (API/relaxed_dataset.py). The
+# trajectory store is transferred in only to supply those reference residue sequences;
+# the split index csv gives the partition.
+#
+# ATLAS and mdCATH are trained and evaluated SEPARATELY -- one job each, matching
+# scripts/train_residue_classifier.py's --ds-name. ATLAS is the default; for mdCATH:
+#
+#   condor_submit pifold.sub DS_NAME=MDCATH \
+#       DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
+#       DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv'
 #
 # Submit:
-#   cd condor_submit pifold.sub
+#   mkdir -p logs && condor_submit pifold.sub
 
 universe                = docker
-docker_image            = cmikulski4/pifold:v1
+docker_image            = cmikulski4/pifold:v2
+
+ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+# Override these three together to switch datasets (see the header).
+DS_NAME                 = ATLAS
+DS_H5                   = $(ResearchDrive)/atlas_data.h5
+DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 
 executable              = run_pifold.sh
-arguments               = --data_name ATLAS --data_root ./ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run
+# --data_root ./ points API/relaxed_dataset.py at the job's scratch dir, where HTCondor
+# drops the split index and trajectory store flat. Everything here is forwarded straight
+# to main.py (see parser.py).
+arguments               = --data_name $(DS_NAME) --data_root ./ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt
 
-transfer_input_files    = PiFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+# The pristine PiFold tarball, this folder's overlay, the API-key file (run_pifold.sh
+# splits the W&B key out of it into wandb_api.txt), lib/{scrmsd,relaxed_pdb,dataset_splits,
+# stats_utils}.py (shared across all models -- see ../../lib), and the dataset's trajectory
+# store + split index.
+transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
-transfer_output_files   = results
-transfer_output_remaps  = "results = ../results/$(Cluster)_$(Process)"
+transfer_output_files   = PiFold/results
+transfer_output_remaps  = "PiFold/results = ../results/$(DS_NAME)_$(Cluster)_$(Process)"
 
-log                     = logs/pifold_$(Cluster)_$(Process).log
-output                  = logs/pifold_$(Cluster)_$(Process).out
-error                   = logs/pifold_$(Cluster)_$(Process).err
+log                     = logs/pifold_$(DS_NAME)_$(Cluster)_$(Process).log
+output                  = logs/pifold_$(DS_NAME)_$(Cluster)_$(Process).out
+error                   = logs/pifold_$(DS_NAME)_$(Cluster)_$(Process).err
 
 request_gpus            = 1
 request_cpus            = 4
 request_memory          = 32GB
-request_disk            = 20GB
+request_disk            = 30GB
 
-# Only match GPU nodes with a modern-enough driver/CUDA for the cu118 image.
-requirements            = (Target.CUDADriverVersion >= 11.8)
+# ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time and
+# lib/relaxed_pdb.py downloads from files.rcsb.org, so this needs a machine with internet
+# access -- the same one scripts/train_residue_classifier.sub uses. Also only match GPU
+# nodes with a modern-enough driver/CUDA for the cu118 image.
+Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu") && (Target.CUDADriverVersion >= 11.8)
 +WantGPULab             = true
 +GPUJobLength           = "medium"
 

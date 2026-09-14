@@ -1,32 +1,46 @@
-"""Fine-tune / cross-validate DynamicMPNN's single-chain (k-conformer) checkpoints on ATLAS.
+"""Fine-tune / cross-validate DynamicMPNN's single-chain (k-conformer) checkpoints on our
+trajectory datasets.
+
+Unlike MapDiff and PiFold -- which are static-structure models and so train on each
+protein's relaxed (deposited) PDB entry -- DynamicMPNN takes an **ensemble of conformers
+sampled from the MD trajectory**, and that ensemble input is precisely the thing being
+benchmarked. So the input pipeline below deliberately stays on the trajectory store. The
+relaxed structures are pulled in only as the scRMSD *reference*, so all three comparison
+models are scored against the same ground truth.
 
 Pipeline (see README.md for the full reasoning):
-  1. For every pdb in atlas_cross_val_index.csv, pull its trajectory out of the ATLAS hdf5
+  1. For every protein in the dataset's split index, pull its trajectory out of the hdf5
      store, compute a pairwise (Kabsch) CA/backbone RMSD matrix, and farthest-point-sample a
      small pool of structurally distinct frames.
      * Should replace pairwise matrix calculation with Jens' script.
   2. Repack that pool into DynamicMPNN's `.pt` schema (`pyg_dict` + `cluster_members`), which is
      exactly what `ProteinGraphFeaturiserSingleChain` / `PTFileDataset` expect.
-  3. Train using fold 0 of atlas_cross_val_index.csv as the only validation fold (folds 1-4 train).
-     * Must update to use full 5-fold CV 
+  3. Train on the dataset's training split, validate on its held-out split (lib/dataset_splits.py):
+     ATLAS holds out one `cross_val` fold (`--val-fold`, 0 by default -- the fold
+     scripts/train_residue_classifier.py and comparisons/{MapDiff,PiFold} also hold out);
+     mdCATH trains on its topology split's train+test rows and evaluates on `validation` ONLY.
+     Validation is also the only split scored: there is no further held-out test set.
+     * Running the other four ATLAS folds is a matter of repeating the job with --val-fold 1..4.
+
+ATLAS and mdCATH are trained and evaluated separately -- one run each (`--ds-name`) --
+matching scripts/train_residue_classifier.py.
 
 Logs to a single Weights & Biases run:
 per-step train loss, per-epoch validation recovery
 (top-1/5/10) + perplexity, an amino-acid confusion matrix, and scRMSD (predicted sequence
-folded with ESMFold, Kabsch-RMSD'd against the protein's ground-truth backbone).
+folded with ESMFold, Kabsch-RMSD'd against the protein's ground-truth *relaxed* backbone).
 """
 
 import argparse
 import os
+import random
 import sys
 from pathlib import Path
 
 import h5py
 import hydra
 import numpy as np
-import pandas as pd
 import torch
-import torch.nn.functional as F
 import wandb
 import matplotlib.pyplot as plt
 from loguru import logger
@@ -52,9 +66,11 @@ DYNAMICMPNN_SRC = THIS_DIR / "DynamicMPNN" / "src"
 if str(DYNAMICMPNN_SRC) not in sys.path:
     sys.path.insert(0, str(DYNAMICMPNN_SRC))
 
-from load_dynamics import BACKBONE_ATOMS  # noqa: E402
+import dataset_splits  # noqa: E402
+import relaxed_pdb
+from load_dynamics import BACKBONE_ATOMS
 from residue_classifier_dataset import ResidueClassifierDataset
-from scrmsd import kabsch_rmsd, load_esmfold, evaluate_batch_rmsd
+from scrmsd import kabsch_rmsd, load_esmfold, evaluate_scrmsd
 from stats_utils import get_confusion_matrix
 
 from dynamicmpnn import constants
@@ -166,20 +182,17 @@ def residues_to_type_ids(raw_residues: np.ndarray) -> torch.Tensor:
 
 def frame_to_pyg_data(frame_coords: np.ndarray, residue_type: torch.Tensor) -> Data:
     """One selected conformer -> the minimal per-conformer fields
-    `ProteinGraphFeaturiserSingleChain.stack_conformations` actually reads, plus a
-    `backbone` field carrying the full 4-atom (CA, N, C, O) ground truth for scRMSD.
+    `ProteinGraphFeaturiserSingleChain.stack_conformations` actually reads.
 
-    DynamicMPNN's own featurizer rebuilds a fresh `Data` object from only `coords` /
-    `residue_type` / `residue_index` (see `stack_conformations` upstream), so `backbone`
-    never reaches the model -- `load_ground_truth_backbones()` reads it directly from this
-    saved .pt ensemble instead, bypassing the model pipeline entirely.
+    No ground-truth backbone is stored alongside: scRMSD scores designs against the
+    protein's *relaxed* (deposited) structure, which `load_scrmsd_references` fetches
+    separately, not against a trajectory frame.
 
-    frame_coords: num_res, num_atoms (ATLAS order == BACKBONE_ATOMS order, CA/N/C/O), 3
+    frame_coords: num_res, num_atoms (hdf5 order == BACKBONE_ATOMS order, CA/N/C/O), 3
     """
     coords = torch.from_numpy(frame_coords[:, NCA_C_ATOM_IDX, :]).float()  # num_res, 3 (N,CA,C), 3
     residue_index = torch.arange(coords.shape[0], dtype=torch.long)
-    backbone = torch.from_numpy(frame_coords.copy()).float()  # num_res, 4 (CA,N,C,O), 3
-    return Data(coords=coords, residue_type=residue_type, residue_index=residue_index, backbone=backbone)
+    return Data(coords=coords, residue_type=residue_type, residue_index=residue_index)
 
 
 def build_ensemble(
@@ -222,7 +235,7 @@ def build_ensemble(
 
 def build_processed_dataset(
     pdb_ids: list,
-    atlas_h5_path: Path,
+    traj_h5_path: Path,
     processed_dir: Path,
     pool_size: int,
     course_grain: int,
@@ -237,13 +250,13 @@ def build_processed_dataset(
     logger.info(f"Building {len(pending)}/{len(pdb_ids)} ensembles into {processed_dir}")
 
     flat_trajectories = []
-    with h5py.File(atlas_h5_path, "r") as h5_file:
+    with h5py.File(traj_h5_path, "r") as h5_file:
         group_lookup = index_h5_groups(h5_file)
 
-        for pdb_id in tqdm(pending, desc="Building ATLAS ensembles"):
+        for pdb_id in tqdm(pending, desc="Building conformer ensembles"):
             group_name = resolve_group(pdb_id, group_lookup)
             if group_name is None:
-                logger.warning(f"{pdb_id}: no matching trajectory group in {atlas_h5_path}, skipping.")
+                logger.warning(f"{pdb_id}: no matching trajectory group in {traj_h5_path}, skipping.")
                 continue
 
             ensemble, is_flat = build_ensemble(h5_file, group_name, pdb_id, pool_size, course_grain)
@@ -259,36 +272,75 @@ def build_processed_dataset(
         )
 
 
-def load_ground_truth_backbones(processed_dir: Path, pdb_ids: list) -> dict:
-    """Ground-truth backbone (CA, N, C, O) coordinates for scRMSD, read directly from this
-    script's own `.pt` ensembles -- bypassing DynamicMPNN's featurizer entirely, since it
-    only keeps `coords`/`residue_type`/`residue_index` (see `frame_to_pyg_data`'s docstring).
-    Uses each protein's first pool conformer as the reference structure.
+def filter_by_length(pdb_ids: list, traj_h5_path: Path, max_length: int) -> list:
+    """Drop proteins longer than the shared residue cutoff (lib/dataset_splits.MAX_LENGTH).
+
+    DynamicMPNN itself has no length limit, but MapDiff does (its IPA node encoder's fixed
+    positional-encoding table) and PiFold applies the same cutoff so that the two see the same
+    proteins. Applying it here too is what keeps the *held-out set* identical across all three
+    -- otherwise DynamicMPNN would be scored on a handful of long proteins nothing else sees.
     """
-    backbones = {}
-    for pdb_id in pdb_ids:
-        path = processed_dir / f"{pdb_id}.pt"
-        if not path.exists():
+    if not max_length:
+        return list(pdb_ids)
+
+    with h5py.File(traj_h5_path, "r") as h5_file:
+        group_lookup = index_h5_groups(h5_file)
+        lengths = {}
+        for pdb_id in pdb_ids:
+            group_name = resolve_group(pdb_id, group_lookup)
+            if group_name is not None:
+                lengths[pdb_id] = h5_file[group_name + "/residues"].shape[0]
+
+    # Ids with no trajectory group keep a length of 0 and pass here; `build_processed_dataset`
+    # is the one that warns about and skips them.
+    kept = [p for p in pdb_ids if lengths.get(p, 0) <= max_length]
+    dropped = [p for p in pdb_ids if lengths.get(p, 0) > max_length]
+    if dropped:
+        logger.info(f"Dropped {len(dropped)}/{len(pdb_ids)} proteins over max_length={max_length} "
+                     f"residues: {dropped}")
+    return kept
+
+
+def load_scrmsd_references(traj_h5_path: Path, pdb_ids: list, pdb_cache: Path) -> dict:
+    """Ground-truth *relaxed* (deposited) structures to score designs against.
+
+    DynamicMPNN designs over the trajectory's residues, but the deposited chain resolves a
+    different (and, for an mdCATH domain, larger) set of them, so a plain positional
+    comparison would be wrong. `relaxed_pdb.crop_to_reference` aligns the deposited chain
+    against the trajectory's own residue sequence and hands back both the cropped
+    coordinates and `reference_index` -- the trajectory positions those coordinates
+    correspond to -- which is exactly the correspondence `lib.scrmsd.evaluate_scrmsd` wants.
+
+    Returns ``{pdb_id: {'coords': (n, 4, 3) tensor, 'pred_index': (n,) int array,
+    'num_residues': int}}``, where `num_residues` is the trajectory's residue count (used to
+    check that a batch's design lines up before scoring it).
+    """
+    reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5_path, pdb_ids)
+    records, failures = relaxed_pdb.load_relaxed_structures(
+        pdb_ids, cache_dir=str(pdb_cache), reference_seqs=reference_seqs)
+    if failures:
+        logger.warning(f"{len(failures)}/{len(pdb_ids)} validation proteins have no usable "
+                        "deposited structure; they are skipped for scRMSD.")
+
+    references = {}
+    for pdb_id, record in records.items():
+        if record.get("reference_index") is None:
+            # No trajectory residue sequence to align against, so there is no correspondence
+            # between the design and the deposited chain -- scoring it would be meaningless.
+            logger.warning(f"{pdb_id}: no reference residue sequence in {traj_h5_path}; "
+                            "skipped for scRMSD.")
             continue
-        ensemble = torch.load(path, map_location="cpu")
-        first_conf = ensemble.pyg_dict[ensemble.cluster_members[0]]
-        if not hasattr(first_conf, "backbone"):
-            logger.warning(f"{pdb_id}: .pt ensemble predates the `backbone` field -- "
-                            "rerun with --force-rebuild to enable scRMSD for it.")
-            continue
-        backbones[pdb_id] = first_conf.backbone
-    return backbones
+        references[pdb_id] = {
+            "coords": torch.from_numpy(record["coords"]).float(),
+            "pred_index": record.get("reference_index"),
+            "num_residues": len(reference_seqs.get(pdb_id, "")),
+        }
+    return references
 
 
 # --------------------------------------------------------------------------------------
-# Step 4: fold 0 held out for validation, folds 1-4 for training
+# Step 4: the dataset's held-out split for validation (see lib/dataset_splits.py)
 # --------------------------------------------------------------------------------------
-
-def get_fold_split(atlas_index: pd.DataFrame):
-    val_pdbs = atlas_index.loc[atlas_index["cross_val"] == 0, "pdb"].tolist()
-    train_pdbs = atlas_index.loc[atlas_index["cross_val"] != 0, "pdb"].tolist()
-    return train_pdbs, val_pdbs
-
 
 def load_pretrained_weights(model: torch.nn.Module, ckpt_path: Path) -> None:
     checkpoint = torch.load(ckpt_path, map_location="cpu")
@@ -359,21 +411,26 @@ def build_confusion_matrix_image(confusion_mat, title):
     return image
 
 
-def compute_batch_scrmsd(pred_seqs, gt_backbones, esmfold_tokenizer, esmfold_model, device):
-    """Fold each protein's predicted sequence with ESMFold and Kabsch-RMSD it against that
-    protein's ground-truth backbone (CA, N, C, O) coordinates -- the same self-consistency
-    metric as scripts/train_residue_classifier.py / comparisons/MapDiff/trainer.py."""
-    lengths_t = torch.tensor([bb.shape[0] for bb in gt_backbones])
-    pad_size = lengths_t.max().item()
-    padded = [F.pad(bb, (0, 0, 0, 0, 0, pad_size - bb.shape[0])) for bb in gt_backbones]
-    backbone_tensor = torch.stack(padded, dim=0).unsqueeze(1)  # (B, 1, R_pad, 4, 3)
-    gt_mask = (lengths_t[:, None] > torch.arange(pad_size)[None, :]).unsqueeze(1)  # (B, 1, R_pad)
+def compute_batch_scrmsd(pred_seqs, refs, esmfold_tokenizer, esmfold_model, device):
+    """Fold each protein's designed sequence with ESMFold and Kabsch-RMSD it against that
+    protein's ground-truth *relaxed* (deposited) backbone (CA, N, C, O) -- the same
+    self-consistency metric comparisons/{MapDiff,PiFold} compute.
 
-    rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_mask, esmfold_tokenizer, esmfold_model, device=device)
-    return rmsd.tolist()
+    `refs` are `load_scrmsd_references` entries: the design spans the trajectory's residues
+    and the reference only the deposited subset of them, so `pred_index` carries the
+    correspondence and the reference is scored over all of its own residues.
+    """
+    return evaluate_scrmsd(
+        pred_seqs,
+        [ref["coords"] for ref in refs],
+        esmfold_tokenizer, esmfold_model,
+        pred_indices=[ref["pred_index"] for ref in refs],
+        ref_indices=[np.arange(ref["coords"].shape[0]) for ref in refs],
+        device=device,
+    ).tolist()
 
 
-def run_validation(model, val_loader, crit, val_pdb_order, gt_backbones, esmfold_tokenizer, esmfold_model, epoch, run):
+def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_tokenizer, esmfold_model, epoch, run):
     model.eval()
 
     val_losses, val_acc_top_1, val_acc_top_5, val_acc_top_10 = [], [], [], []
@@ -391,7 +448,7 @@ def run_validation(model, val_loader, crit, val_pdb_order, gt_backbones, esmfold
             batch_pdb_ids = val_pdb_order[sample_offset:sample_offset + num_proteins_in_batch]
             sample_offset += num_proteins_in_batch
 
-            pred_seqs, pred_backbones = [], []
+            pred_seqs, batch_refs = [], []
             for p_idx, pdb_id in zip(range(num_proteins_in_batch), batch_pdb_ids):
                 protein_mask = (batch.batch == p_idx) & valid_mask
                 if not protein_mask.any():
@@ -412,14 +469,16 @@ def run_validation(model, val_loader, crit, val_pdb_order, gt_backbones, esmfold
                 if keep.any():
                     global_confusion_mat += get_confusion_matrix(gt_idx[keep], pred_idx[keep], len(BASE_AMINO_ACIDS))
 
-                gt_backbone = gt_backbones.get(pdb_id)
-                if gt_backbone is not None and gt_backbone.shape[0] == pred_idx.shape[0]:
+                ref = scrmsd_refs.get(pdb_id)
+                # `pred_index` indexes the trajectory's residues, so the design has to span
+                # all of them -- skip any protein the featurizer's valid_mask trimmed.
+                if ref is not None and ref["num_residues"] == pred_idx.shape[0]:
                     pred_seqs.append(''.join(BASE_AMINO_ACIDS[i] for i in pred_idx.tolist()))
-                    pred_backbones.append(gt_backbone)
+                    batch_refs.append(ref)
 
             if pred_seqs:
                 scrmsd_values.extend(compute_batch_scrmsd(
-                    pred_seqs, pred_backbones, esmfold_tokenizer, esmfold_model, DEVICE))
+                    pred_seqs, batch_refs, esmfold_tokenizer, esmfold_model, DEVICE))
 
     val_perps = np.exp(val_losses)
     metrics = {
@@ -445,10 +504,24 @@ def run_validation(model, val_loader, crit, val_pdb_order, gt_backbones, esmfold
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--atlas-h5", type=Path, default=Path("atlas_data.h5"))
-    parser.add_argument("--cross-val-csv", type=Path, default=THIS_DIR / "atlas_cross_val_index.csv")
-    parser.add_argument("--processed-dir", type=Path, default=THIS_DIR / "processed_data")
-    parser.add_argument("--k", type=int, default=5, help="conformers sampled per protein at train/val time")
+    parser.add_argument("--ds-name", type=str, default="atlas", choices=dataset_splits.DATASETS,
+                         help="Which shared dataset to train/evaluate on; the two are run separately")
+    parser.add_argument("--traj-h5", type=Path, default=None,
+                         help="Trajectory store the conformer ensembles are built from "
+                              "(default: the dataset's standard file name)")
+    parser.add_argument("--index-csv", type=Path, default=None,
+                         help="Split index csv (default: the dataset's standard file name)")
+    parser.add_argument("--val-fold", type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
+                         help="ATLAS only: cross_val fold held out for validation (folds != this train). "
+                              "mdCATH ignores it -- its split column is categorical.")
+    parser.add_argument("--pdb-cache", type=Path, default=THIS_DIR / "pdb_cache",
+                         help="Where relaxed (deposited) RCSB entries are cached for scRMSD")
+    parser.add_argument("--processed-dir", type=Path, default=None,
+                         help="Where the .pt conformer ensembles live (default: ./processed_data_<ds>)")
+    parser.add_argument("--max-length", type=int, default=dataset_splits.MAX_LENGTH,
+                         help="Drop proteins longer than this many residues, the cutoff MapDiff and "
+                              "PiFold also apply (lib/dataset_splits.MAX_LENGTH). Pass 0 to disable.")
+    parser.add_argument("--k", type=int, default=2, help="conformers sampled per protein at train/val time")
     parser.add_argument("--pool-size", type=int, default=10, help="conformer pool saved per protein's .pt file")
     parser.add_argument("--course-grain", type=int, default=25, help="time subsampling for the RMSD matrix")
     parser.add_argument("--force-rebuild", action="store_true")
@@ -456,25 +529,41 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=dataset_splits.SEED)
     parser.add_argument("--from-scratch", action="store_true", help="skip loading a pretrained checkpoint")
     parser.add_argument("--ckpt", type=Path, default=None, help="override the default single_chain_k{k}.ckpt")
-    parser.add_argument("--run-name", type=str, default="DynamicMPNN_atlas")
+    parser.add_argument("--run-name", type=str, default=None)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    # `random` and `np.random`, not just torch: DynamicMPNN's featurizer picks which k of each
+    # protein's saved conformer pool to use with `random.sample` / `np.random.choice`
+    # (ProteinGraphFeaturiserSingleChain.get_entries). Because the datasets below are built
+    # with in_memory=True, that draw happens once and then holds for every epoch -- so leaving
+    # these unseeded would mean the *validation set itself* differed between runs.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    traj_h5 = args.traj_h5 or Path(dataset_splits.default_h5(args.ds_name))
+    index_csv = args.index_csv or Path(dataset_splits.default_index_csv(args.ds_name))
+    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{args.ds_name}")
+    run_name = args.run_name or f"DynamicMPNN_{args.ds_name}"
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
         project="SheafProtein",
-        name=args.run_name,
+        name=run_name,
         config={
-            "atlas_h5": str(args.atlas_h5),
+            "ds_name": args.ds_name,
+            "traj_h5": str(traj_h5),
+            "index_csv": str(index_csv),
+            "val_fold": args.val_fold,
+            "max_length": args.max_length,
             "k": args.k,
             "pool_size": args.pool_size,
             "course_grain": args.course_grain,
@@ -483,7 +572,7 @@ def main():
             "lr": args.lr,
             "seed": args.seed,
             "from_scratch": args.from_scratch,
-            "task": "predicting residues from ATLAS conformer ensembles (DynamicMPNN)",
+            "task": f"predicting residues from {args.ds_name} MD conformer ensembles (DynamicMPNN)",
         },
     )
 
@@ -492,27 +581,31 @@ def main():
     artifact.add_file(os.path.abspath(__file__))
     for dependency in (REPO_ROOT / "lib" / "scrmsd.py", REPO_ROOT / "lib" / "stats_utils.py",
                        REPO_ROOT / "lib" / "residue_classifier_dataset.py",
+                       REPO_ROOT / "lib" / "relaxed_pdb.py", REPO_ROOT / "lib" / "dataset_splits.py",
                        REPO_ROOT / "scripts" / "load_dynamics.py"):
         if dependency.exists():
             artifact.add_file(str(dependency))
     run.log_artifact(artifact)
 
-    atlas_index = pd.read_csv(args.cross_val_csv)
+    train_pdbs, val_pdbs = dataset_splits.get_splits(args.ds_name, index_csv, val_fold=args.val_fold)
+    train_pdbs = filter_by_length(train_pdbs, traj_h5, args.max_length)
+    val_pdbs = filter_by_length(val_pdbs, traj_h5, args.max_length)
+    logger.info(f"{args.ds_name}: {len(train_pdbs)} train / {len(val_pdbs)} held-out proteins "
+                f"(fold {args.val_fold} held out, max_length={args.max_length})")
 
     build_processed_dataset(
-        pdb_ids=atlas_index["pdb"].tolist(),
-        atlas_h5_path=args.atlas_h5,
-        processed_dir=args.processed_dir,
+        pdb_ids=train_pdbs + val_pdbs,
+        traj_h5_path=traj_h5,
+        processed_dir=processed_dir,
         pool_size=args.pool_size,
         course_grain=args.course_grain,
         force_rebuild=args.force_rebuild,
     )
 
-    train_pdbs, val_pdbs = get_fold_split(atlas_index)
-    logger.info(f"Fold 0 held out for validation: {len(train_pdbs)} train / {len(val_pdbs)} val proteins")
-
-    gt_backbones = load_ground_truth_backbones(args.processed_dir, val_pdbs)
-    logger.info(f"Loaded ground-truth backbones for {len(gt_backbones)}/{len(val_pdbs)} "
+    # scRMSD scores designs against the *relaxed* (deposited) structure, the same ground
+    # truth comparisons/{MapDiff,PiFold} use. Only the validation split needs them.
+    scrmsd_refs = load_scrmsd_references(traj_h5, val_pdbs, args.pdb_cache)
+    logger.info(f"Loaded relaxed reference structures for {len(scrmsd_refs)}/{len(val_pdbs)} "
                 "validation proteins (scRMSD)")
 
     esmfold_tokenizer, esmfold_model = load_esmfold(device=DEVICE)
@@ -548,7 +641,7 @@ def main():
     train_dataset = PTFileDataset(
         pdb_codes=train_pdbs,
         cfg_features=hydra.utils.instantiate(features_cfg, split="train", device="cpu", distance_eps=DISTANCE_EPS),
-        processed_dir=args.processed_dir,
+        processed_dir=processed_dir,
         split="train",
         in_memory=True,
     )
@@ -559,11 +652,19 @@ def main():
     val_dataset = PTFileDataset(
         pdb_codes=val_pdbs,
         cfg_features=val_tracker,
-        processed_dir=args.processed_dir,
+        processed_dir=processed_dir,
         split="val",
         in_memory=True,
     )
     val_pdb_order = val_tracker.kept_pdb_codes
+    # The proteins actually scored, after the featurizer dropped whatever it could not use.
+    # MapDiff and PiFold log the same summary key, so the three held-out sets can be diffed
+    # rather than assumed identical -- they are cut from the same split index, but each model
+    # drops its own failures.
+    logger.info(f"{args.ds_name}: featurized {len(val_pdb_order)}/{len(val_pdbs)} held-out proteins; "
+                f"dropped {sorted(set(val_pdbs) - set(val_pdb_order))}")
+    run.summary["split_counts"] = {"train": len(train_dataset), "val": len(val_dataset)}
+    run.summary["test_split_ids"] = list(val_pdb_order)
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -597,7 +698,7 @@ def main():
 
         logger.info(f"Epoch {epoch}: train loss {total_loss / max(len(train_loader), 1):.4f}")
 
-        metrics = run_validation(model, val_loader, crit, val_pdb_order, gt_backbones,
+        metrics = run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs,
                                   esmfold_tokenizer, esmfold_model, epoch, run)
         print(f"Val Perplexity: {metrics['ppl_mean']:.4f} \\pm {metrics['ppl_std']:.4f}")
         print(f"Top-1 Recovery: {metrics['top1_mean']:.4f} \\pm {metrics['top1_std']:.4f}")

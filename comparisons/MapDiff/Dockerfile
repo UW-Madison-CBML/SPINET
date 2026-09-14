@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-# mkdssp (DSSP) computes secondary structure in data/generate_graph_atlas.py
+# mkdssp (DSSP) computes secondary structure in data/generate_graph_relaxed.py
 # and data/generate_graph_cath.py. The base image ships conda, which is the
 # only reliable way to get a prebuilt mkdssp binary.
 RUN conda install -y -c ostrokach dssp && conda clean -afy
@@ -45,6 +45,7 @@ RUN pip install --no-cache-dir \
         pandas \
         tqdm \
         mdtraj \
+        requests \
         ruff
 
 WORKDIR /workspace

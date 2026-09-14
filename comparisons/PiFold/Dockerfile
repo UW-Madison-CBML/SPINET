@@ -1,7 +1,9 @@
 # PiFold runtime environment for CHTC (Docker universe).
 #
 # This image only provides the software environment (CUDA + PyTorch +
-# torch_scatter + the small set of pure-Python deps PiFold needs). The
+# torch_scatter + the pure-Python deps PiFold needs, plus transformers for the
+# ESMFold self-consistency RMSD metric and requests/biopython for downloading
+# and parsing relaxed structures from RCSB). The
 # PiFold source code and datasets are NOT baked in here — CHTC jobs pull
 # them in at runtime via HTCondor file transfer / the /staging area, so
 # the image stays small and doesn't need to be rebuilt every time the
@@ -28,6 +30,12 @@ RUN pip install --no-cache-dir \
     && pip install --no-cache-dir \
         biopython==1.83 \
         numpy==1.26.4 \
-        tqdm==4.66.2
+        tqdm==4.66.2 \
+        h5py \
+        pandas \
+        requests \
+        wandb \
+        transformers \
+        accelerate
 
 WORKDIR /workspace
