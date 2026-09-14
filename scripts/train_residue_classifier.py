@@ -26,6 +26,7 @@ from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 import h5py
+from rgnn import RGNN
 
 def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
     files = [path for path in os.listdir() if path.endswith(".pdb")] 
@@ -226,10 +227,10 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 16
-    hidden_dim = 128
-    stalk_dim = 32
-    num_blocks = 6
+    batch_size = 8
+    hidden_dim = 32
+    stalk_dim = 8
+    num_blocks = 4
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
@@ -238,8 +239,7 @@ def train_residue_classifier(args_dict):
     run_name = args_dict["run_name"]
     restriction_map_type=args_dict["restriction_map_type"]
     seed=42
-    paradigm = args_dict["paradigm"]
-    num_timesteps = 128 if paradigm == "dynamic" else 1
+    num_timesteps = 128
     use_scheduler=False
     test_val = False
     use_profiler = False
@@ -310,7 +310,6 @@ def train_residue_classifier(args_dict):
             "use_scheduler":use_scheduler,
             "scheduler_type":"cosine annealing warm restarts every epoch" if use_scheduler else "none",
             "restriction_map_type":restriction_map_type,
-            "paradigm":paradigm,
             "use_masking": use_masking
         },
     )
@@ -332,8 +331,8 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
-    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, paradigm=paradigm, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
+    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
+    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
 
     print("Train groups in this H5:", len(train_dataset.groups))
     print("Val groups in this H5:", len(val_dataset.groups))
@@ -353,7 +352,6 @@ def train_residue_classifier(args_dict):
 
     if not ablate_to_rgnn:
         model = NodeSheafClassifier(
-            paradigm=paradigm,
             atoms=BACKBONE_ATOMS,
             frame_origin="CA",
             num_classes=num_classes,
@@ -369,7 +367,7 @@ def train_residue_classifier(args_dict):
         ).to(DEVICE)
 
     else:
-        model = RGNN(15, 13, hidden_dim, hidden_dim).to(device)
+        model = RGNN(15, 13, hidden_dim).to(DEVICE)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run.log({"params": pytorch_total_params})

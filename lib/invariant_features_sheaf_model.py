@@ -89,18 +89,19 @@ class SheafLearner(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.stalk_dim = stalk_dim
-        self.lin = nn.Linear(2*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
+        self.lin = nn.Linear(3*self.input_dim, 2*self.stalk_dim) # TODO is this too much?
         self.map_learner = nn.Linear(2*self.stalk_dim, self.stalk_dim ** 2)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
         row, col = edge_index
 
         x_row = x[row]
         x_col = x[col]
 
-        maps = self.map_learner(F.relu(self.lin(torch.cat([x_row, x_col], dim=-1)))).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+        maps = self.map_learner(F.relu(self.lin(torch.cat([x_row, edge_attr, x_col], dim=-1)))).reshape(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
 
         return maps
+
 
 class SheafAttentionLearner(nn.Module):
     def __init__(self, input_dim:int, stalk_dim:int):
@@ -188,7 +189,7 @@ class SheafAttentionConv(MessagePassing):
         edge_stalk = edge_attr.view(edge_attr.shape[0], self.num_channels, self.stalk_dim)
          
         if not self.ablate_sheaves: 
-            maps = self.sheaf_learner(x, edge_attr edge_index)
+            maps = self.sheaf_learner(x, edge_index, edge_attr)
             _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
             neighbor_maps = maps[reverse_edge_indices] 
 
@@ -426,7 +427,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.use_attention = config.use_attention
                 self.use_masking = config.use_masking
         
-        self.init_dynamics_embedding = InitDynamicsEmbedding(12, -1, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin)
         
 
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
