@@ -50,7 +50,7 @@ class ResidueClassifierDataset(Dataset):
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
     
-    def __init__(self, h5_path, np_rng, groups:list|None=None, paradigm:str="dynamic", traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
+    def __init__(self, h5_path, np_rng, groups:list|None=None, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
         """
         self
         h5_path: the dataframe containing trajectory information 
@@ -58,21 +58,14 @@ class ResidueClassifierDataset(Dataset):
         variable_length: None if fixed length sequences else the range (inclusive) of valid sequence sizes
         epsilon: tolerance to build edge between nodes, i.e. if during the trajectory the edges ever get within epsilon from eachother
         """
+
         self.h5_path = h5_path
         self.h5_file = None 
         self.groups = groups
         self.epsilon = epsilon
         self.np_rng = np_rng
-        assert paradigm in ["dynamic", "static", "ensemble"], f"invalid option for paradigm: {paradigm}"
         
-
-        # TODO implement and get rid of below
-        assert paradigm != "ensemble", "ensemble is not implemented"
-        self.paradigm = paradigm
-        if self.paradigm == "dynamic":
-            assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
-        elif self.paradigm == "static":
-            assert fixed_length == 1, "fixed length must be 1 if using static model"
+        assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
 
         self.fixed_length = fixed_length
         self.variable_length = variable_length
@@ -80,15 +73,8 @@ class ResidueClassifierDataset(Dataset):
 
 
         with h5py.File(self.h5_path, "r") as f:
-
             self.build_groups(f)
-            if self.paradigm == "dynamic":
-                self.index = self.build_dynamic_index(f)
-            elif self.paradigm == "static":
-                self.index = self.build_static_index(f)
-            # else: otherwise the program will fail. TODO implement this
-        
-     
+            self.index = self.build_dynamic_index(f)
             
 
     def __len__(self):
@@ -97,42 +83,29 @@ class ResidueClassifierDataset(Dataset):
     def __getitem__(self, idx):
         if self.h5_file is None:
             self.h5_file = h5py.File(self.h5_path, "r", libver="latest", swmr=True)
-                
-        if self.paradigm == "dynamic":
-            traj_idx, frame_index_start, frame_index_end = self.index[idx]
-            idxs = slice(frame_index_start, frame_index_end)
-        elif self.paradigm == "static":
-            traj_idx, idxs = self.index[idx]
-        # else: TODO 
+            
+        traj_idx, frame_index_start, frame_index_end = self.index[idx]
+        idxs = slice(frame_index_start, frame_index_end)
 
         group_name = self.groups[traj_idx]
         
-        # ensure that these have the proper shape for the paradigm
-        if self.paradigm == "ensemble":
-            pass 
-        else:
-            coordinates = torch.from_numpy(self.h5_file[group_name]["coordinates"][:, idxs])
-            pos = coordinates[:,:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]] if self.paradigm == "dynamic" else coordinates[:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]]
-            features = torch.from_numpy(self.h5_file[group_name]["coordinates"][:, idxs])
-            features = features.reshape(features.shape[0], features.shape[1], -1)
-            frame_maps = torch.from_numpy(self.h5_file[group_name]["frame_maps"][:, idxs])
-            y = torch.tensor([self.__class__.AMINO_ACIDS.index(self.__class__.RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in self.h5_file[group_name]["residues"][:]])
-            node_mask = torch.zeros(len(y))
-            traj_id = group_name
+        coordinates = torch.from_numpy(self.h5_file[group_name]["coordinates"][:, idxs])
+        pos = coordinates[:,:, self.__class__.ATOM_INDICES[self.__class__.FRAME_ORIGIN]]
+        features = torch.from_numpy(self.h5_file[group_name]["spinet_features"][:, idxs])
+        frame_maps = torch.from_numpy(self.h5_file[group_name]["frame_maps"][:, idxs])
+        y = torch.tensor([self.__class__.AMINO_ACIDS.index(self.__class__.RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in self.h5_file[group_name]["residues"][:]])
+        node_mask = torch.zeros(len(y))
+        traj_id = group_name
 
-        if self.paradigm == "dynamic":
-            pos_time_first = pos.permute(1,0,2)
-            dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
+        pos_time_first = pos.permute(1,0,2)
+        dists_over_time = torch.cdist(pos_time_first, pos_time_first, p=2.0)
 
-            dists = dists_over_time.amin(dim=0)
-
-        elif self.paradigm == "static":
-            dists = torch.cdist(pos, pos, p=2.0)
+        dists = dists_over_time.amin(dim=0)
 
         edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
         edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1)[:,None].float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
 
-        return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id)
+        return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, lengths = torch.tensor(features.shape[1]).unsqueeze(0))
 
     def build_groups(self, h5_file):
         use_split = self.groups is not None
