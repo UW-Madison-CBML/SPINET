@@ -170,7 +170,7 @@ class SheafAttentionConv(MessagePassing):
         self.leaky = nn.LeakyReLU(0.2)
 
 
-        self.update_linear = nn.Sequential(nn.Linear((self.num_heads + 1) * self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
+        self.update_linear = nn.Sequential(nn.Linear((self.num_heads + 1) * self.hidden_dim, 4*self.hidden_dim), nn.ReLU(), nn.Linear(4*self.hidden_dim, self.hidden_dim))
 
         if not self.ablate_sheaves:
             if self.restriction_map_type == "low_rank":
@@ -236,13 +236,13 @@ class SheafAttentionConv(MessagePassing):
         alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
         return (alpha * transported).permute(1,0,2,3).contiguous() # multiplication by alpha serves as our dropout here
 
-        def update(self, aggr_out, x):
-            if(x.ndim > 2):
-                x = x.view(x.shape[0], self.hidden_dim)
-            if(aggr_out.ndim > 2):
-                aggr_out = aggr_out.view(aggr_out.shape[0], self.hidden_dim * self.num_heads)
+    def update(self, aggr_out, x):
+        if(x.ndim > 2):
+            x = x.view(x.shape[0], self.hidden_dim)
+        if(aggr_out.ndim > 2):
+            aggr_out = aggr_out.view(aggr_out.shape[0], self.hidden_dim * self.num_heads)
 
-            return self.update_linear(torch.cat([x, aggr_out], dim=-1))
+        return self.update_linear(torch.cat([x, aggr_out], dim=-1))
 
 
     
@@ -508,7 +508,6 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         self.project_nodes = nn.Linear(12, self.hidden_dim)
         self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
 
-
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
 
         self.classifier = nn.Sequential(
@@ -524,7 +523,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
 
         #self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
     
-        data.x = self.project_node(data.x) 
+        data.x = self.project_nodes(data.x) 
         _, h = self.node_temporal_product(data.x)
         data.x = h.squeeze(0)
 

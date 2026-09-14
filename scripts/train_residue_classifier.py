@@ -227,8 +227,8 @@ def train_residue_classifier(args_dict):
     val_ratio = 0.15
     test_ratio = 0.15
     batch_size = 16
-    hidden_dim = 64
-    stalk_dim = 16
+    hidden_dim = 128
+    stalk_dim = 32
     num_blocks = 6
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
