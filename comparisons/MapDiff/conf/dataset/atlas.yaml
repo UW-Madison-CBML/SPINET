@@ -1,8 +1,11 @@
 name: ATLAS
+
+# Graphs featurized from each protein's *relaxed* (deposited) PDB entry, cropped to the
+# residues its ATLAS trajectory covers -- see ../../data/generate_graph_relaxed.py.
 train_dir: ./surffold_data/atlas_process/train/
-# Fold 0 of atlas_cross_val_index.csv doubles as both validation and test -- the same
-# split scripts/train_residue_classifier.py and comparisons/{gvp-pytorch,DynamicMPNN}/train.py
-# use, which only holds out one fold. See ../../data/generate_graph_atlas.py.
+# Fold 0 of atlas_cross_val_index.csv is held out; ATLAS has no further held-out set, so the
+# same fold doubles as validation and test. This is the split
+# scripts/train_residue_classifier.py and comparisons/{gvp-pytorch,DynamicMPNN}/train.py use.
 val_dir: ./surffold_data/atlas_process/validation/
 test_dir: ./surffold_data/atlas_process/validation/
 

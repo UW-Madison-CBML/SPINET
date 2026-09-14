@@ -1,29 +1,47 @@
 docker_image = cmikulski4/dynamicmpnn:v8
 universe = docker
 
-
 # --from-scratch is a DELIBERATE experimental choice, not a workaround. checkpoints/
 # single_chain_k*.ckpt does work here (36.0% recovery on our ATLAS data via zenodo_compare.py,
 # matching 35.8% on upstream's own val set) -- but it was pretrained on upstream's
 # train_pt_single_chain set, which the sheaf model this is benchmarked against never sees.
 # Fine-tuning from it would make the comparison measure pretraining, not architecture.
-# Both models train on ATLAS alone.
-shell = ./train.sh --from-scratch
+# Both models train on our data alone.
+#
+# DynamicMPNN takes an ENSEMBLE of conformers sampled from the MD trajectory -- that
+# ensemble input is the thing being benchmarked, so unlike comparisons/{MapDiff,PiFold}
+# it is not retargeted onto relaxed structures. It does download the relaxed (deposited)
+# structures, but only as the scRMSD reference, so all three models are scored against
+# the same ground truth.
+#
+# ATLAS and mdCATH are trained and evaluated SEPARATELY -- one job each, matching
+# scripts/train_residue_classifier.py's --ds-name. ATLAS is the default; for mdCATH:
+#
+#   condor_submit train.sub DS_NAME=mdcath \
+#       DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
+#       DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv'
 
-log = logs/train_$(Cluster)_$(Process).log
-error = logs/train_$(Cluster)_$(Process).err
-output = logs/train_$(Cluster)_$(Process).out
+ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+# Override these three together to switch datasets (see above).
+DS_NAME = atlas
+DS_H5   = $(ResearchDrive)/atlas_data.h5
+DS_CSV  = $(ResearchDrive)/atlas_cross_val_index.csv
+
+shell = ./train.sh --from-scratch --ds-name $(DS_NAME)
+
+log = logs/train_$(DS_NAME)_$(Cluster)_$(Process).log
+error = logs/train_$(DS_NAME)_$(Cluster)_$(Process).err
+output = logs/train_$(DS_NAME)_$(Cluster)_$(Process).out
 
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
-# ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time, so this
-# needs a machine with internet access -- same one scripts/train_residue_classifier.sub uses.
+# ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time, and
+# lib/relaxed_pdb.py downloads the relaxed structures from files.rcsb.org, so this needs a
+# machine with internet access -- same one scripts/train_residue_classifier.sub uses.
 Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
-
-
-transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../../api_keys.txt, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv, ../../scripts/load_dynamics.py
-
+transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../../api_keys.txt, ../../scripts/load_dynamics.py, $(DS_H5), $(DS_CSV)
 
 request_cpus = 8
 request_memory = 128GB

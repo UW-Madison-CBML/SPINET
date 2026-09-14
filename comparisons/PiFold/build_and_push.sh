@@ -7,15 +7,15 @@
 set -euo pipefail
 
 USERNAME=${1:?Usage: $0 cmikulski4 [tag]}
-TAG=${2:-v1}
+TAG=${2:-v2}
 IMAGE="${USERNAME}/pifold:${TAG}"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo ">>> Building ${IMAGE}"
-docker build -t "${IMAGE}" -f "${REPO_ROOT}/chtc/Dockerfile" "${REPO_ROOT}"
+docker build -t "${IMAGE}" -f "${HERE}/Dockerfile" "${HERE}"
 
 echo ">>> Pushing ${IMAGE}"
 docker push "${IMAGE}"
 
-echo ">>> Done. Set 'docker_image = ${IMAGE}' in chtc/pifold.sub"
+echo ">>> Done. Set 'docker_image = ${IMAGE}' in pifold.sub"

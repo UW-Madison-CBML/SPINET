@@ -7,7 +7,10 @@ import torch
 from transformers import AutoTokenizer, EsmForProteinFolding
 
 BACKBONE_ATOM14_IDX = {"N":0, "CA":1, "C":2, "O":4}  # N, CA, C, O # TODO fix this
-from load_dynamics import BACKBONE_ATOMS
+# The repo-wide ground-truth atom order, re-exported by `relaxed_pdb` rather than imported
+# from `load_dynamics`: the comparison models all ship this file, and not all of their images
+# carry mdtraj (which `load_dynamics` pulls in at import time).
+from relaxed_pdb import BACKBONE_ATOMS
 
 @torch.no_grad()
 def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, device="cpu"):
@@ -168,6 +171,78 @@ def fold_sequences(
  
    
 
+
+
+@torch.no_grad()
+def evaluate_scrmsd(
+    sequences: List[str],
+    reference_coords: List[torch.Tensor],
+    tokenizer,
+    model,
+    pred_indices: List = None,
+    ref_indices: List = None,
+    device="cpu",
+):
+    """Self-consistency RMSD of each designed sequence against a single reference structure.
+
+    This is the scRMSD every comparison model reports: fold the predicted sequence with
+    ESMFold and Kabsch-RMSD the folded backbone against the protein's ground-truth *relaxed*
+    (deposited) structure -- see lib/relaxed_pdb.py.
+
+    sequences: length-B list of 1-letter amino-acid strings, one design per protein.
+    reference_coords: length-B list of (R_ref_i, A, 3) ground-truth backbone coordinates.
+    pred_indices / ref_indices: optional length-B lists of equal-length index arrays giving
+        the residue correspondence between the folded prediction and the reference. Needed
+        when the two are not positionally identical -- DynamicMPNN designs over the
+        trajectory's residues, whose deposited structure resolves a different (aligned)
+        subset. Default (None) pairs residue i with residue i, which requires the sequence
+        and the reference to have the same length.
+
+    Returns a (B,) cpu tensor of RMSDs, in whatever units `reference_coords` is in
+    (Angstroms for lib/relaxed_pdb records, since deposited PDBs are in Angstroms).
+    """
+    if len(sequences) != len(reference_coords):
+        raise ValueError("{} sequences vs {} reference structures".format(
+            len(sequences), len(reference_coords)))
+
+    pred_coords, _ = fold_sequences(sequences, tokenizer, model, device=device)  # (B, L_max, A, 3)
+    B, _, num_atoms, _ = pred_coords.shape
+
+    selected_pred, selected_ref = [], []
+    for i, seq in enumerate(sequences):
+        ref = torch.as_tensor(reference_coords[i], dtype=pred_coords.dtype, device=pred_coords.device)
+        if pred_indices is None:
+            if ref.shape[0] != len(seq):
+                raise ValueError(
+                    "protein {}: {}-residue reference vs {}-residue design; pass "
+                    "pred_indices/ref_indices to score an aligned subset".format(i, ref.shape[0], len(seq)))
+            p_idx = torch.arange(len(seq), device=pred_coords.device)
+            r_idx = p_idx
+        else:
+            p_idx = torch.as_tensor(pred_indices[i], dtype=torch.long, device=pred_coords.device)
+            r_idx = torch.as_tensor(ref_indices[i], dtype=torch.long, device=pred_coords.device)
+        selected_pred.append(pred_coords[i, p_idx])
+        selected_ref.append(ref[r_idx])
+
+    # Pad to the longest correspondence and mask the padding out of the superposition, so the
+    # whole batch superposes in one shot.
+    lengths = torch.tensor([p.shape[0] for p in selected_pred])
+    if (lengths == 0).any():
+        raise ValueError("at least one protein has no aligned residues to score")
+    pad_size = int(lengths.max().item())
+
+    P = torch.zeros(B, pad_size, num_atoms, 3, dtype=pred_coords.dtype, device=pred_coords.device)
+    Q = torch.zeros_like(P)
+    for i, (p, q) in enumerate(zip(selected_pred, selected_ref)):
+        P[i, : p.shape[0]] = p
+        Q[i, : q.shape[0]] = q
+
+    residue_mask = lengths[:, None].to(pred_coords.device) > torch.arange(pad_size, device=pred_coords.device)[None, :]
+    atom_mask = residue_mask[:, :, None].expand(-1, -1, num_atoms).reshape(B, pad_size * num_atoms)
+
+    return kabsch_rmsd(P.reshape(B, pad_size * num_atoms, 3),
+                       Q.reshape(B, pad_size * num_atoms, 3),
+                       mask=atom_mask, device=device)
 
 
 def evaluate_batch_rmsd(

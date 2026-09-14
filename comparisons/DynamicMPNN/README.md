@@ -1,4 +1,25 @@
-# ATLAS → DynamicMPNN: 5-fold CV eval script
+# MD trajectories → DynamicMPNN
+
+## Datasets, and why this model keeps the MD input
+
+ATLAS and mdCATH are trained and evaluated **separately** — one run each, `--ds-name atlas`
+or `--ds-name mdcath` — matching `scripts/train_residue_classifier.py`. Splits come from
+`lib/dataset_splits.py`: ATLAS holds out one `cross_val` fold; mdCATH trains on its topology
+split's `train`+`test` rows and **evaluates on the `validation` rows only**.
+
+`comparisons/{MapDiff,PiFold}` are static-structure models, so they were retargeted onto each
+protein's relaxed (deposited) PDB entry. DynamicMPNN is **not**: it consumes an ensemble of
+conformers sampled from the trajectory, and that ensemble input is exactly the thing being
+benchmarked, so Steps 1–3 below still read the MD store.
+
+What it *does* take from the deposited structures is the **scRMSD reference**. Each design is
+folded with ESMFold (`lib/scrmsd.py`) and Kabsch-RMSD'd against the protein's relaxed
+backbone, so all three comparison models are scored against the same ground truth.
+`lib/relaxed_pdb.py` aligns the deposited chain to the trajectory's own residue sequence and
+returns the residue correspondence, since the two resolve different residue sets (and for an
+mdCATH domain, the deposited chain is much longer than the simulated domain).
+
+## ATLAS → DynamicMPNN: 5-fold CV eval script
 
 Everywhere DynamicMPNN touches data, a "protein" is a small cluster of
 discrete conformers rather than a trajectory.
@@ -38,6 +59,7 @@ pseudo-code
 # Step 0: inputs already sitting in this directory
 # ---------------------------------------------------------------
 atlas_cross_val_index.csv   # pdb -> cross_val fold (0..4), pre-made 5-fold split
+                             # (mdCATH: mdcath_320_0_topology_split.csv, domain -> split)
 hdf5_data.py                 # <- the script we're fleshing out
 
 # ---------------------------------------------------------------

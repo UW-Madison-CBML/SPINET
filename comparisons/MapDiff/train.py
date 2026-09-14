@@ -71,7 +71,9 @@ def main(cfg: DictConfig):
     else:
         wandb_run = None
 
-    if cfg.dataset.name not in ('CATH', 'ATLAS'):
+    # ATLAS and MDCATH are trained and evaluated separately (one run each, dataset=atlas or
+    # dataset=mdcath), matching scripts/train_residue_classifier.py's --ds-name.
+    if cfg.dataset.name not in ('CATH', 'ATLAS', 'MDCATH'):
         raise ValueError(f"unknown dataset {cfg.dataset.name}")
 
     train_ID = os.listdir(cfg.dataset.train_dir)

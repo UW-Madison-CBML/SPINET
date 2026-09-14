@@ -89,7 +89,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
             backbone_tensor = torch.stack(padded_tensors, dim=0).permute(0,2,1,3,4)          # (B, T, num_res_padded, num_atoms, 3)
             gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])[:, None, :].repeat(1, backbone_tensor.shape[1], 1)  # (B, T, pad_size) bool
 
-            rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask, esmfold_model, esmfold_tokenizer, device=device)
+            rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask, esmfold_tokenizer, esmfold_model, device=device)
             scrmsd.extend(rmsd.tolist())"""
 
             out_batch = out_batch.cpu()
@@ -385,7 +385,8 @@ def train_residue_classifier(args_dict):
     if use_scheduler:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
 
-    esmfold_model, esmfold_tokenizer = load_esmfold(device=DEVICE)
+    # load_esmfold returns (tokenizer, model), in that order.
+    esmfold_tokenizer, esmfold_model = load_esmfold(device=DEVICE)
 
     # training loop
     for epoch in range(epochs):
