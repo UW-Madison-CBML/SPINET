@@ -506,3 +506,45 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
             return data
 
 
+<<<<<<< Updated upstream
+=======
+class NodeOnlyMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim=15,
+        hidden_dim=32,
+        num_classes=20,
+        dropout=0.2,
+    ):
+        super().__init__()
+
+        # same encoder applied independently to every residue at every frame
+        self.frame_encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 2 * hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_classes),
+        )
+
+    def forward(self, data): # data.x: (N_residues, T, 15)
+        h = self.frame_encoder(data.x) # (N_residues, T, hidden_dim)
+        h = h.mean(dim=1) # (N_residues, hidden_dim)
+        data.x = self.classifier(h) # (N_residues, num_classes)
+        return data
+
+
+
+
+# test if gradients are stable
+#if __name__ == "__main__":
+
+>>>>>>> Stashed changes
