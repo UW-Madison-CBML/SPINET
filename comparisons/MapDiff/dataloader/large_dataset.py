@@ -47,6 +47,11 @@ class Cath(Dataset):
             edge_index=data.edge_index,
             edge_attr=data.edge_attr,
             ss=data.ss[:data.x.shape[0], :],
-            sasa=data.x[:, 20]
+            sasa=data.x[:, 20],
+            # The protein id (``<pdb>_<chain>`` for ATLAS, the CATH domain for mdCATH), carried
+            # through `Batch.from_data_list` as a per-graph list so trainer.py can label each
+            # design in its `pred_seqs` W&B table -- matching what
+            # scripts/train_residue_classifier.py logs from `Data.traj_id`.
+            name=ID[:-3] if ID.endswith('.pt') else ID,
         )
         return graph

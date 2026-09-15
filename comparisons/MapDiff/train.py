@@ -189,7 +189,10 @@ def main(cfg: DictConfig):
     print(f"Prior model parameters: {count_parameters(prior_model)}")
     print(f"Diffusion model parameters: {count_parameters(diffusion_model)}")
     if wandb_run:
-        wandb_run.log({"prior_params": count_parameters(prior_model),
+        # `params` is the key scripts/train_residue_classifier.py logs its parameter count
+        # under; the two MapDiff-specific breakdowns sit alongside it.
+        wandb_run.log({"params": count_parameters(diffusion_model),
+                        "prior_params": count_parameters(prior_model),
                         "diffusion_params": count_parameters(diffusion_model)})
 
     prior_optimizer = Adam(prior_model.parameters(), lr=cfg.mask_train.lr, betas=(0.95, 0.999),

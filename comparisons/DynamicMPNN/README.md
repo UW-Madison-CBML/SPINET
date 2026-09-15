@@ -29,14 +29,35 @@ backbone, so all three comparison models are scored against the same ground trut
 returns the residue correspondence, since the two resolve different residue sets (and for an
 mdCATH domain, the deposited chain is much longer than the simulated domain).
 
+## Metrics logged (a la `scripts/train_residue_classifier.py`)
+
+Every run additionally logs the *complete* metric set
+`scripts/train_residue_classifier.py`'s `run_val` produces, under exactly the
+same W&B keys, so the sheaf model and the three comparison models can be read
+off one dashboard. That set is built by `lib.stats_utils.ResidueMetrics` (which
+owns all of its conventions -- everything is accumulated per protein, and means
+and stds are over proteins):
+
+- `<split>_top{1,5,10}_acc_{mean,std}` -- per-protein recovery
+- `<split>_perp_{mean,std}` and `epoch_<split>_loss` -- per-protein perplexity
+- `<split>_<AA>_{f1,precision,recall}_{mean,std}` -- one triple per residue
+  type, named with the uppercase three-letter code
+- `<split>_aa_confusion_matrix` -- a `wandb.Image`
+- `pred_seqs` (`<split>_pred_seqs` outside the val split) -- a `wandb.Table` of
+  every argmax design, one row per protein, labelled by `pdb` (`<pdb>_<chain>`
+  for ATLAS, the CATH domain id for mdCATH)
+- `<split>_rmsd_{mean,std}` -- scRMSD, under run_val's key
+- `params` -- trainable parameter count
+
 ## ATLAS → DynamicMPNN: 5-fold CV eval script
 
 Everywhere DynamicMPNN touches data, a "protein" is a small cluster of
 discrete conformers rather than a trajectory.
 
 - `PTFileDataset.__getitem__` loads one `{pdb_code}.pt` file, which is a PyG
-  `Data` object with exactly two fields: `cluster_members` (a list of
-  conformer IDs) and `pyg_dict` (id → per-conformer `Data`).
+  `Data` object with `cluster_members` (a list of conformer IDs), `pyg_dict`
+  (id → per-conformer `Data`) and, optionally, the `tm_scores` /
+  `tm_score_representatives` pair that drives TM-based *k* selection.
   (`src/dynamicmpnn/datamodules/pt_dataset.py`)
 - `ProteinGraphFeaturiser.stack_conformations` **hard-errors if you give it
   more than 2 conformers** (`if len(confs_list) > 2: raise ValueError`), and
@@ -56,9 +77,23 @@ So DynamicMPNN was trained and is evaluated on **pairs (or small sets) of
 structurally distinct states** — think apo/holo, open/closed — never on a
 dense time series. If you feed it raw consecutive ATLAS frames:
 
-The RMSD-pair approach is also just the MD analogue of what DynamicMPNN
-already does with static structures: pick the two (or k) frames that best
-represent "distinct conformational states" of the trajectory.
+Conformer selection here is the MD analogue of what DynamicMPNN already does
+with static structures: pick the frames that best represent "distinct
+conformational states" of the trajectory, scored with **DynamicMPNN's own
+TM-score** (`dynamicmpnn.eval.scoring.compute_tm_score`) rather than an RMSD
+proxy. Upstream fills its TM matrices from Foldseek all-vs-all alignments; that
+alignment step is unnecessary here because every frame is the same chain, so the
+residue correspondence is the identity and `compute_tm_score`'s Kabsch
+superposition over CA atoms is the whole calculation.
+
+`train.py` saves a pool of ~10 farthest-point-sampled frames per protein
+together with their TM sub-matrix, as `tm_scores` /
+`tm_score_representatives`. Those are the two fields
+`ProteinGraphFeaturiserSingleChain.get_entries` looks for: with them present it
+draws the *k* conformers it trains on by TM dissimilarity (its own
+`compute_sequential_probabilities`); without them it silently falls back to
+`random.sample`. An ensemble `.pt` built before this change has no `tm_scores`
+and is rebuilt automatically.
 
 ## Big-picture pipeline
 
@@ -83,15 +118,13 @@ for pdb_code in atlas_index["pdb"]:
 # Step 2: reduce each trajectory to the conformers DynamicMPNN wants
 #         (this replaces "load pdbs directly" — see reasoning above)
 # ---------------------------------------------------------------
-def select_states(traj, k=2):
-    rmsd_matrix = pairwise_ca_rmsd(traj.coords)      # [T, T]
-    if k == 2:
-        i, j = argmax(rmsd_matrix)                   # the single most-dissimilar pair
-        return [i, j]
-    else:
-        return farthest_point_sample(rmsd_matrix, k)  # greedy max-min RMSD, same
-                                                       # spirit as DynamicMPNN's own
-                                                       # TM-dissimilarity k-selection
+def select_states(traj, pool_size=10):
+    tm_matrix = pairwise_tm(traj.coords)                    # [T, T], DynamicMPNN's own
+                                                             # compute_tm_score, CA only
+    return farthest_point_sample(1 - tm_matrix, pool_size)   # greedy max-min TM
+                                                             # dissimilarity; the featuriser
+                                                             # then draws k of this pool from
+                                                             # the same TM matrix
 
 frame_ids = select_states(traj, k=2)   # match checkpoint (k=2 multi-chain, or k=2/3/5 single-chain)
 

@@ -5,11 +5,18 @@
   2. `train()` / `test()` -- denoising diffusion training (was `main.py` +
      `trainer/trainer.py`), fine-tuning the same prior model in place.
 
-Both stages log to a single Weights & Biases run (no more comet_ml), and both
-validation (`train()`) and `test()` additionally compute self-consistency
-RMSD: fold the predicted sequence with ESMFold and Kabsch-RMSD it against the
-protein's ground-truth *relaxed* (deposited) backbone, mirroring
-`scripts/train_residue_classifier.py`'s `run_val`. The graphs MapDiff trains
+Both stages log to a single Weights & Biases run (no more comet_ml). Validation
+(`train()`) and `test()` report MapDiff's own metrics (median/mean recovery,
+BLOSUM NSSR) *and*, under the same keys, the full metric set
+`scripts/train_residue_classifier.py`'s `run_val` logs -- per-protein top-1/5/10
+recovery, perplexity, per-residue precision/recall/f1, an amino-acid confusion
+matrix and a `pred_seqs` table of every design keyed by `<pdb>_<chain>`. That
+set is built by `lib.stats_utils.ResidueMetrics`, which is what keeps the three
+comparison models and the sheaf model reporting the same thing.
+
+Both passes also compute self-consistency RMSD (`lib.scrmsd.evaluate_scrmsd`):
+fold the predicted sequence with ESMFold and Kabsch-RMSD it against the
+protein's ground-truth *relaxed* (deposited) backbone. The graphs MapDiff trains
 and evaluates on are themselves built from those deposited structures (see
 data/generate_graph_relaxed.py), so `atom_pos` below already *is* the relaxed
 reference -- no separate lookup or alignment is needed here.
@@ -20,12 +27,10 @@ import os
 
 import numpy as np
 import torch
-import wandb
-import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 from pathlib import Path
 from prettytable import PrettyTable
-from sklearn.metrics import f1_score, ConfusionMatrixDisplay
+from sklearn.metrics import f1_score
 from tqdm import tqdm
 
 from evaluator import Evaluator
@@ -35,7 +40,7 @@ from utils import inf_iterator, enable_dropout, cal_stats_metric
 # ../README.md and train.sh) -- fall back to walking up to a lib/ directory
 # for local/dev runs from inside the source tree.
 try:
-    import stats_utils
+    from stats_utils import ResidueMetrics, three_letter_codes
     from scrmsd import evaluate_scrmsd
 except ImportError:
     import sys
@@ -44,7 +49,7 @@ except ImportError:
         if os.path.isdir(_cand):
             sys.path.insert(0, os.path.abspath(_cand))
             break
-    import stats_utils
+    from stats_utils import ResidueMetrics, three_letter_codes
     from scrmsd import evaluate_scrmsd
 
 # Fixed one-letter amino-acid order MapDiff's 20-dim one-hot (`data.x[:, :20]`)
@@ -58,20 +63,6 @@ AMINO_ACIDS = ['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I',
 # [N, CA, C, CB, O] along dim=1 -- reorder to lib/scrmsd.py's expected
 # CA, N, C, O (see scripts/load_dynamics.py's BACKBONE_ATOMS).
 ATOM_POS_TO_BACKBONE_IDX = [1, 0, 2, 4]
-
-
-def build_confusion_matrix_image(confusion_mat, title):
-    fig, ax = plt.subplots(figsize=(12, 12))
-    disp = ConfusionMatrixDisplay(
-        confusion_matrix=confusion_mat.numpy().astype(int),
-        display_labels=AMINO_ACIDS,
-    )
-    disp.plot(cmap='Blues', ax=ax, values_format='d')
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-    plt.title(title)
-    image = wandb.Image(fig)
-    plt.close(fig)
-    return image
 
 
 def compute_batch_scrmsd(g_batch, batch_logits, esmfold_tokenizer, esmfold_model, device):
@@ -173,6 +164,27 @@ class MapDiffTrainer:
         self.train_table = PrettyTable(["# Epoch", "# Step", "Train_loss"])
         self.val_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity", "scRMSD"])
         self.test_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity", "scRMSD"])
+
+        # Only used to head the LaTeX summary row `ResidueMetrics.summary_line` prints, the
+        # same one scripts/train_residue_classifier.py's `run_val` ends with.
+        self.num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+    @staticmethod
+    def _batch_names(g_batch):
+        """Per-graph protein ids for a collated `Batch`, in graph order.
+
+        `dataloader.large_dataset.Cath` attaches `name` to every graph, so
+        `Batch.from_data_list` hands it back as a list -- but a batch of one collapses to a
+        bare string, and graphs featurized before `name` existed have none at all. Normalise
+        both here so the `pred_seqs` table always has a label per design.
+        """
+        names = getattr(g_batch, 'name', None)
+        num_graphs = int(g_batch.batch.max().item()) + 1
+        if names is None:
+            return ['unknown'] * num_graphs
+        if isinstance(names, str):
+            names = [names]
+        return list(names)
 
     # ------------------------------------------------------------------
     # Stage 1: mask-prior IPA pretraining
@@ -298,8 +310,10 @@ class MapDiffTrainer:
             all_logits = torch.tensor([])
             all_seq = torch.tensor([])
             recovery = []
-            scrmsd_values = []
-            global_confusion_mat = torch.zeros((20, 20))
+            # Everything scripts/train_residue_classifier.py's `run_val` logs, under the same
+            # keys -- per-protein top-1/5/10, perplexity, per-residue precision/recall/f1, the
+            # confusion matrix and the `pred_seqs` table (see lib/stats_utils.py).
+            metrics = ResidueMetrics(three_letter_codes(AMINO_ACIDS), val_name='val')
 
             for g_batch, ipa_batch in tqdm(self.val_dataloader, desc=f"Epoch {self.epoch} [Val]", leave=False):
                 g_batch = g_batch.to(self.device)
@@ -316,36 +330,36 @@ class MapDiffTrainer:
                 all_seq = torch.cat([all_seq, g_batch.x.cpu()])
 
                 batch_idx = g_batch.batch.cpu().numpy()
+                batch_names = self._batch_names(g_batch)
                 for i in range(batch_idx.max() + 1):
                     idx = np.where(batch_idx == i)
                     sample_logits = batch_logits[idx].argmax(dim=1)
                     sample_seq = g_batch.x.cpu()[idx].argmax(dim=1)
                     recovery.append(self.evaluator.cal_recovery(sample_logits, sample_seq))
+                    metrics.add_protein(batch_logits[idx], sample_seq, pdb_id=batch_names[i],
+                                        sequence=''.join(AMINO_ACIDS[j] for j in sample_logits.tolist()))
 
-                global_confusion_mat += stats_utils.get_confusion_matrix(
-                    g_batch.x.cpu().argmax(dim=1), batch_logits.argmax(dim=1), num_classes=20)
-
-                scrmsd_values.extend(compute_batch_scrmsd(
+                metrics.add_scrmsd(compute_batch_scrmsd(
                     g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model, self.device))
 
             mean_recovery, median_recovery = cal_stats_metric(recovery)
             full_recovery = ((all_logits.argmax(dim=1) == all_seq.argmax(dim=1)).sum() / all_seq.shape[0]).item()
             perplexity = self.evaluator.cal_perplexity(all_logits, all_seq)
-            scrmsd_t = torch.tensor(scrmsd_values)
+            scrmsd_t = torch.tensor(metrics.scrmsd)
 
             print(f'Val median recovery rate (step: {self.step}) is {median_recovery}')
             print(f'Val perplexity (step: {self.step}): {perplexity}')
             print(f'Val scRMSD (step: {self.step}): {scrmsd_t.mean().item():.3f} +/- {scrmsd_t.std().item():.3f}')
             self.val_table.add_row([self.epoch, self.step, median_recovery, perplexity, scrmsd_t.mean().item()])
 
+            print(metrics.summary_line(self.num_params))
+
             if self.wandb_run:
-                self.wandb_run.log({
+                self.wandb_run.log(metrics.to_log_dict(
+                    cm_title='Validation Amino Acid Confusion Matrix', epoch=self.epoch) | {
                     'val_full_recovery': full_recovery, 'val_perplexity': perplexity,
                     'val_median_recovery': median_recovery, 'val_mean_recovery': mean_recovery,
                     'val_scrmsd_mean': scrmsd_t.mean().item(), 'val_scrmsd_std': scrmsd_t.std().item(),
-                    'val_aa_confusion_matrix': build_confusion_matrix_image(
-                        global_confusion_mat, 'Validation Amino Acid Confusion Matrix'),
-                    'epoch': self.epoch,
                 })
 
             if median_recovery > self.best_val_recovery:
@@ -409,9 +423,8 @@ class MapDiffTrainer:
             all_logits = torch.tensor([])
             all_seq = torch.tensor([])
             recovery = []
-            scrmsd_values = []
             nssr42, nssr62, nssr80, nssr90 = [], [], [], []
-            global_confusion_mat = torch.zeros((20, 20))
+            metrics = ResidueMetrics(three_letter_codes(AMINO_ACIDS), val_name='test')
 
             for g_batch, ipa_batch in tqdm(self.test_dataloader, desc="[Test]"):
                 g_batch = g_batch.to(self.device)
@@ -428,6 +441,7 @@ class MapDiffTrainer:
                 all_seq = torch.cat([all_seq, g_batch.x.cpu()])
 
                 batch_idx = g_batch.batch.cpu().numpy()
+                batch_names = self._batch_names(g_batch)
                 for i in range(batch_idx.max() + 1):
                     idx = np.where(batch_idx == i)
                     sample_logits = batch_logits[idx].argmax(dim=1)
@@ -439,11 +453,10 @@ class MapDiffTrainer:
                     nssr80.append(sample_nssr80)
                     nssr90.append(sample_nssr90)
                     recovery.append(self.evaluator.cal_recovery(sample_logits, sample_seq))
+                    metrics.add_protein(batch_logits[idx], sample_seq, pdb_id=batch_names[i],
+                                        sequence=''.join(AMINO_ACIDS[j] for j in sample_logits.tolist()))
 
-                global_confusion_mat += stats_utils.get_confusion_matrix(
-                    g_batch.x.cpu().argmax(dim=1), batch_logits.argmax(dim=1), num_classes=20)
-
-                scrmsd_values.extend(compute_batch_scrmsd(
+                metrics.add_scrmsd(compute_batch_scrmsd(
                     g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model, self.device))
 
             test_mean_recovery, test_median_recovery = cal_stats_metric(recovery)
@@ -454,7 +467,7 @@ class MapDiffTrainer:
 
             test_recovery = ((all_logits.argmax(dim=1) == all_seq.argmax(dim=1)).sum() / all_seq.shape[0]).item()
             test_perplexity = self.evaluator.cal_perplexity(all_logits, all_seq)
-            scrmsd_t = torch.tensor(scrmsd_values)
+            scrmsd_t = torch.tensor(metrics.scrmsd)
 
             print(f'test median recovery rate with best model (step: {self.best_val_step}) is {test_median_recovery}')
             print(f'test perplexity with the best model (step: {self.best_val_step}) is: {test_perplexity}')
@@ -463,8 +476,11 @@ class MapDiffTrainer:
             self.test_table.add_row([self.best_val_epoch, self.best_val_step, test_median_recovery, test_perplexity,
                                       scrmsd_t.mean().item()])
 
+            print(metrics.summary_line(self.num_params))
+
             if self.wandb_run:
-                self.wandb_run.log({
+                self.wandb_run.log(metrics.to_log_dict(
+                    cm_title='Test Amino Acid Confusion Matrix', epoch=self.best_val_epoch) | {
                     'test_full_recovery_with_best_model': test_recovery,
                     'test_perplexity_with_best_model': test_perplexity,
                     'test_median_recovery_with_best_model': test_median_recovery,
@@ -475,6 +491,4 @@ class MapDiffTrainer:
                     'test_median_nssr90_with_best_model': test_median_nssr90,
                     'test_scrmsd_mean_with_best_model': scrmsd_t.mean().item(),
                     'test_scrmsd_std_with_best_model': scrmsd_t.std().item(),
-                    'test_aa_confusion_matrix': build_confusion_matrix_image(
-                        global_confusion_mat, 'Test Amino Acid Confusion Matrix'),
                 })
