@@ -1,2 +1,2 @@
---run-name test --restriction-map-type arbitrary --ablate-attention 
+--run-name our_model --restriction-map-type arbitrary --ablate-attention 
 --run-name rgnn --ablate-to-rgnn 
