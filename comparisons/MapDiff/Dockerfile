@@ -42,6 +42,7 @@ RUN pip install --no-cache-dir \
         wandb==0.22.3 \
         transformers \
         h5py \
+        matplotlib \
         pandas \
         tqdm \
         mdtraj \

@@ -55,9 +55,9 @@ output                  = logs/pifold_$(DS_NAME)_$(Cluster)_$(Process).out
 error                   = logs/pifold_$(DS_NAME)_$(Cluster)_$(Process).err
 
 request_gpus            = 1
-request_cpus            = 4
-request_memory          = 32GB
-request_disk            = 30GB
+request_cpus            = 8
+request_memory          = 128GB
+request_disk            = 128GB
 
 # ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time and
 # lib/relaxed_pdb.py downloads from files.rcsb.org, so this needs a machine with internet
