@@ -1,0 +1,4 @@
+- dataset=mdcath
+- wandb.use=True
+- wandb.key_file=./wandb_api.txt
+- experiment.name=mdcath_mapdiff

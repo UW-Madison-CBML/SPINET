@@ -20,7 +20,7 @@
 #   mkdir -p logs && condor_submit eval.sub
 
 universe                = docker
-docker_image            = cmikulski4/mapdiff:v2
+docker_image            = cmikulski4/dynamicmpnn:v8
 
 ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 

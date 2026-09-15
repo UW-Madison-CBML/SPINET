@@ -103,6 +103,24 @@ The trajectory store and split index csv are staged on Pelican and transferred i
   backbone — the same self-consistency metric `comparisons/{MapDiff,DynamicMPNN}`
   compute, so results are directly comparable. Pass `--scrmsd 0` to skip it.
 
+Every run additionally logs the *complete* metric set
+`scripts/train_residue_classifier.py`'s `run_val` produces, under exactly the
+same W&B keys, so the sheaf model and the three comparison models can be read
+off one dashboard. That set is built by `lib.stats_utils.ResidueMetrics` (which
+owns all of its conventions -- everything is accumulated per protein, and means
+and stds are over proteins):
+
+- `<split>_top{1,5,10}_acc_{mean,std}` -- per-protein recovery
+- `<split>_perp_{mean,std}` and `epoch_<split>_loss` -- per-protein perplexity
+- `<split>_<AA>_{f1,precision,recall}_{mean,std}` -- one triple per residue
+  type, named with the uppercase three-letter code
+- `<split>_aa_confusion_matrix` -- a `wandb.Image`
+- `pred_seqs` (`<split>_pred_seqs` outside the val split) -- a `wandb.Table` of
+  every argmax design, one row per protein, labelled by `pdb` (`<pdb>_<chain>`
+  for ATLAS, the CATH domain id for mdCATH)
+- `<split>_rmsd_{mean,std}` -- scRMSD, under run_val's key
+- `params` -- trainable parameter count
+
 W&B auth comes from `api_keys.txt` (line 1 = HF token, last line = W&B key), which
 `run_pifold.sh` splits into `wandb_api.txt`.
 

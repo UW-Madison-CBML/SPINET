@@ -36,6 +36,7 @@ from utils import *
 # fall back to walking up to a lib/ directory for local/dev runs from inside the source tree.
 try:
     from scrmsd import load_esmfold, evaluate_scrmsd
+    from stats_utils import ResidueMetrics, three_letter_codes
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
         _cand = osp.join(osp.dirname(osp.abspath(__file__)), _up, 'lib')
@@ -43,6 +44,7 @@ except ImportError:
             sys.path.insert(0, osp.abspath(_cand))
             break
     from scrmsd import load_esmfold, evaluate_scrmsd
+    from stats_utils import ResidueMetrics, three_letter_codes
 
 # PiFold's fixed label order (API.featurizer.featurize_GTrans).
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
@@ -107,6 +109,10 @@ class Exp:
 
         self._get_data()
         self._build_method()
+
+        # `params` is the key scripts/train_residue_classifier.py logs its trainable-parameter
+        # count under; log the same one here so the model sizes are comparable in W&B.
+        self._log({'params': sum(p.numel() for p in self.method.model.parameters() if p.requires_grad)})
 
         # ESMFold is only needed for the final scRMSD pass; load it lazily so a --scrmsd 0
         # run (or a crash during training) never pays for the download.
@@ -192,39 +198,57 @@ class Exp:
         for cat in test_subcat_recovery.keys():
             print_log('Category {0} Rec: {1:.4f}\n'.format(cat, test_subcat_recovery[cat]))
 
-        if with_scrmsd and self.args.scrmsd:
-            scrmsd = self.compute_scrmsd(self.test_loader.dataset, self.test_loader.featurizer)
-            if scrmsd.numel():
-                print_log('Test scRMSD: {0:.4f} +/- {1:.4f}\n'.format(scrmsd.mean().item(), scrmsd.std().item()))
-                metrics['test_scrmsd_mean'] = scrmsd.mean().item()
-                metrics['test_scrmsd_std'] = scrmsd.std().item()
+        metrics.update(self.residue_metrics(self.test_loader.dataset, self.test_loader.featurizer,
+                                             with_scrmsd=with_scrmsd, epoch=epoch))
+
+        if 'test_rmsd_mean' in metrics:
+            print_log('Test scRMSD: {0:.4f} +/- {1:.4f}\n'.format(
+                metrics['test_rmsd_mean'], metrics['test_rmsd_std']))
+            # `test_rmsd_*` is run_val's key; keep the older `test_scrmsd_*` names too so
+            # existing panels comparing this run against earlier PiFold runs keep working.
+            metrics['test_scrmsd_mean'] = metrics['test_rmsd_mean']
+            metrics['test_scrmsd_std'] = metrics['test_rmsd_std']
 
         self._log(metrics)
         return test_perplexity, test_recovery
 
     @torch.no_grad()
-    def compute_scrmsd(self, dataset, featurizer):
-        """Fold every held-out design with ESMFold and Kabsch-RMSD it against that protein's
-        relaxed (deposited) backbone.
+    def residue_metrics(self, dataset, featurizer, with_scrmsd=False, epoch=None):
+        """One per-protein pass over the held-out split producing exactly the metric set
+        scripts/train_residue_classifier.py's `run_val` logs.
+
+        Everything is accumulated by `lib.stats_utils.ResidueMetrics` -- per-protein
+        top-1/5/10 recovery, per-protein perplexity, per-residue precision/recall/f1, the
+        amino-acid confusion matrix and the `pred_seqs` table (each design labelled by its
+        `<pdb>_<chain>` / CATH domain id) -- so PiFold's run reports the same W&B keys as
+        the sheaf model's.
 
         Designs are produced one protein at a time (as `ProDesign._cal_recovery` does, so the
-        residue order matches the dataset entry exactly), then folded in small batches --
-        `lib.scrmsd.fold_sequences` folds each sequence on its own anyway, so the batch size
-        only trades peak memory for fewer calls.
+        residue order matches the dataset entry exactly). When `with_scrmsd` is set they are
+        then folded in small batches and Kabsch-RMSD'd against that protein's relaxed
+        (deposited) backbone by `lib.scrmsd.evaluate_scrmsd` -- `lib.scrmsd.fold_sequences`
+        folds each sequence on its own anyway, so the batch size only trades peak memory for
+        fewer calls.
         """
-        if self.esmfold is None:
-            self.esmfold = load_esmfold(device=self.device)
-        esmfold_tokenizer, esmfold_model = self.esmfold
-
         self.method.model.eval()
+        # PiFold's decoder emits log-probabilities, so its per-protein negative log-likelihood
+        # is an NLL, not a cross-entropy over logits -- pass it explicitly rather than letting
+        # ResidueMetrics re-softmax an already-normalised distribution.
+        nll = torch.nn.NLLLoss()
+        accumulator = ResidueMetrics(three_letter_codes(ALPHABET), val_name='test')
+
         seqs, references = [], []
-        for entry in tqdm(dataset, desc='designing held-out split for scRMSD'):
+        for entry in tqdm(dataset, desc='designing held-out split'):
             protein = featurizer([entry])
             X, S, score, mask, lengths = cuda(protein, device=self.device)
             X, S, score, h_V, h_E, E_idx, batch_id, mask_bw, mask_fw, decoding_order = \
                 self.method.model._get_features(S, score, X=X, mask=mask)
             log_probs = self.method.model(h_V, h_E, E_idx, batch_id)
             pred = log_probs.argmax(dim=1).cpu()
+
+            design = ''.join(ALPHABET[i] for i in pred.tolist())
+            accumulator.add_protein(log_probs.cpu(), S.cpu(), pdb_id=entry['title'],
+                                     nll=nll(log_probs, S).item(), sequence=design)
 
             reference = np.stack([entry[atom] for atom in BACKBONE_KEYS], axis=1)  # (R, 4, 3)
             if pred.shape[0] != reference.shape[0]:
@@ -233,16 +257,22 @@ class Exp:
                 print('skip scRMSD for {}: {} designed residues vs {} reference residues'.format(
                     entry['title'], pred.shape[0], reference.shape[0]))
                 continue
-            seqs.append(''.join(ALPHABET[i] for i in pred.tolist()))
+            seqs.append(design)
             references.append(torch.from_numpy(reference).float())
 
-        values = []
-        step = max(1, self.args.scrmsd_batch_size)
-        for start in tqdm(range(0, len(seqs), step), desc='folding designs (ESMFold)'):
-            values.extend(evaluate_scrmsd(
-                seqs[start:start + step], references[start:start + step],
-                esmfold_tokenizer, esmfold_model, device=self.device).tolist())
-        return torch.tensor(values)
+        if with_scrmsd and self.args.scrmsd:
+            if self.esmfold is None:
+                self.esmfold = load_esmfold(device=self.device)
+            esmfold_tokenizer, esmfold_model = self.esmfold
+            step = max(1, self.args.scrmsd_batch_size)
+            for start in tqdm(range(0, len(seqs), step), desc='folding designs (ESMFold)'):
+                accumulator.add_scrmsd(evaluate_scrmsd(
+                    seqs[start:start + step], references[start:start + step],
+                    esmfold_tokenizer, esmfold_model, device=self.device).tolist())
+
+        num_params = sum(p.numel() for p in self.method.model.parameters() if p.requires_grad)
+        print_log(accumulator.summary_line(num_params))
+        return accumulator.to_log_dict(cm_title='Test Amino Acid Confusion Matrix', epoch=epoch)
 
 
 if __name__ == '__main__':
