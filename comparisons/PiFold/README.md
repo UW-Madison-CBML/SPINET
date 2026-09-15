@@ -1,7 +1,7 @@
 # Running PiFold on CHTC
 
 This bundles a Docker image with PiFold's dependencies (CUDA 11.8, PyTorch
-2.1.2, torch_scatter, biopython, transformers, h5py, pandas, wandb) plus an
+2.6.0, torch_scatter, biopython, transformers, h5py, pandas, wandb) plus an
 HTCondor submit file to run training/inference as a GPU job on CHTC.
 
 PiFold itself is used as a **pristine, unmodified checkout of

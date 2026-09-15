@@ -47,6 +47,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.generate_graph_cath import pdb2graph
+from dataloader.pyg_safe_globals import allow_pyg_data_pickles
 
 # lib/relaxed_pdb.py + lib/dataset_splits.py are copied in flat next to this file (see
 # ../README.md and ../train.sh) -- fall back to walking up to a lib/ directory for local/dev
@@ -62,6 +63,9 @@ except ImportError:
             break
     import dataset_splits
     import relaxed_pdb
+
+
+allow_pyg_data_pickles()
 
 
 def create_parser():
