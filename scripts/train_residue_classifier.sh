@@ -9,4 +9,5 @@ export WANDB_KEY=$WANDB_KEY
 export CUDA_LAUNCH_BLOCKING=1
 
 python train_residue_classifier.py "$@"
+nvidia-smi
 

@@ -345,13 +345,13 @@ class InitDynamicsEmbedding(MessagePassing):
         if not self.ablate_sheaves:
             self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 2*self.hidden_dim), nn.ReLU(), nn.Linear(2*self.hidden_dim, self.stalk_dim**2))
 
-        self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
-        self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
+        self.project_nodes = nn.Linear(self.input_dim, self.input_dim)
+        self.project_edges = nn.Linear(self.edge_dim, self.edge_dim)
 
         self.mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
 
-        self.edge_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
-        self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True) 
+        self.edge_temporal_product = nn.GRU(self.edge_dim, self.hidden_dim, batch_first=True) 
+        self.node_temporal_product = nn.GRU(self.input_dim, self.hidden_dim, batch_first=True) 
 
     def forward(self, x, pos, frame_maps, edge_index, edge_attr):
         x = self.project_nodes(x)
@@ -370,7 +370,7 @@ class InitDynamicsEmbedding(MessagePassing):
         edge_features = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
 
         # get edge embeddings
-        edge_attr = self.project_edges(edge_features)
+        edge_attr = self.project_edges(edge_features.contiguous())
 
 
         _, x = self.node_temporal_product(x)
@@ -506,8 +506,6 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
             return data
 
 
-<<<<<<< Updated upstream
-=======
 class NodeOnlyMLP(nn.Module):
     def __init__(
         self,
@@ -544,7 +542,4 @@ class NodeOnlyMLP(nn.Module):
 
 
 
-# test if gradients are stable
-#if __name__ == "__main__":
 
->>>>>>> Stashed changes

@@ -50,15 +50,38 @@ def parse_pdb_folder(folder_path):
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def main(use_pdbs=False, majority_voting=False):
-    h5_path = os.path.join("..", "atlas_data.h5")
-    index = pd.read_csv(os.path.join("..", "atlas_cross_val_index.csv"))
+    use_atlas = True
 
-    val_mask = index["cross_val"] == 0
+    wandb.login(key=os.getenv("WANDB_KEY"))
+    run = wandb.init(
+        entity="jenslundsgaard7-uw-madison",
+        project="SheafProtein",
+        name="gvp",
+        config={
+            "use_atlas":use_atlas
+        },
+    )
 
-    val_pdbs = index[val_mask]["pdb"].to_list()
-    train_pdbs = index[~val_mask]["pdb"].to_list()
+
+    if use_atlas:
+        h5_path = os.path.join("..", "atlas_data.h5")
+        index = pd.read_csv(os.path.join("..", "atlas_cross_val_index.csv"))
+        val_mask = index["cross_val"] == 0
+
+        val_pdbs = index[val_mask]["pdb"].to_list()
+        train_pdbs = index[~val_mask]["pdb"].to_list()
 
 
+    else:
+        h5_path = os.path.abspath("mdcath_spinet_320_0.h5")
+        index = pd.read_csv(os.path.abspath("mdcath_320_0_topology_split.csv"))
+
+        # train_pdbs = index[index["split"] == "train"]["domain"].tolist()
+        # test_pdbs = index[index["split"] == "test"]["domain"].tolist()
+        train_pdbs = index[index["split"].isin(["train", "test"])]["domain"].tolist()
+        val_pdbs = index[index["split"] == "validation"]["domain"].tolist()
+
+    
     if use_pdbs:
         # TODO manualy download RCSB structures, and use the above func to train on them
         train_raw = [] #parse_pdb_folder("./surffold_data/train")

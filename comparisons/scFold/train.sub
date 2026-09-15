@@ -1,6 +1,6 @@
 # train.sub
 
-docker_image = jenslundsgaard/scfold:v1.3
+docker_image = jenslundsgaard/scfold:v1.4
 
 universe = docker
 # Specify your executable (single binary or a script that runs several
@@ -19,7 +19,7 @@ Requirements = (Target.HasCHTCStaging == true)
 #  && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
 
-transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv, ../../api_keys.txt
 transfer_output_files = seq_pred_df_7.csv
 
 request_cpus = 16

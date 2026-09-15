@@ -248,7 +248,7 @@ def train_residue_classifier(args_dict):
     nth_cross_val = args_dict["cross_val"]
     assert nth_cross_val >= 0 and nth_cross_val < 5
     ds_name = args_dict["ds_name"]
-    ablate_to_rgnn = args_dict["ablate_to_rgnn"]
+    other_model = args_dict["other_model"]
     
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
 
@@ -260,7 +260,6 @@ def train_residue_classifier(args_dict):
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.enabled = False
 
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
@@ -311,7 +310,8 @@ def train_residue_classifier(args_dict):
             "use_scheduler":use_scheduler,
             "scheduler_type":"cosine annealing warm restarts every epoch" if use_scheduler else "none",
             "restriction_map_type":restriction_map_type,
-            "use_masking": use_masking
+            "use_masking": use_masking,
+            "other_model":other_model
         },
     )
 
@@ -350,8 +350,7 @@ def train_residue_classifier(args_dict):
 
     # set up new diffusion model # TODO fix all this
     # ---------------------------------------------
-
-    if not ablate_to_rgnn:
+    if other_model == "spinet":
         model = NodeSheafClassifier(
             atoms=BACKBONE_ATOMS,
             frame_origin="CA",
@@ -366,14 +365,14 @@ def train_residue_classifier(args_dict):
             use_attention=use_attention,
             use_masking=use_masking
         ).to(DEVICE)
-        
-        # model = NodeOnlyMLP(
-        #     input_dim=15,
-        #     hidden_dim=hidden_dim,
-        #     num_classes=num_classes,
-        #     dropout=0.2,
-        # ).to(DEVICE)
 
+    elif other_model == "node_only": 
+        model = NodeOnlyMLP(
+             input_dim=15,
+             hidden_dim=hidden_dim,
+             num_classes=num_classes,
+             dropout=0.2,
+         ).to(DEVICE)
     else:
         model = RGNN(15, 13, hidden_dim, atoms=BACKBONE_ATOMS, frame_origin="CA").to(DEVICE)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
@@ -412,9 +411,11 @@ def train_residue_classifier(args_dict):
         if torch.cuda.is_available():
             activities += [ProfilerActivity.CUDA]
         with (profile(activities=activities, record_shapes=True) if use_profiler else nullcontext()) as prof:
-            for batch in pbar:
+            for batch_idx, batch in enumerate(pbar):
                 if use_profiler:
                     torch.cuda.synchronize()
+                if batch_idx < 600 and batch_idx > 590:
+                    print(batch.to_data_list()[0].cpu().traj_id)
                 times1.append(time.perf_counter())
                 batch = batch.to(DEVICE)
 
@@ -477,7 +478,7 @@ def train_residue_classifier(args_dict):
         # Validation Check
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
 
-        if not ablate_sheaves and not ablate_to_rgnn:
+        if not ablate_sheaves and other_model=="spinet":
             interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
 
     run.finish()
@@ -495,7 +496,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--cross-val', type=int, default=0)
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
-    parser.add_argument('--ablate-to-rgnn', action="store_true")
+    parser.add_argument('--other-model', type=str, default="spinet", choices=["rgnn", "spinet", "node_only"])
 
     args = parser.parse_args()
     train_residue_classifier(vars(args))
