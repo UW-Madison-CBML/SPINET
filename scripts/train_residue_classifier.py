@@ -10,7 +10,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data
 from residue_classifier_dataset import ResidueClassifierDataset
-from invariant_features_sheaf_model import NodeSheafClassifier
+from invariant_features_sheaf_model import NodeSheafClassifier, NodeOnlyMLP
 import itertools
 from itertools import product
 from contextlib import nullcontext
@@ -366,6 +366,13 @@ def train_residue_classifier(args_dict):
             use_attention=use_attention,
             use_masking=use_masking
         ).to(DEVICE)
+        
+        # model = NodeOnlyMLP(
+        #     input_dim=15,
+        #     hidden_dim=hidden_dim,
+        #     num_classes=num_classes,
+        #     dropout=0.2,
+        # ).to(DEVICE)
 
     else:
         model = RGNN(15, 13, hidden_dim, atoms=BACKBONE_ATOMS, frame_origin="CA").to(DEVICE)
@@ -389,7 +396,9 @@ def train_residue_classifier(args_dict):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, len(train_loader))
 
     # load_esmfold returns (tokenizer, model), in that order.
-    esmfold_tokenizer, esmfold_model = load_esmfold(device=DEVICE)
+    # esmfold_model, esmfold_tokenizer = load_esmfold(device=DEVICE)
+    esmfold_model = None
+    esmfold_tokenizer = None
 
     # training loop
     for epoch in range(epochs):
