@@ -227,8 +227,8 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 8
-    hidden_dim = 75
+    batch_size = 1
+    hidden_dim = 64
     stalk_dim = 8
     num_blocks = 4
     masking_ratio = 1.0
@@ -260,6 +260,7 @@ def train_residue_classifier(args_dict):
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = False
 
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
@@ -367,7 +368,7 @@ def train_residue_classifier(args_dict):
         ).to(DEVICE)
 
     else:
-        model = RGNN(15, 13, hidden_dim).to(DEVICE)
+        model = RGNN(15, 13, hidden_dim, atoms=BACKBONE_ATOMS, frame_origin="CA").to(DEVICE)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run.log({"params": pytorch_total_params})
