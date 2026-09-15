@@ -34,6 +34,17 @@ if [[ ! -d PiFold ]]; then
     tar -xzf PiFold.tar.gz
 fi
 
+# Upstream featurisers call `.astype(np.int)`, an alias numpy removed in 1.24
+# ("module 'numpy' has no attribute 'int'", raised inside the DataLoader
+# workers on the first batch). `int` is what the alias always meant. Patched
+# here rather than shipped as overlay copies of the two files: they are large,
+# otherwise untouched, and would silently drift from upstream.
+sed -i 's/\.astype(np\.int)/.astype(int)/' PiFold/API/featurizer.py PiFold/API/dataloader_gtrans.py
+if grep -rn 'np\.int)' PiFold/API/featurizer.py PiFold/API/dataloader_gtrans.py; then
+    echo ">>> np.int patch did not apply -- upstream changed these lines" >&2
+    exit 1
+fi
+
 echo ">>> overlaying dataset support + wandb/scRMSD wiring onto pristine PiFold/"
 cp -r API main.py parser.py PiFold/
 for f in wandb_api.txt scrmsd.py relaxed_pdb.py dataset_splits.py stats_utils.py \

@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 
 from dataloader.collator import CollatorDiff, CollatorIPAPretrain
 from dataloader.large_dataset import Cath
+from dataloader.pyg_safe_globals import allow_pyg_data_pickles
 from model.egnn_pytorch.egnn_net import EGNN_NET
 from model.ipa.ipa_net import IPANetPredictor
 from model.prior_diff import Prior_Diff
@@ -44,6 +45,8 @@ except ImportError:
     import dataset_splits
     import stats_utils
     from scrmsd import load_esmfold
+
+allow_pyg_data_pickles()
 
 # cfg.dataset.name -> lib/dataset_splits.py dataset name. CATH is upstream's own benchmark
 # and carries its own three directories, so it is not in the table.

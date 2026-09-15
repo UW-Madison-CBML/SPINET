@@ -30,7 +30,7 @@ MapDiff/
   eval_relaxed.py                standalone re-eval of a saved checkpoint on the held-out split (+ scRMSD)
 train.sh / train.sub             CHTC entry point + submit file for training
 eval.sh / eval.sub                CHTC entry point + submit file for evaluation
-Dockerfile / build_and_push.sh   training image (CUDA 12.1, PyTorch 2.1.2, PyG 2.4.0, DSSP, Hydra, wandb, transformers)
+Dockerfile / build_and_push.sh   training image (CUDA 12.4, PyTorch 2.6.0, PyG 2.6.1, DSSP, Hydra, wandb, transformers)
 wandb_api.txt                     your W&B API key (not checked in)
 results/                          past run outputs (checkpoints, logs, configs) copied back from CHTC
 ```

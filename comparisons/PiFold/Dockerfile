@@ -9,7 +9,13 @@
 # Push:   docker push <dockerhub_user>/pifold:latest
 # (see build_and_push.sh for a one-shot script)
 
-FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-runtime
+# torch is at 2.6 rather than the 2.1.2 this image used to carry because
+# transformers' `check_torch_load_is_safe()` refuses `torch.load` on anything
+# below that (CVE-2025-32434), and facebook/esmfold_v1 -- which lib/scrmsd.py's
+# `load_esmfold` pulls for the self-consistency RMSD metric -- only publishes
+# pytorch_model.bin, never a safetensors copy. Same bump as ../MapDiff; cu118
+# is kept so the CUDA runtime the CHTC nodes see does not change.
+FROM pytorch/pytorch:2.6.0-cuda11.8-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
@@ -40,10 +46,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Deliberately NOT here: mdtraj. relaxed_pdb.py re-exports BACKBONE_ATOMS
 # precisely so this image never has to import scripts/load_dynamics.py.
 
-# torch_scatter must be built/pinned against the exact torch+CUDA combo
-# above (2.1.2 / cu118) -- see https://data.pyg.org/whl/ for the wheel index.
+# torch_scatter ships compiled kernels and must come from the wheel index built
+# for the exact torch+CUDA combo in the FROM line above -- see
+# https://data.pyg.org/whl/. Stating the combo once as env vars (the
+# ../DynamicMPNN pattern) keeps a base-image bump from silently leaving the
+# wheel index pointing at the old ABI.
+#
+# numpy stays at 1.26.4: upstream PiFold is numpy-1 era code (train.sh already
+# has to patch out its `np.int` use, removed in numpy 1.24), and numpy 2 drops
+# considerably more of that surface. torch 2.6 itself is happy either way --
+# its wheels are built against numpy-2 headers, which stay runtime-compatible
+# with numpy 1.x.
+ENV TORCH_VERSION=2.6.0
+ENV CUDA_TAG=cu118
+
 RUN pip install --no-cache-dir \
-        torch_scatter==2.1.2 -f https://data.pyg.org/whl/torch-2.1.2+cu118.html \
+        torch_scatter==2.1.2 -f https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html \
     && pip install --no-cache-dir \
         numpy==1.26.4 \
         biopython==1.83 \
@@ -68,28 +86,30 @@ RUN pip install --no-cache-dir wandb==0.22.3
 # if the resolved wheels don't actually hang together. The failure modes this
 # catches, all of which have bitten the comparison images before:
 #
-#  * transformers silently disabling its torch backend. transformers >=4.56
-#    calls torch.utils._pytree.register_pytree_node, which only exists in
-#    torch >=2.2, and transformers 5.x hard-requires torch >=2.5 -- with torch
-#    pinned at 2.1.2 either one degrades to a tokenizers-only install and
+#  * torch slipping back below 2.6. `check_torch_load_is_safe()` is called
+#    inside EsmForProteinFolding.from_pretrained, and on an older torch it
+#    raises rather than loading esmfold_v1's pytorch_model.bin -- calling it
+#    here is the same guard the run-time path hits.
+#  * transformers silently disabling its torch backend. A transformers whose
+#    torch requirement isn't met degrades to a tokenizers-only install, and
 #    EsmForProteinFolding then raises "requires the PyTorch library but it was
-#    not found" deep inside scrmsd.load_esmfold(). 4.55.4 is the newest release
-#    that works against torch 2.1.2.
-#  * numpy 2.x getting pulled in. torch 2.1.2 is compiled against numpy 1.x and
-#    dies at import with "_ARRAY_API not found".
+#    not found" deep inside scrmsd.load_esmfold().
+#  * numpy 2.x getting pulled in, which upstream PiFold's numpy-1 era code
+#    (see the np.int patch in train.sh) is not written against.
 #  * scipy missing -- ESMFold silently falls back to an approximate init.
 #  * accelerate missing -- scrmsd.load_esmfold passes low_cpu_mem_usage=True,
 #    which transformers 4.x refuses without it.
 RUN python -c "\
 import numpy, scipy, sklearn, pandas, h5py, requests, tqdm, Bio, torch, transformers, accelerate, wandb; \
 import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot; \
-from transformers.utils import is_torch_available, is_scipy_available; \
+from transformers.utils import is_torch_available, is_scipy_available, check_torch_load_is_safe; \
 from transformers import AutoTokenizer, EsmForProteinFolding; \
 from sklearn.metrics import ConfusionMatrixDisplay; \
 from Bio import Align, PDB; from Bio.SeqUtils import seq1; \
-assert numpy.__version__.startswith('1.'), 'numpy must be 1.x for torch 2.1.2, got ' + numpy.__version__; \
+assert numpy.__version__.startswith('1.'), 'numpy must be 1.x for upstream PiFold, got ' + numpy.__version__; \
 assert is_torch_available(), 'transformers ' + transformers.__version__ + ' disabled its torch backend against torch ' + torch.__version__; \
 assert is_scipy_available(), 'scipy missing: ESMFold falls back to an approximate init'; \
+check_torch_load_is_safe(); \
 EsmForProteinFolding.from_pretrained; \
 print('>>> ok: torch', torch.__version__, '| transformers', transformers.__version__, '| numpy', numpy.__version__, '| wandb', wandb.__version__)"
 

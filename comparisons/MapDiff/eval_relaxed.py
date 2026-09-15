@@ -37,6 +37,7 @@ from tqdm import tqdm
 
 from data.generate_graph_cath import pdb2graph, get_processed_graph
 from dataloader.collator import CollatorDiff
+from dataloader.pyg_safe_globals import allow_pyg_data_pickles
 from model.egnn_pytorch.egnn_net import EGNN_NET
 from model.ipa.ipa_net import IPANetPredictor
 from model.prior_diff import Prior_Diff
@@ -60,6 +61,8 @@ except ImportError:
     import relaxed_pdb
     import stats_utils
     from scrmsd import load_esmfold, evaluate_scrmsd
+
+allow_pyg_data_pickles()
 
 METRIC_KEYS = stats_utils.METRIC_KEYS + ('scrmsd',)
 

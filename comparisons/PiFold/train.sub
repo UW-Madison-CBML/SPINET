@@ -4,7 +4,7 @@
 #   1. ./build_and_push.sh <dockerhub_username>   # builds+pushes the image
 #   2. Set docker_image below to that image.
 #   3. git clone https://github.com/A4Bio/PiFold && tar czf PiFold.tar.gz PiFold/
-#      (a *pristine* checkout -- run_pifold.sh overlays this folder's API/, main.py
+#      (a *pristine* checkout -- train.sh overlays this folder's API/, main.py
 #      and parser.py on top of it at run time, so upstream is never modified.)
 #
 # Dataset: PiFold is a static-structure model, so it trains and evaluates on each
@@ -24,25 +24,25 @@
 #   mkdir -p logs && condor_submit pifold.sub
 
 universe                = docker
-docker_image            = cmikulski4/pifold:v2
+docker_image            = cmikulski4/pifold:v4
 
 ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
-#DS_NAME                 = ATLAS
-#DS_H5                   = $(ResearchDrive)/atlas_data.h5
-#DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
+DS_NAME                 = ATLAS
+DS_H5                   = $(ResearchDrive)/atlas_data.h5
+DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 
-DS_NAME                 = MDCATH
-DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
-DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
+#DS_NAME                 = MDCATH
+#DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
+#DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
 
-executable              = run_pifold.sh
+executable              = train.sh
 # --data_root ./ points API/relaxed_dataset.py at the job's scratch dir, where HTCondor
 # drops the split index and trajectory store flat. Everything here is forwarded straight
 # to main.py (see parser.py).
 arguments               = --data_name $(DS_NAME) --data_root ./ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt
 
-# The pristine PiFold tarball, this folder's overlay, the API-key file (run_pifold.sh
+# The pristine PiFold tarball, this folder's overlay, the API-key file (train.sh
 # splits the W&B key out of it into wandb_api.txt), lib/{scrmsd,relaxed_pdb,dataset_splits,
 # stats_utils}.py (shared across all models -- see ../../lib), and the dataset's trajectory
 # store + split index.
