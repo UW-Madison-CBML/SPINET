@@ -122,7 +122,10 @@ class ResidueClassifierDataset(Dataset):
 
             if self.fixed_length is not None:
                 for i, group_name in enumerate(self.groups):
-                    actual_length = h5_file[group_name + "/coordinates"].shape[1]
+                    if h5_file[group_name]["coordinates"].shape[0] > 2000:
+                        continue
+
+                    actual_length = h5_file[group_name]["coordinates"].shape[1]
                     length = (min(actual_length, self.traj_len) if self.traj_len is not None else actual_length)
                     if length < self.fixed_length:
                         continue
@@ -139,7 +142,11 @@ class ResidueClassifierDataset(Dataset):
                 # variable-length sample mode
                 min_len, max_len = self.variable_length
                 for i, group_name in enumerate(self.groups):
-                    actual_length = h5_file[group_name + "/coordinates"].shape[1]
+                    if h5_file[group_name]["coordinates"].shape[0] > 2000:
+                        continue
+
+
+                    actual_length = h5_file[group_name]["coordinates"].shape[1]
                     length = (min(actual_length, self.traj_len) if self.traj_len is not None else actual_length)
 
                     for seq_len in range(min_len, max_len + 1):
@@ -153,14 +160,6 @@ class ResidueClassifierDataset(Dataset):
                     return np.empty((0, 3), dtype=int)
                 return np.concatenate(index, axis=0)
 
-
-    def build_static_index(self, h5_file):
-        index = []
-        for i, group_name in enumerate(self.groups):
-            j = int(self.np_rng.random() * h5_file[group_name + "/" + "coordinates"].shape[1]) # pick random timepoints
-            index.append((i, j))
-        return index
-        
 
 
     def graph_collate(self, batch):

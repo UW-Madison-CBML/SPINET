@@ -38,6 +38,7 @@ class ProteinSampler(Sampler):
         self.batches = []
         self.rng = rng
         ds_index_idx = 0
+        assert all(len(tup) == 3 for tup in self.dataset.index), "index does not contain 3 values"
         with h5py.File(self.dataset.h5_path, "r") as f:
             while(ds_index_idx < len(dataset.index)):
                 batch = []
@@ -48,7 +49,7 @@ class ProteinSampler(Sampler):
                     num_res = f[traj_id]["coordinates"].shape[0]
                     if num_res > self.num_nodes: # just discard pdb id if too big
                         ds_index_idx += 1
-                    elif batch_num_nodes + num_res < self.num_nodes: # first make sure it even fits
+                    elif batch_num_nodes + num_res <= self.num_nodes: # first make sure it even fits
                         batch.append(ds_index_idx)
                         batch_num_nodes += num_res
                         ds_index_idx += 1
@@ -267,9 +268,9 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    num_nodes = 2000
+    batch_size = 8
     hidden_dim = 64
-    stalk_dim = 8
+    stalk_dim = 16
     num_blocks = 4
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
@@ -298,8 +299,6 @@ def train_residue_classifier(args_dict):
 
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
@@ -339,7 +338,7 @@ def train_residue_classifier(args_dict):
             "epochs": epochs,
             "val_ratio": val_ratio,
             "test_ratio": test_ratio,
-            "num_nodes": num_nodes,
+            "batch_size": batch_size,
             "hidden_dim": hidden_dim,
             "masking_ratio": masking_ratio,
             "task":"predicting residues from motions",
@@ -381,8 +380,8 @@ def train_residue_classifier(args_dict):
     print("Val samples:", len(val_dataset))
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, sampler=ProteinSampler(train_dataset, num_nodes, rng=torch_rng), generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
-    val_loader = DataLoader(val_dataset, sampler=ProteinSampler(val_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False, generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
 
     single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, generator=torch_rng, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 

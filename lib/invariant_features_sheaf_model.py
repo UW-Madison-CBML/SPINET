@@ -369,11 +369,12 @@ class InitDynamicsEmbedding(MessagePassing):
 
         edge_features = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
 
-        # get edge embeddings
         edge_attr = self.project_edges(edge_features.contiguous())
 
 
+        print(torch.cuda.memory_summary())
         _, x = self.node_temporal_product(x)
+        print(torch.cuda.memory_summary())
         _, edge_attr = self.edge_temporal_product(edge_attr)
         x = x.squeeze(0)
         edge_attr = edge_attr.squeeze(0)
