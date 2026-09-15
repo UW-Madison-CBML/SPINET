@@ -27,6 +27,46 @@ from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 import h5py
 from rgnn import RGNN
+from torch.utils.data import Sampler
+
+
+class ProteinSampler(Sampler):
+    def __init__(self, dataset, num_nodes, rng=None):
+        super().__init__(None)
+        self.dataset = dataset
+        self.num_nodes = num_nodes
+        self.batches = []
+        self.rng = rng
+        ds_index_idx = 0
+        with h5py.File(self.dataset.h5_path, "r") as f:
+            while(ds_index_idx < len(dataset.index)):
+                batch = []
+                batch_num_nodes = 0
+                while( ds_index_idx < len(dataset.index)): # loop while adding to a batch. if we we run out of ds_index_idxs we just end the batch, or if we get big enough
+                    group_idx, _, _ = self.dataset.index[ds_index_idx] 
+                    traj_id = self.dataset.groups[group_idx]
+                    num_res = f[traj_id]["coordinates"].shape[0]
+                    if num_res > self.num_nodes: # just discard pdb id if too big
+                        ds_index_idx += 1
+                    elif batch_num_nodes + num_res < self.num_nodes: # first make sure it even fits
+                        batch.append(ds_index_idx)
+                        batch_num_nodes += num_res
+                        ds_index_idx += 1
+                    else: 
+                        break
+                if len(batch) > 0:
+                    self.batches.append(batch)
+        if self.rng is not None:
+            self.batches = [self.batches[i] for i in torch.randperm(len(self.batches), generator=self.rng).tolist()]
+
+
+
+    def __iter__(self):
+        return iter(self.batches)
+
+    def __len__(self):
+        return len(self.batches)
+
 
 def load_df_from_pdbs(local_path, file_name_format="p_c-t"):
     files = [path for path in os.listdir() if path.endswith(".pdb")] 
@@ -227,7 +267,7 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 1
+    num_nodes = 2000
     hidden_dim = 64
     stalk_dim = 8
     num_blocks = 4
@@ -299,7 +339,7 @@ def train_residue_classifier(args_dict):
             "epochs": epochs,
             "val_ratio": val_ratio,
             "test_ratio": test_ratio,
-            "batch_size": batch_size,
+            "num_nodes": num_nodes,
             "hidden_dim": hidden_dim,
             "masking_ratio": masking_ratio,
             "task":"predicting residues from motions",
@@ -341,8 +381,8 @@ def train_residue_classifier(args_dict):
     print("Val samples:", len(val_dataset))
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, shuffle=True, generator=torch_rng, batch_size=batch_size, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=batch_size, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False)
+    train_loader = DataLoader(train_dataset, sampler=ProteinSampler(train_dataset, num_nodes, rng=torch_rng), generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
+    val_loader = DataLoader(val_dataset, sampler=ProteinSampler(val_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
 
     single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, generator=torch_rng, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
