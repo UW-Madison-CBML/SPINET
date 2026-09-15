@@ -146,10 +146,14 @@ def compute_pairwise_rmsd(coords: torch.Tensor, i_idx: torch.Tensor, j_idx: torc
     return rmsd_matrix
 
 
+
+# TODO: Use TM-score to select rather than RMSD
 def farthest_point_sample(rmsd_matrix: torch.Tensor, pool_size: int) -> list:
     """Greedy max-min RMSD selection: same spirit as DynamicMPNN's own TM-dissimilarity
     k-selection (`ProteinGraphFeaturiserSingleChain.compute_sequential_probabilities`),
     just driven by structural RMSD instead of TM-score.
+
+    Should probably use TM-score instead.
     """
     T = rmsd_matrix.shape[0]
     pool_size = min(pool_size, T)

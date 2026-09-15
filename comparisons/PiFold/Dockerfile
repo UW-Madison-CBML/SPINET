@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir \
         biopython==1.83 \
         numpy==1.26.4 \
         tqdm==4.66.2 \
+        matplotlib \
         h5py \
         pandas \
         requests \
