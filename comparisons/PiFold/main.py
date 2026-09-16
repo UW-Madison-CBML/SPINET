@@ -3,17 +3,18 @@
 Same train/valid/test loop as upstream, plus the two things this comparison needs:
 
 * **Weights & Biases logging** of per-epoch train/valid loss and perplexity, and of the
-  held-out split's perplexity / median recovery / scRMSD -- one run per dataset, so PiFold's
+  test split's perplexity / median recovery / scRMSD -- one run per dataset, so PiFold's
   numbers land next to the sheaf model's in the same project.
-* **scRMSD**: every held-out protein's designed sequence is folded with ESMFold
+* **scRMSD**: every test protein's designed sequence is folded with ESMFold
   (`lib/scrmsd.py`) and Kabsch-RMSD'd against that protein's ground-truth *relaxed*
   (deposited) backbone. No alignment step is needed: `API/relaxed_dataset.py` feeds PiFold
   those deposited structures directly, so the design and the reference are the same residues
   in the same order.
 
 ATLAS and mdCATH are trained and evaluated separately -- one run each (`--data_name ATLAS`
-or `MDCATH`) -- matching scripts/train_residue_classifier.py's `--ds-name`. For mdCATH the
-held-out split is the `validation` rows only.
+or `MDCATH`) -- matching scripts/train_residue_classifier.py's `--ds-name`. The 'test' split
+(ATLAS `cross_val` fold `--test_fold`, mdCATH's `test` rows) is held out from training and
+from early stopping; `valid` is what the recorder selects on.
 """
 import logging
 import json

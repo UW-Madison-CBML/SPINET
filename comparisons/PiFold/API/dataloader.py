@@ -3,8 +3,8 @@
 Adds the ATLAS and MDCATH datasets, both served from relaxed (deposited) PDB structures by
 `API.relaxed_dataset.RelaxedStructures`. They are trained and evaluated **separately** --
 one run each, `--data_name ATLAS` or `--data_name MDCATH` -- matching
-scripts/train_residue_classifier.py's `--ds-name`. Neither has a held-out set beyond its
-validation split, so 'valid' and 'test' are the same proteins.
+scripts/train_residue_classifier.py's `--ds-name`. Each has three disjoint splits (see
+lib/dataset_splits.py): 'test' is held out from training and from model selection.
 """
 import copy
 import os.path as osp
@@ -38,6 +38,7 @@ def load_data(data_name, method, batch_size, data_root, num_workers=8, **kwargs)
             traj_h5=kwargs.get('traj_h5') if kwargs.get('traj_h5') is not None else None,
             pdb_cache=kwargs.get('pdb_cache') or None,
             val_fold=kwargs.get('val_fold', 0),
+            test_fold=kwargs.get('test_fold', 4),
         )
         train_set, valid_set, test_set = map(lambda x: copy.copy(x), [relaxed_set] * 3)
         valid_set.change_mode('valid')

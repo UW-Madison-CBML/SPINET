@@ -1,4 +1,4 @@
-"""Evaluate a trained MapDiff (Prior_Diff) checkpoint on a dataset's held-out split.
+"""Evaluate a trained MapDiff (Prior_Diff) checkpoint on a dataset's held-out test split.
 
 Loads an EGNN+IPA Prior_Diff checkpoint produced by `train.py`, runs MC-DDIM inference over
 every protein in the held-out split one at a time, and computes per-protein perplexity,
@@ -8,8 +8,10 @@ the mean +/- standard deviation (over proteins) for each metric and logs everyth
 Weights & Biases.
 
 Both shared datasets are supported and evaluated separately (`--ds-name`), the same splits
-scripts/train_residue_classifier.py uses: ATLAS's held-out `cross_val` fold, or mdCATH's
-`validation` rows. Each protein is featurized on the fly from its *relaxed* (deposited)
+scripts/train_residue_classifier.py uses. The default is the **test** split -- ATLAS's
+`cross_val` fold `--test-fold`, or mdCATH's `test` rows -- which training never saw and never
+selected on; pass `--split val` to score the validation split instead. Each protein is
+featurized on the fly from its *relaxed* (deposited)
 structure -- `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset id
 names and crops it to the residues the trajectory covers -- then run through
 `data.generate_graph_cath.pdb2graph`, exactly as train.py's data/generate_graph_relaxed.py
@@ -85,6 +87,9 @@ def create_parser():
                          help="Path to the run's resolved Hydra config.yaml (default: <run_dir>/configs/config.yaml)")
     parser.add_argument('--ds-name', default='atlas', choices=dataset_splits.DATASETS,
                          help="Which shared dataset's held-out split to evaluate on")
+    parser.add_argument('--split', default='test', choices=('test', 'val'),
+                         help="Which held-out split to score (default: the test split, which "
+                              "training neither fit nor selected on)")
     parser.add_argument('--index-csv', default=None,
                          help="Split index csv (default: the dataset's standard file name)")
     parser.add_argument('--traj-h5', default=None,
@@ -92,7 +97,9 @@ def create_parser():
                               "sequence (default: the dataset's standard file name)")
     parser.add_argument('--pdb-cache', default='./pdb_cache', help="Where downloaded RCSB entries are cached")
     parser.add_argument('--val-fold', type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
-                         help="ATLAS only: cross_val fold to evaluate on (held out from training)")
+                         help="ATLAS only: cross_val fold used as the validation split")
+    parser.add_argument('--test-fold', type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
+                         help="ATLAS only: cross_val fold held out as the test split")
     parser.add_argument('--max_length', default=dataset_splits.MAX_LENGTH, type=int,
                          help="Skip proteins longer than this many residues. Defaults to the cutoff "
                               "every model trains under (lib/dataset_splits.MAX_LENGTH) -- evaluating "
@@ -103,6 +110,12 @@ def create_parser():
                               "per protein)")
     parser.add_argument('--ddim_steps', default=None, type=int, help="Override cfg.diffusion.ddim_steps")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--esmfold_device', default=None,
+                         help="Where to run ESMFold for self-consistency RMSD. Its fp32 weights are "
+                              "~11GB and stay resident for the whole run, so on a 2-GPU node put it "
+                              "on the other card (e.g. --device cuda:0 --esmfold_device cuda:1), as "
+                              "train.py does via conf/train.yaml's `compute` block. Defaults to "
+                              "--device.")
     parser.add_argument('--wandb_key_file', default='./wandb_api.txt')
     parser.add_argument('--wandb_entity', default='jenslundsgaard7-uw-madison')
     parser.add_argument('--wandb_project', default='SheafProtein')
@@ -120,19 +133,22 @@ def find_checkpoint(run_dir):
     return os.path.join(model_dir, chosen)
 
 
-def load_validation_entries(ds_name, index_csv, traj_h5, pdb_cache, val_fold, max_length):
-    """Featurize the relaxed (deposited) structure of every held-out protein."""
-    _, val_ids = dataset_splits.get_splits(ds_name, index_csv, val_fold=val_fold)
+def load_split_entries(ds_name, index_csv, traj_h5, pdb_cache, val_fold, test_fold, max_length,
+                        split='test'):
+    """Featurize the relaxed (deposited) structure of every protein in `split` ('test'/'val')."""
+    _, val_ids, test_ids = dataset_splits.get_splits(
+        ds_name, index_csv, val_fold=val_fold, test_fold=test_fold)
+    split_ids = test_ids if split == 'test' else val_ids
     traj_h5 = dataset_splits.default_h5(ds_name) if traj_h5 is None else traj_h5
 
-    reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, val_ids) if traj_h5 else {}
+    reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, split_ids) if traj_h5 else {}
     records, failures = relaxed_pdb.load_relaxed_structures(
-        val_ids, cache_dir=pdb_cache, reference_seqs=reference_seqs)
+        split_ids, cache_dir=pdb_cache, reference_seqs=reference_seqs)
     if failures:
-        print(f'{len(failures)}/{len(val_ids)} held-out proteins had no usable deposited structure')
+        print(f'{len(failures)}/{len(split_ids)} {split} proteins had no usable deposited structure')
 
     entries = []
-    for protein_id in tqdm(val_ids, desc=f'featurizing {ds_name} held-out proteins'):
+    for protein_id in tqdm(split_ids, desc=f'featurizing {ds_name} {split} proteins'):
         record = records.get(protein_id)
         if record is None:
             continue
@@ -157,9 +173,10 @@ def load_validation_entries(ds_name, index_csv, traj_h5, pdb_cache, val_fold, ma
 
 
 @torch.no_grad()
-def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold_tokenizer, esmfold_model):
+def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold_tokenizer,
+              esmfold_model, esmfold_device=None):
     per_protein = []
-    for entry in tqdm(entries, desc='evaluating held-out set'):
+    for entry in tqdm(entries, desc='evaluating held-out split'):
         g_batch, ipa_batch = collator([entry['graph']])
         g_batch, ipa_batch = g_batch.to(device), ipa_batch.to(device)
 
@@ -177,7 +194,7 @@ def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold
         # reference, residue-for-residue aligned with the prediction.
         gt_backbone = entry['graph'].atom_pos[:, ATOM_POS_TO_BACKBONE_IDX, :]  # (R, 4, 3)
         scrmsd = evaluate_scrmsd([pred_seq], [gt_backbone], esmfold_tokenizer, esmfold_model,
-                                  device=device).item()
+                                  device=esmfold_device or device).item()
 
         per_protein.append({
             'title': entry['title'],
@@ -199,6 +216,7 @@ def main():
 
     cfg = OmegaConf.load(config_path)
     device = torch.device(args.device)
+    esmfold_device = torch.device(args.esmfold_device) if args.esmfold_device else device
 
     egnn = EGNN_NET(input_feat_dim=cfg.model.input_feat_dim, hidden_channels=cfg.model.hidden_dim,
                      edge_attr_dim=cfg.model.edge_attr_dim, dropout=cfg.model.drop_out, n_layers=cfg.model.depth,
@@ -222,17 +240,17 @@ def main():
     ensemble_num = args.ensemble_num or cfg.diffusion.ensemble_num
     ddim_steps = args.ddim_steps or cfg.diffusion.ddim_steps
 
-    entries = load_validation_entries(args.ds_name, args.index_csv, args.traj_h5, args.pdb_cache,
-                                       args.val_fold, args.max_length)
+    entries = load_split_entries(args.ds_name, args.index_csv, args.traj_h5, args.pdb_cache,
+                                  args.val_fold, args.test_fold, args.max_length, split=args.split)
     if len(entries) == 0:
-        raise RuntimeError("No usable held-out proteins found for dataset {}".format(args.ds_name))
-    print("Loaded {} held-out {} proteins".format(len(entries), args.ds_name))
+        raise RuntimeError("No usable {} proteins found for dataset {}".format(args.split, args.ds_name))
+    print("Loaded {} {} {} proteins".format(len(entries), args.ds_name, args.split))
 
-    esmfold_tokenizer, esmfold_model = load_esmfold(device=device)
+    esmfold_tokenizer, esmfold_model = load_esmfold(device=str(esmfold_device))
 
     collator = CollatorDiff()
     per_protein = evaluate(model, entries, collator, ensemble_num, ddim_steps, device,
-                            esmfold_tokenizer, esmfold_model)
+                            esmfold_tokenizer, esmfold_model, esmfold_device)
     # ddof=1 (sample std) matches this script's previous hand-rolled aggregation.
     summary = stats_utils.summarize_per_protein(per_protein, METRIC_KEYS, ddof=1)
 
@@ -246,11 +264,13 @@ def main():
             'config_path': config_path,
             'ds_name': args.ds_name,
             'index_csv': args.index_csv or dataset_splits.default_index_csv(args.ds_name),
+            'split': args.split,
             'val_fold': args.val_fold,
+            'test_fold': args.test_fold,
             'max_length': args.max_length,
             'ensemble_num': ensemble_num,
             'ddim_steps': ddim_steps,
-            'n_validation_proteins': len(entries),
+            'n_eval_proteins': len(entries),
         },
     )
     run.log(summary)

@@ -15,9 +15,10 @@ scRMSD reference.)
 
 ATLAS and mdCATH are trained and evaluated separately (`--data_name ATLAS` / `MDCATH`),
 matching scripts/train_residue_classifier.py's `--ds-name`. Splits come from
-`lib/dataset_splits.py`: ATLAS holds out one `cross_val` fold, mdCATH trains on its
-topology split's train+test rows and evaluates on `validation` ONLY. Neither dataset has a
-further held-out set, so the held-out split is reused as both 'valid' and 'test'.
+`lib/dataset_splits.py` and there are three of them: ATLAS holds out `cross_val` fold
+`--val_fold` for validation and fold `--test_fold` for test; mdCATH uses its topology
+split's train/validation/test rows as-is. 'valid' and 'test' are disjoint, and neither is
+trained on.
 
 Produces items shaped like API.cath_dataset.CATH: dicts with 'title', 'seq', 'N', 'CA', 'C',
 'O' (and 'category'/'score' for test), so it plugs directly into API.featurizer.featurize_GTrans.
@@ -60,7 +61,8 @@ class RelaxedStructures(data.Dataset):
 
     def __init__(self, path='./', mode='train', max_length=dataset_splits.MAX_LENGTH, data=None,
                  ds_name='atlas', index_csv=None, traj_h5=None, pdb_cache=None,
-                 val_fold=dataset_splits.DEFAULT_VAL_FOLD):
+                 val_fold=dataset_splits.DEFAULT_VAL_FOLD,
+                 test_fold=dataset_splits.DEFAULT_TEST_FOLD):
         self.path = path
         self.mode = mode
         self.max_length = max_length
@@ -71,6 +73,7 @@ class RelaxedStructures(data.Dataset):
         self.traj_h5 = os.path.join(path, dataset_splits.default_h5(self.ds_name)) if traj_h5 is None else traj_h5
         self.pdb_cache = pdb_cache or os.path.join(path, 'pdb_cache')
         self.val_fold = val_fold
+        self.test_fold = test_fold
         if data is None:
             self.data = self.cache_data[mode]
         else:
@@ -81,18 +84,19 @@ class RelaxedStructures(data.Dataset):
         if not os.path.exists(self.index_csv):
             raise FileNotFoundError("no such file: {} !!!".format(self.index_csv))
 
-        train_ids, val_ids = dataset_splits.get_splits(self.ds_name, self.index_csv, val_fold=self.val_fold)
-        # Neither dataset has a further held-out set -- reuse the held-out split as 'test'.
-        split_ids = {'train': train_ids, 'valid': val_ids, 'test': val_ids}
+        train_ids, val_ids, test_ids = dataset_splits.get_splits(
+            self.ds_name, self.index_csv, val_fold=self.val_fold, test_fold=self.test_fold)
+        split_ids = {'train': train_ids, 'valid': val_ids, 'test': test_ids}
+        all_split_ids = train_ids + val_ids + test_ids
 
         reference_seqs = {}
         if self.traj_h5:
             if not os.path.exists(self.traj_h5):
                 raise FileNotFoundError("no such file: {} !!!".format(self.traj_h5))
-            reference_seqs = relaxed_pdb.reference_seqs_from_h5(self.traj_h5, train_ids + val_ids)
+            reference_seqs = relaxed_pdb.reference_seqs_from_h5(self.traj_h5, all_split_ids)
 
         records, failures = relaxed_pdb.load_relaxed_structures(
-            train_ids + val_ids, cache_dir=self.pdb_cache, reference_seqs=reference_seqs)
+            all_split_ids, cache_dir=self.pdb_cache, reference_seqs=reference_seqs)
         if failures:
             print('{}: {} protein ids had no usable deposited structure'.format(self.ds_name, len(failures)))
 
@@ -100,7 +104,7 @@ class RelaxedStructures(data.Dataset):
         data_dict = {'train': [], 'valid': [], 'test': []}
         # Every reason a protein in the split index does *not* make it into the dataset, kept
         # so the run can report exactly which ids it scored -- MapDiff and DynamicMPNN drop
-        # proteins for their own reasons (DSSP failures, too few conformers), and the held-out
+        # proteins for their own reasons (DSSP failures, too few conformers), and the test
         # sets only line up if each model says out loud what it dropped.
         self.dropped = {'no_structure': [], 'nonstandard_residue': [], 'too_long': []}
 
@@ -133,13 +137,12 @@ class RelaxedStructures(data.Dataset):
                     entry['score'] = 100.0
                 data_dict[mode].append(entry)
 
-        # 'valid' and 'test' are the same proteins, so each drop is counted twice there --
-        # de-duplicate before reporting.
         self.dropped = {reason: sorted(set(ids)) for reason, ids in self.dropped.items()}
 
-        print('{}: {} train / {} valid / {} test structures loaded (fold {} held out)'.format(
-            self.ds_name, len(data_dict['train']), len(data_dict['valid']), len(data_dict['test']),
-            self.val_fold))
+        print('{}: {} train / {} valid / {} test structures loaded '
+              '(val fold {}, test fold {})'.format(
+                  self.ds_name, len(data_dict['train']), len(data_dict['valid']),
+                  len(data_dict['test']), self.val_fold, self.test_fold))
         for reason, ids in self.dropped.items():
             if ids:
                 print('{}: dropped {} protein(s) -- {}: {}'.format(self.ds_name, len(ids), reason, ids))

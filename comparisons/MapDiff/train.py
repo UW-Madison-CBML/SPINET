@@ -46,6 +46,8 @@ except ImportError:
     import stats_utils
     from scrmsd import load_esmfold
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 allow_pyg_data_pickles()
 
 # cfg.dataset.name -> lib/dataset_splits.py dataset name. CATH is upstream's own benchmark
@@ -53,28 +55,56 @@ allow_pyg_data_pickles()
 SPLIT_DATASETS = {'ATLAS': 'atlas', 'MDCATH': 'mdcath'}
 
 
+def resolve_devices(cfg):
+    """``(training device, ESMFold device)`` from ``cfg.compute``.
+
+    ESMFold's fp32 weights (~11GB) would otherwise sit on the training GPU for the whole
+    run to be used only in the val/test passes, which is what pushes the diffusion stage
+    into OOM at the configured batch size -- conf/train.yaml puts it on a second GPU.
+    A requested index that does not exist on this machine falls back to cuda:0 with a
+    warning rather than crashing, so single-GPU dev runs still work (at a smaller
+    batch size).
+    """
+    if not torch.cuda.is_available():
+        print('No CUDA device available -- running everything on CPU')
+        return torch.device('cpu'), torch.device('cpu')
+
+    n_gpus = torch.cuda.device_count()
+
+    def pick(name, what):
+        dev = torch.device(name)
+        if dev.type == 'cuda' and (dev.index or 0) >= n_gpus:
+            print(f'WARNING: {what} requested {dev}, but this machine has {n_gpus} GPU(s) -- '
+                  f'falling back to cuda:0. Lower train.batch_size/mask_train.batch_size if '
+                  f'this OOMs.')
+            return torch.device('cuda:0')
+        return dev
+
+    return pick(cfg.compute.device, 'training'), pick(cfg.compute.esmfold_device, 'ESMFold')
+
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def split_file_ids(ds_name, index_csv, val_fold, directories):
+def split_file_ids(ds_name, index_csv, val_fold, test_fold, directories):
     """``{split: [<protein_id>.pt, ...]}`` for each processed graph directory.
 
     Deliberately *not* ``os.listdir(dir)``: that trusts whatever happens to be on disk (a
     stale file from an earlier fold, a half-finished featurization run) and returns it in
-    filesystem order. Driving the lists from the split index instead means this run trains on
-    fold-!=`val_fold` and evaluates on fold-`val_fold` exactly as
-    scripts/train_residue_classifier.py and comparisons/{PiFold,DynamicMPNN} do, whatever the
-    directories contain -- and the returned order is the index csv's, not the filesystem's.
+    filesystem order. Driving the lists from the split index instead means this run trains,
+    validates and tests on exactly the folds lib/dataset_splits.py assigns -- the same three
+    splits scripts/train_residue_classifier.py and comparisons/{PiFold,DynamicMPNN} cut --
+    whatever the directories contain, and the returned order is the index csv's, not the
+    filesystem's.
 
     Proteins the featurizer could not produce a graph for (no deposited entry, DSSP failure)
     are reported rather than silently skipped: they are the main way two models' held-out sets
     drift apart.
     """
-    train_ids, val_ids = dataset_splits.get_splits(ds_name, index_csv, val_fold=val_fold)
-    # ATLAS and mdCATH both evaluate on the held-out split only -- 'val' and 'test' are the
-    # same proteins, and conf/dataset/*.yaml points both dirs at the same featurized copy.
-    wanted = {'train': train_ids, 'val': val_ids, 'test': val_ids}
+    train_ids, val_ids, test_ids = dataset_splits.get_splits(
+        ds_name, index_csv, val_fold=val_fold, test_fold=test_fold)
+    wanted = {'train': train_ids, 'val': val_ids, 'test': test_ids}
 
     present = {}
     for split, protein_ids in wanted.items():
@@ -99,7 +129,8 @@ def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
     print(f"Output directory: {output_dir}")
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device, esmfold_device = resolve_devices(cfg)
+    print(f"Training on {device}; ESMFold (scRMSD) on {esmfold_device}")
     # The one seed every comparison run uses (lib/dataset_splits.SEED), rather than each
     # model's own upstream default.
     set_seed(dataset_splits.SEED)
@@ -131,6 +162,7 @@ def main(cfg: DictConfig):
         split_ids = split_file_ids(
             SPLIT_DATASETS[cfg.dataset.name], cfg.dataset.get('index_csv') or None,
             cfg.dataset.get('val_fold', dataset_splits.DEFAULT_VAL_FOLD),
+            cfg.dataset.get('test_fold', dataset_splits.DEFAULT_TEST_FOLD),
             {'train': cfg.dataset.train_dir, 'val': cfg.dataset.val_dir, 'test': cfg.dataset.test_dir})
         train_ID, val_ID, test_ID = split_ids['train'], split_ids['val'], split_ids['test']
 
@@ -212,14 +244,14 @@ def main(cfg: DictConfig):
     if cfg.train.scheduler:
         scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=cfg.train.lr, total_steps=train_num_steps)
 
-    esmfold_tokenizer, esmfold_model = load_esmfold(device=device)
+    esmfold_tokenizer, esmfold_model = load_esmfold(device=str(esmfold_device))
 
     trainer = MapDiffTrainer(
         cfg,
         prior_model=prior_model, prior_optimizer=prior_optimizer, mask_train_dataloader=mask_train_loader,
         diffusion_model=diffusion_model, optimizer=optimizer,
         train_dataloader=train_loader, val_dataloader=val_loader, test_dataloader=test_loader,
-        device=device, output_dir=output_dir,
+        device=device, esmfold_device=esmfold_device, output_dir=output_dir,
         esmfold_tokenizer=esmfold_tokenizer, esmfold_model=esmfold_model, wandb_run=wandb_run,
         prior_scheduler=prior_scheduler, scheduler=scheduler,
         train_batch_size=cfg.train.batch_size, train_num_steps=train_num_steps,

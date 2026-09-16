@@ -50,7 +50,10 @@ def create_parser():
     parser.add_argument('--pdb_cache', default='', type=str,
                          help='Where downloaded RCSB entries are cached (default: <data_root>/pdb_cache)')
     parser.add_argument('--val_fold', default=dataset_splits.DEFAULT_VAL_FOLD, type=int,
-                         help='ATLAS only: cross_val fold held out (and reused as the test split)')
+                         help='ATLAS only: cross_val fold used as the validation split')
+    parser.add_argument('--test_fold', default=dataset_splits.DEFAULT_TEST_FOLD, type=int,
+                         help='ATLAS only: cross_val fold held out as the test split -- never '
+                              'trained on and never used for model selection')
     parser.add_argument('--max_length', default=dataset_splits.MAX_LENGTH, type=int,
                          help='Proteins longer than this (in residues) are dropped from every split. '
                               'Shared with MapDiff (lib/dataset_splits.MAX_LENGTH) -- raising it here '

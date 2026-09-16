@@ -4,18 +4,20 @@
 
 ATLAS and mdCATH are trained and evaluated **separately** — one run each, `--ds-name atlas`
 or `--ds-name mdcath` — matching `scripts/train_residue_classifier.py`. Splits come from
-`lib/dataset_splits.py`: ATLAS holds out one `cross_val` fold; mdCATH trains on its topology
-split's `train`+`test` rows and **evaluates on the `validation` rows only**.
+`lib/dataset_splits.py`: ATLAS holds out two `cross_val` folds (one validation, one test);
+mdCATH's topology split's `train`/`validation`/`test` rows are three disjoint splits.
 
-`--val-fold` (default 0, the fold `scripts/train_residue_classifier.py` hardcodes) selects
-which ATLAS fold is held out; the other four train, and the held-out fold is the only split
-scored. `--max-length` (default `lib/dataset_splits.MAX_LENGTH`) drops the same long proteins
+`--val-fold` (default 0) selects the ATLAS validation fold and `--test-fold` (default 4) the
+test fold; the other three train. Validation is scored every epoch, and the test split is
+scored once after the last epoch -- there is no early stopping or best-epoch restore here, so
+the tested weights are the trained weights and the test split never fed back into them.
+`--max-length` (default `lib/dataset_splits.MAX_LENGTH`) drops the same long proteins
 MapDiff and PiFold drop, and `--seed` (default `lib/dataset_splits.SEED`) seeds `random` and
 `np.random` as well as torch -- the featurizer picks which *k* of each protein's saved
 conformer pool to use with `random.sample`, once, at dataset-construction time, so leaving
 those unseeded would change the validation set itself from run to run. Each run logs
-`split_counts` and `test_split_ids` to its W&B summary, as MapDiff and PiFold do, so the
-three held-out sets can be diffed rather than assumed identical.
+`split_counts`, `val_split_ids` and `test_split_ids` to its W&B summary, as MapDiff and
+PiFold do, so the three models' held-out sets can be diffed rather than assumed identical.
 
 `comparisons/{MapDiff,PiFold}` are static-structure models, so they were retargeted onto each
 protein's relaxed (deposited) PDB entry. DynamicMPNN is **not**: it consumes an ensemble of
