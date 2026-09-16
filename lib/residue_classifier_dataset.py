@@ -50,7 +50,7 @@ class ResidueClassifierDataset(Dataset):
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
     
-    def __init__(self, h5_path, np_rng, groups:list|None=None, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None):
+    def __init__(self, h5_path, np_rng, groups:list|None=None, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None, step=32):
         """
         self
         h5_path: the dataframe containing trajectory information 
@@ -64,6 +64,7 @@ class ResidueClassifierDataset(Dataset):
         self.groups = groups
         self.epsilon = epsilon
         self.np_rng = np_rng
+        self.step = step
         
         assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
 
@@ -122,15 +123,13 @@ class ResidueClassifierDataset(Dataset):
 
             if self.fixed_length is not None:
                 for i, group_name in enumerate(self.groups):
-                    if h5_file[group_name]["coordinates"].shape[0] > 2000:
-                        continue
 
                     actual_length = h5_file[group_name]["coordinates"].shape[1]
                     length = (min(actual_length, self.traj_len) if self.traj_len is not None else actual_length)
                     if length < self.fixed_length:
                         continue
 
-                    starts = np.arange(length - self.fixed_length + 1)
+                    starts = np.arange(length - self.fixed_length + 1, step=self.step)
                     ends = starts + self.fixed_length
                     index.append(np.stack([np.full(len(starts), i), starts, ends], axis=-1))
 
@@ -142,8 +141,6 @@ class ResidueClassifierDataset(Dataset):
                 # variable-length sample mode
                 min_len, max_len = self.variable_length
                 for i, group_name in enumerate(self.groups):
-                    if h5_file[group_name]["coordinates"].shape[0] > 2000:
-                        continue
 
 
                     actual_length = h5_file[group_name]["coordinates"].shape[1]
@@ -152,7 +149,7 @@ class ResidueClassifierDataset(Dataset):
                     for seq_len in range(min_len, max_len + 1):
                         if length < seq_len:
                             continue
-                        starts = np.arange(length - seq_len + 1)
+                        starts = np.arange(length - seq_len + 1, step=self.step)
                         ends = starts + seq_len
                         index.append(np.stack([np.full(len(starts), i, dtype=np.int64), starts, ends], axis=-1))
 

@@ -34,7 +34,7 @@ class SheafLearnerLowRank(nn.Module):
         left_maps = maps[:, :self.stalk_dim*self.rank].view(edge_index.shape[1], self.stalk_dim, self.rank)
         right_maps = maps[:, self.stalk_dim*self.rank:].view(edge_index.shape[1], self.rank, self.stalk_dim)
         return torch.matmul(left_maps, right_maps)
-         
+
 
 class SheafLearnerOrthogonal(nn.Module):
     def __init__(self, input_dim: int, stalk_dim: int):
@@ -50,7 +50,7 @@ class SheafLearnerOrthogonal(nn.Module):
         indices = torch.triu_indices(self.stalk_dim, self.stalk_dim, offset=1)
         indices = indices[0] + (self.stalk_dim * indices[1])
         assert self.tri_dim == indices.shape[0], "indices shape isn't the same as triangle dim"
-        upper_indices_matrix = torch.zeros(self.stalk_dim**2, self.tri_dim) 
+        upper_indices_matrix = torch.zeros(self.stalk_dim**2, self.tri_dim)
         upper_indices_matrix[indices[:,None], torch.arange(self.tri_dim)] = 1
         self.register_buffer("upper_indices_matrix",upper_indices_matrix)
 
@@ -81,7 +81,7 @@ class SheafLearnerOrthogonal(nn.Module):
         left_mat = I - maps
         maps_squared = torch.matmul(maps, maps)
         maps = torch.matmul(left_mat, left_mat + maps_squared - torch.matmul(maps, maps_squared))
-        
+
         return maps
 
 class SheafLearner(nn.Module):
@@ -179,34 +179,34 @@ class SheafAttentionConv(MessagePassing):
                 self.sheaf_learner = SheafLearnerOrthogonal(self.hidden_dim, self.stalk_dim)
             else:
                 self.sheaf_learner = SheafLearner(self.hidden_dim, self.stalk_dim)
-                
+
 
 
 
     def forward(self, x, edge_index, return_sheaf=False):
-        if not self.ablate_sheaves: 
+        if not self.ablate_sheaves:
             maps = self.sheaf_learner(x, edge_index)
 
             _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
-            neighbor_maps = maps[reverse_edge_indices] 
+            neighbor_maps = maps[reverse_edge_indices]
             maps = torch.stack([maps, neighbor_maps], dim=1)
-            
+
         else:
             # set transport maps to identity to ablate sheaves
             maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(edge_index.shape[1], 2, -1, -1)
 
         x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # this should automatically fail if the stalk_dim is input wrong
-         
+
         out = self.propagate(edge_index, x=x, x_stalk=x_stalk, maps=maps) # num_edges, num_heads, c, d
         if return_sheaf and not self.ablate_sheaves:
             return out, maps[:,0,:,:]
         else:
-            return out 
+            return out
     def message(self, x_i, x_j, x_stalk_i, x_stalk_j, maps, index, ptr, size_i):
-        
-        edge_features = torch.cat([x_i, x_j], dim=-1) 
-        edge_features_batched = edge_features[None,:,:].expand(self.num_heads,-1, -1) 
-        
+
+        edge_features = torch.cat([x_i, x_j], dim=-1)
+        edge_features_batched = edge_features[None,:,:].expand(self.num_heads,-1, -1)
+
         x_stalk_j_batched = x_stalk_j[None,:,:,:].expand(self.num_heads,-1, -1, -1)
 
         x_stalk_i_batched = x_stalk_i[None,:,:,:].expand(self.num_heads,-1, -1, -1)
@@ -215,13 +215,13 @@ class SheafAttentionConv(MessagePassing):
             alpha = self.leaky(torch.einsum("hlf, hef -> hel", self.att, edge_features_batched)).unsqueeze(1)
         else:
             alpha = torch.ones(self.num_heads, 1, x_i.shape[0], 1, device=x_i.device)
-        
+
         transformed_j = torch.einsum("hij, hecj -> heci", self.W, x_stalk_j_batched) #num_heads, num_edges, num_channels, stalk_dim
 
-        if self.use_attention: 
-            alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2) 
+        if self.use_attention:
+            alpha = softmax(alpha, index, ptr, num_nodes=size_i, dim=2)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        if not self.ablate_sheaves: 
+        if not self.ablate_sheaves:
             transformed_i = torch.einsum("hij, hecj -> heci", self.W, x_stalk_i_batched)
 
             i_maps_expanded = maps[None,:,0,:,:].expand(self.num_heads, -1, -1, -1)
@@ -229,9 +229,9 @@ class SheafAttentionConv(MessagePassing):
             j_maps_expanded = maps[None,:,1,:,:].expand(self.num_heads, -1, -1, -1)
             i_to_edge = torch.matmul(i_maps_expanded, transformed_i.mT)
             j_to_edge = torch.matmul(j_maps_expanded, transformed_j.mT)
-            edge_value = j_to_edge - i_to_edge 
+            edge_value = j_to_edge - i_to_edge
             transported = torch.matmul(i_maps_expanded.mT, edge_value).mT # last mT so that it's c,d not d,c
-        else: 
+        else:
             transported = transformed_j
         alpha = alpha.permute(0,2,1,3).contiguous() # this will end up with num_heads, num_edges, 1, 1 which will broadcast
         return (alpha * transported).permute(1,0,2,3).contiguous() # multiplication by alpha serves as our dropout here
@@ -245,7 +245,7 @@ class SheafAttentionConv(MessagePassing):
         return self.update_linear(torch.cat([x, aggr_out], dim=-1))
 
 
-    
+
 class SheafResidualSANBlock(nn.Module):
     def __init__(self, hidden_dim: int, stalk_dim: int, num_heads: int, dropout: float = 0.2, ablate_sheaves=False, restriction_map_type="low_rank", use_attention=True):
         super().__init__()
@@ -291,7 +291,7 @@ class SheafResidualSAN(nn.Module):
         ])
 
     def forward(self, data, return_sheaf=False):
-        first_sheaf, last_sheaf = None,None 
+        first_sheaf, last_sheaf = None,None
         for i, block in enumerate(self.blocks):
             if return_sheaf and i == 0:
                 data, first_sheaf = block(data, return_sheaf=return_sheaf)
@@ -308,11 +308,20 @@ class SheafResidualSAN(nn.Module):
 
 
 
+class EdgeToNodeAgg(MessagePassing):
+    def __init__(self):
+        super().__init__(aggr="mean")
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+
 # ----------------------------------------------------------------------------------------------
 # this initial dynamics embedding will be the main thing we change when editing the input data
 # it will be harder to not hard code some of this stuff
 # the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
+    EDGE_CHUNK = 50_000
     """def step(self, x_t, edge_attr_t, edge_index, reverse_edge_indices):
         if not self.ablate_sheaves:
             maps_t = self.sheaf_learner(
@@ -326,7 +335,7 @@ class InitDynamicsEmbedding(MessagePassing):
         x_stalk = x_t.view(x_t.shape[0], self.num_channels, self.stalk_dim)
         edge_stalk = edge_attr_t.view(edge_attr_t.shape[0], self.num_channels, self.stalk_dim)
         return self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps_t)
-    """  
+    """
     def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, frame_origin="CA", ablate_sheaves=False, restriction_map_type="arbitrary"):
         super().__init__(aggr='sum', node_dim=0)
         self.input_dim = node_dim
@@ -343,80 +352,58 @@ class InitDynamicsEmbedding(MessagePassing):
         self.register_buffer("not_frame_origin_mask", torch.tensor([atom != self.frame_origin for atom in self.atoms], dtype=torch.bool))
 
         if not self.ablate_sheaves:
-            self.sheaf_learner = nn.Sequential(nn.Linear(3*self.hidden_dim, 2*self.hidden_dim), nn.ReLU(), nn.Linear(2*self.hidden_dim, self.stalk_dim**2))
+            self.sheaf_learner = nn.Sequential(nn.Linear(2*self.input_dim + self.edge_dim, 2*self.input_dim + self.edge_dim), nn.ReLU(), nn.Linear(2*self.input_dim + self.edge_dim, self.stalk_dim**2))
 
-        self.project_nodes = nn.Linear(self.input_dim, self.input_dim)
-        self.project_edges = nn.Linear(self.edge_dim, self.edge_dim)
+        self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
+        self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
 
         self.mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
 
-        self.edge_temporal_product = nn.GRU(self.edge_dim, self.hidden_dim, batch_first=True) 
-        self.node_temporal_product = nn.GRU(self.input_dim, self.hidden_dim, batch_first=True) 
+        self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True)
+
 
     def forward(self, x, pos, frame_maps, edge_index, edge_attr):
-        x = self.project_nodes(x)
-
-        # need to calc some edge features here, since we don't know the edges yet at 
-
+        # need to calc some edge features here, since we don't know the edges yet at
         origin = pos[:, :, ~self.not_frame_origin_mask]
         other_atoms = pos[:, :, self.not_frame_origin_mask]
-
         in_frame_atoms = torch.matmul(other_atoms[edge_index[1]] - origin[edge_index[0]], frame_maps[edge_index[0]])
-
         in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], pos.shape[1], 9)
-
         pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
+        edge_attr = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
 
-        edge_features = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
-
-        edge_attr = self.project_edges(edge_features.contiguous())
-
-
-        print(torch.cuda.memory_summary())
-        _, x = self.node_temporal_product(x)
-        print(torch.cuda.memory_summary())
-        _, edge_attr = self.edge_temporal_product(edge_attr)
-        x = x.squeeze(0)
-        edge_attr = edge_attr.squeeze(0)
-
-           
         # calculate restriction maps
+        _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
+
         if not self.ablate_sheaves:
-            maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).reshape(edge_index.shape[1], self.stalk_dim, self.stalk_dim) # edge_attr
-
-            _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
-
-            opposite_maps = maps[reverse_edge_indices]
-
-            maps = torch.stack([maps, opposite_maps],dim=0)
+            maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).reshape(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim) # edge_attr
         else:
-            maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(2, edge_attr.shape[0], -1, -1)
-
+            maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(edge_attr.shape[0], edge_attr.shape[1], -1, -1)
         # reshape from h to c * d
-        x_stalk = x.view(x.shape[0], self.num_channels, self.stalk_dim) # stalk dim to c,d
-        edge_stalk = edge_attr.view(edge_attr.shape[0], self.num_channels, self.stalk_dim)
+        x_stalk = self.project_nodes(x).view(x.shape[0], x.shape[1], self.num_channels, self.stalk_dim) # stalk dim to c,d
+        edge_stalk = self.project_edges(edge_attr).view(edge_attr.shape[0], edge_attr.shape[1], self.num_channels, self.stalk_dim)
 
         # pass messages
-        agg = self.propagate(edge_index, x=x_stalk, maps=maps, edge_attr=edge_stalk)
+        agg = self.propagate(edge_index, x=x_stalk, maps=maps, edge_attr=edge_stalk, reverse_edge_indices=reverse_edge_indices)
+
         # flatten
-        agg_flat = agg.view(x.shape[0], self.hidden_dim)
-          
-        # nonlinearity 
-        return self.mlp(agg_flat)
+        agg_flat = agg.view(x.shape[0],x.shape[1], self.hidden_dim)
 
-    def message(self, x_i, x_j, maps, edge_attr): 
+        _, temp_agg = self.node_temporal_product(agg_flat)
+
+
+        # nonlinearity
+        return self.mlp(temp_agg.squeeze(0))
+
+    def message(self, x_i, x_j, maps, edge_attr, reverse_edge_indices):
         if not self.ablate_sheaves:
-            i_maps = maps[0] 
-            j_maps = maps[1]
-
-            i_to_edge = torch.matmul(i_maps, x_i.mT)
-            j_to_edge = torch.matmul(j_maps, x_j.mT)
+            i_to_edge = torch.matmul(maps, x_i.mT)
+            j_to_edge = torch.matmul(maps[reverse_edge_indices], x_j.mT)
 
             edge_value = edge_attr.mT + (j_to_edge - i_to_edge)
-            transported = torch.matmul(i_maps.mT, edge_value).mT # last mT so that it's c,d not d,c
-        else: 
+            transported = torch.matmul(maps.mT, edge_value).mT # last mT so that it's c,d not d,c
+        else:
             transported = x_j + edge_attr
-    
+
         return transported
 
 
@@ -475,7 +462,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.restriction_map_type = config.restriction_map_type
                 self.use_attention = config.use_attention
                 self.use_masking = config.use_masking
-        
+
         self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
 
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
@@ -539,8 +526,6 @@ class NodeOnlyMLP(nn.Module):
         h = h.mean(dim=1) # (N_residues, hidden_dim)
         data.x = self.classifier(h) # (N_residues, num_classes)
         return data
-
-
 
 
 

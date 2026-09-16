@@ -27,12 +27,12 @@ from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 import h5py
 from rgnn import RGNN
-from torch.utils.data import Sampler
+from torch.utils.data import BatchSampler
 
 
-class ProteinSampler(Sampler):
+class ProteinSampler(BatchSampler):
     def __init__(self, dataset, num_nodes, rng=None):
-        super().__init__(None)
+        super().__init__(None, 1,False)
         self.dataset = dataset
         self.num_nodes = num_nodes
         self.batches = []
@@ -268,9 +268,9 @@ def train_residue_classifier(args_dict):
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    batch_size = 8
+    num_nodes = 2000 # GRU's can't do more than a batch of 2**16
     hidden_dim = 64
-    stalk_dim = 16
+    stalk_dim = 8
     num_blocks = 4
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
@@ -287,7 +287,11 @@ def train_residue_classifier(args_dict):
     resume_model_name = args_dict["resume"]
     resume = args_dict["resume"] != ""
     nth_cross_val = args_dict["cross_val"]
+    nth_cross_test = args_dict["cross_test"]
+
     assert nth_cross_val >= 0 and nth_cross_val < 5
+    assert nth_cross_test >= 0 and nth_cross_test < 5
+
     ds_name = args_dict["ds_name"]
     other_model = args_dict["other_model"]
     
@@ -311,19 +315,20 @@ def train_residue_classifier(args_dict):
         h5_path = os.path.abspath("atlas_data.h5")
         index = pd.read_csv(os.path.abspath("atlas_cross_val_index.csv"))
 
-        val_mask = index["cross_val"] == 0
+        val_mask = index["cross_val"] == nth_cross_val
+        test_mask = index["cross_val"] == nth_cross_test
 
         val_pdbs = index[val_mask]["pdb"].to_list()
-        train_pdbs = index[~val_mask]["pdb"].to_list()
+        test_pdbs = index[test_mask]["pdb"].to_list()
+        train_pdbs = index[(~test_mask) & (~val_mask)]["pdb"].to_list()
 
     # mdCATH
     else:
         h5_path = os.path.abspath("mdcath_spinet_320_0.h5")
         index = pd.read_csv(os.path.abspath("mdcath_320_0_topology_split.csv"))
 
-        # train_pdbs = index[index["split"] == "train"]["domain"].tolist()
-        # test_pdbs = index[index["split"] == "test"]["domain"].tolist()
-        train_pdbs = index[index["split"].isin(["train", "test"])]["domain"].tolist()
+        train_pdbs = index[index["split"] == "train"]["domain"].tolist()
+        test_pdbs = index[index["split"] == "test"]["domain"].tolist()
         val_pdbs = index[index["split"] == "validation"]["domain"].tolist()
 
     # set up wandb
@@ -338,7 +343,7 @@ def train_residue_classifier(args_dict):
             "epochs": epochs,
             "val_ratio": val_ratio,
             "test_ratio": test_ratio,
-            "batch_size": batch_size,
+            "num_nodes": num_nodes,
             "hidden_dim": hidden_dim,
             "masking_ratio": masking_ratio,
             "task":"predicting residues from motions",
@@ -371,8 +376,9 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
-    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, fixed_length=num_timesteps, traj_len= 200 if ds_name == "atlas" else None)
+    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
+    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
+    test_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=test_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
 
     print("Train groups in this H5:", len(train_dataset.groups))
     print("Val groups in this H5:", len(val_dataset.groups))
@@ -380,12 +386,15 @@ def train_residue_classifier(args_dict):
     print("Val samples:", len(val_dataset))
 
     # set up dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False, generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_sampler = ProteinSampler(train_dataset, num_nodes, rng=torch_rng), generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_sampler=ProteinSampler(val_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_sampler=ProteinSampler(test_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
 
     single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, generator=torch_rng, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
+
+    print([f"{key}, {item.shape}" for key, item in next(iter(train_loader)).to_data_list()[0].items() if hasattr(item,"shape")])
 
     # set up new diffusion model # TODO fix all this
     # ---------------------------------------------
@@ -404,6 +413,7 @@ def train_residue_classifier(args_dict):
             use_attention=use_attention,
             use_masking=use_masking
         ).to(DEVICE)
+        #model = torch.jit.trace(model, Data(['x, torch.Size([594, 128, 15])', 'edge_index, torch.Size([2, 21884])', 'edge_attr, torch.Size([21884, 1])', 'y, torch.Size([594])', 'pos, torch.Size([594, 128, 4, 3])', 'frame_maps, torch.Size([594, 128, 3, 3])', 'node_mask, torch.Size([594])', lengths, rng.random_integers([1])]))
 
     elif other_model == "node_only": 
         model = NodeOnlyMLP(
@@ -441,7 +451,7 @@ def train_residue_classifier(args_dict):
     # training loop
     for epoch in range(epochs):
         model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        pbar = tqdm(train_loader if not test_val else itertools.islice(train_loader,100), desc=f"Epoch {epoch+1}/{epochs} [Train]")
         times1 = []
         times2 = []
         times3 = []
@@ -517,9 +527,13 @@ def train_residue_classifier(args_dict):
         # Validation Check
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
 
-        if not ablate_sheaves and other_model=="spinet":
-            interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
+    # Test Check
+    run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="test", test_val=test_val)
 
+    if not ablate_sheaves and other_model=="spinet":
+        interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
+
+    
     run.finish()
 
 if __name__ == "__main__":
@@ -536,6 +550,7 @@ if __name__ == "__main__":
     parser.add_argument('--cross-val', type=int, default=0)
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
     parser.add_argument('--other-model', type=str, default="spinet", choices=["rgnn", "spinet", "node_only"])
+    parser.add_argument('--cross-test', type=int, default=4)
 
     args = parser.parse_args()
     train_residue_classifier(vars(args))
