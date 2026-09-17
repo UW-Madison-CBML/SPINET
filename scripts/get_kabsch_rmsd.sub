@@ -1,0 +1,26 @@
+# get_kabsch_rmsd.sub
+
+docker_image = jenslundsgaard/sheaf_training:v3.2
+
+universe = docker
+
+shell = ./get_kabsch_rmsd.sh $(file)
+
+log = get_kabsch_rmsd_$(Cluster)_$(Process).log
+error = get_kabsch_rmsd_$(Cluster)_$(Process).err
+output = get_kabsch_rmsd_$(Cluster)_$(Process).out
+when_to_transfer_output = ON_EXIT_OR_EVICT
+Requirements = (Target.HasCHTCStaging == true)
+
++wantGPULab = true
+
+transfer_input_files = get_kabsch_rmsd.sh, get_kabsch_rmsd.py, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file)
+
+
+request_cpus = 16
+request_memory = 128GB
+request_disk = 128GB
+request_gpus = 1
+
+
+queue file from get_kabsch_rmsd.txt

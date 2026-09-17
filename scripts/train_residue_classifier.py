@@ -38,27 +38,32 @@ class ProteinSampler(BatchSampler):
         self.batches = []
         self.rng = rng
         ds_index_idx = 0
+        if self.rng is not None:
+            self.index = torch.randperm(len(self.dataset.index), generator=self.rng).tolist()
+        else:
+            self.index = list(range(len(self.dataset.index)))
+
+
+
         assert all(len(tup) == 3 for tup in self.dataset.index), "index does not contain 3 values"
         with h5py.File(self.dataset.h5_path, "r") as f:
             while(ds_index_idx < len(dataset.index)):
                 batch = []
                 batch_num_nodes = 0
                 while( ds_index_idx < len(dataset.index)): # loop while adding to a batch. if we we run out of ds_index_idxs we just end the batch, or if we get big enough
-                    group_idx, _, _ = self.dataset.index[ds_index_idx] 
+                    group_idx, _, _ = self.dataset.index[self.index[ds_index_idx]]
                     traj_id = self.dataset.groups[group_idx]
                     num_res = f[traj_id]["coordinates"].shape[0]
                     if num_res > self.num_nodes: # just discard pdb id if too big
                         ds_index_idx += 1
                     elif batch_num_nodes + num_res <= self.num_nodes: # first make sure it even fits
-                        batch.append(ds_index_idx)
+                        batch.append(self.index[ds_index_idx])
                         batch_num_nodes += num_res
                         ds_index_idx += 1
                     else: 
                         break
                 if len(batch) > 0:
                     self.batches.append(batch)
-        if self.rng is not None:
-            self.batches = [self.batches[i] for i in torch.randperm(len(self.batches), generator=self.rng).tolist()]
 
 
 
@@ -264,7 +269,7 @@ def interpret_sheaves(loader, model, run, device):
 def train_residue_classifier(args_dict):
     # hyperparameters
     epsilon = 5.0 # in Angstroms
-    learning_rate = 1e-3
+    learning_rate = 4e-3
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
@@ -380,15 +385,13 @@ def train_residue_classifier(args_dict):
     val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
     test_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=test_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
 
-    print("Train groups in this H5:", len(train_dataset.groups))
-    print("Val groups in this H5:", len(val_dataset.groups))
-    print("Train samples:", len(train_dataset))
-    print("Val samples:", len(val_dataset))
-
     # set up dataloaders
     train_loader = DataLoader(train_dataset, batch_sampler = ProteinSampler(train_dataset, num_nodes, rng=torch_rng), generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_sampler=ProteinSampler(val_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_sampler=ProteinSampler(test_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
+
+    print(f"validation expected groups: {print(val_dataset.groups)}")
+    print(f"validation actual groups: {print(len(set([val_dataset.index[idx][0] for batch in val_loader.batch_sampler.batches for idx in batch])))}")
 
     single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, generator=torch_rng, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
@@ -413,7 +416,7 @@ def train_residue_classifier(args_dict):
             use_attention=use_attention,
             use_masking=use_masking
         ).to(DEVICE)
-        #model = torch.jit.trace(model, Data(['x, torch.Size([594, 128, 15])', 'edge_index, torch.Size([2, 21884])', 'edge_attr, torch.Size([21884, 1])', 'y, torch.Size([594])', 'pos, torch.Size([594, 128, 4, 3])', 'frame_maps, torch.Size([594, 128, 3, 3])', 'node_mask, torch.Size([594])', lengths, rng.random_integers([1])]))
+        model = torch.jit.trace(model, Data(x = torch.rand(100, 128, 15, generator=torch_rng), edge_index = torch.randint(100, 2,200, generator=torch_rng), edge_attr=torch.randint(1, 200, 1, generator=torch_rng).to(float), y=torch.randint(20, 100, generator=torch_rng), pos= torch.rand(100, 128, 4, 3, generator=torch_rng), frame_maps=torch.rand(100, 128, 3, 3, generator=torch_rng), node_mask= torch.zeros(100), lengths= torch.tensor([128])))
 
     elif other_model == "node_only": 
         model = NodeOnlyMLP(
@@ -463,8 +466,6 @@ def train_residue_classifier(args_dict):
             for batch_idx, batch in enumerate(pbar):
                 if use_profiler:
                     torch.cuda.synchronize()
-                if batch_idx < 600 and batch_idx > 590:
-                    print(batch.to_data_list()[0].cpu().traj_id)
                 times1.append(time.perf_counter())
                 batch = batch.to(DEVICE)
 
