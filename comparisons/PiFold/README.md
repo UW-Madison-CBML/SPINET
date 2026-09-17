@@ -60,14 +60,14 @@ ATLAS and mdCATH are trained and evaluated **separately**, one job each, matchin
 `scripts/train_residue_classifier.py`'s `--ds-name`. Splits come from
 `lib/dataset_splits.py`:
 
-- **ATLAS** (`--data_name ATLAS`, `atlas_cross_val_index.csv`): fold 0 of the `cross_val`
-  column is held out, the other four folds train.
-- **mdCATH** (`--data_name MDCATH`, `mdcath_320_0_topology_split.csv`): the `train` and
-  `test` rows both train (both are topology-split slices of the training pool);
-  **evaluation is on the `validation` rows only**.
+- **ATLAS** (`--data_name ATLAS`, `atlas_cross_val_index.csv`): fold `--val_fold` (0) of
+  the `cross_val` column is the validation split and fold `--test_fold` (4) the test
+  split; the other three folds train.
+- **mdCATH** (`--data_name MDCATH`, `mdcath_320_0_topology_split.csv`): the `train`,
+  `validation` and `test` rows are three disjoint splits, one apiece.
 
-Neither dataset has a further held-out set, so the held-out split serves as both PiFold's
-`valid` and `test` split.
+PiFold's `valid` and `test` splits are therefore different proteins: `valid` is what the
+recorder early-stops on, `test` is scored at the end and never influences training.
 
 ### Keeping the comparison apples-to-apples
 

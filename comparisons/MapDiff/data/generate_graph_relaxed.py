@@ -11,12 +11,14 @@ trains on MD ensembles -- that ensemble input is the thing being benchmarked.
 Both shared datasets are supported, trained/evaluated separately (`--ds-name`), matching
 scripts/train_residue_classifier.py:
 
-* ``atlas``  -- fold 0 of `atlas_cross_val_index.csv`'s `cross_val` column is held out and,
-  because ATLAS has no further held-out set, reused as the test split too (see
-  ../conf/dataset/atlas.yaml, where `val_dir`/`test_dir` both point at this script's
-  "validation" output).
-* ``mdcath`` -- `mdcath_320_0_topology_split.csv`'s train+test rows train, and **evaluation
-  is on the `validation` rows only**.
+* ``atlas``  -- `atlas_cross_val_index.csv`'s `cross_val` column: fold `--val-fold` is the
+  validation split, fold `--test-fold` the held-out test split, the remaining folds train.
+* ``mdcath`` -- `mdcath_320_0_topology_split.csv`'s train/validation/test rows, one split
+  each.
+
+Each split is featurized into its own directory (`train/`, `validation/`, `test/` under
+`--save-root`), which is what ../conf/dataset/*.yaml's `train_dir`/`val_dir`/`test_dir`
+point at.
 
 The deposited chain is written back out as a PDB (side chains and residue numbering intact)
 so DSSP secondary-structure assignment (`data.generate_graph_cath.pdb2graph`) works
@@ -79,7 +81,9 @@ def create_parser():
                               "sequence (default: the dataset's standard file name). Pass '' to "
                               "featurize whole deposited chains uncropped.")
     parser.add_argument('--val-fold', type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
-                         help="ATLAS only: cross_val fold held out for validation/test (folds != this train)")
+                         help="ATLAS only: cross_val fold used as the validation split")
+    parser.add_argument('--test-fold', type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
+                         help="ATLAS only: cross_val fold held out as the test split (never trained on)")
     parser.add_argument('--pdb-cache', default='./pdb_cache',
                          help="Where downloaded RCSB entries are cached")
     parser.add_argument('--save-root', default=None,
@@ -144,29 +148,34 @@ def main():
     marginal_out = args.marginal_out or f'./surffold_data/train_marginal_x_{args.ds_name}.pt'
     traj_h5 = dataset_splits.default_h5(args.ds_name) if args.traj_h5 is None else args.traj_h5
 
-    train_ids, val_ids = dataset_splits.get_splits(args.ds_name, args.index_csv, val_fold=args.val_fold)
-    print(f'{args.ds_name}: {len(train_ids)} train / {len(val_ids)} validation proteins')
+    train_ids, val_ids, test_ids = dataset_splits.get_splits(
+        args.ds_name, args.index_csv, val_fold=args.val_fold, test_fold=args.test_fold)
+    all_ids = train_ids + val_ids + test_ids
+    print(f'{args.ds_name}: {len(train_ids)} train / {len(val_ids)} validation / '
+          f'{len(test_ids)} test proteins')
 
     # Crop each deposited chain to the residues the trajectory covers, so MapDiff scores the
     # same residue set as the sheaf model. For mdCATH this is also what reduces a deposited
     # chain to the single CATH *domain* the dataset id names.
     reference_seqs = {}
     if traj_h5:
-        reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, train_ids + val_ids)
+        reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, all_ids)
         print(f'Reference residue sequences found for {len(reference_seqs)}/'
-              f'{len(train_ids) + len(val_ids)} proteins in {traj_h5}')
+              f'{len(all_ids)} proteins in {traj_h5}')
 
     records, failures = relaxed_pdb.load_relaxed_structures(
-        train_ids + val_ids, cache_dir=args.pdb_cache, reference_seqs=reference_seqs)
+        all_ids, cache_dir=args.pdb_cache, reference_seqs=reference_seqs)
     print(f'Loaded {len(records)} relaxed structures, {len(failures)} unavailable')
 
     all_errors = {
         'train': process_split({p: records[p] for p in train_ids if p in records},
                                 'train', os.path.join(save_root, 'train')),
-        # The held-out split doubles as both validation and test -- one processed copy,
-        # referenced by both dataset.val_dir and dataset.test_dir (see ../conf/dataset/).
         'validation': process_split({p: records[p] for p in val_ids if p in records},
                                      'validation', os.path.join(save_root, 'validation')),
+        # The test split gets its own directory: dataset.test_dir points here, and train.py
+        # drives the file list from the split index, so a graph can never leak across splits.
+        'test': process_split({p: records[p] for p in test_ids if p in records},
+                               'test', os.path.join(save_root, 'test')),
     }
 
     for split, errors in all_errors.items():

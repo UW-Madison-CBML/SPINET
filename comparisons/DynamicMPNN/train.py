@@ -15,12 +15,14 @@ Pipeline (see README.md for the full reasoning):
      `tm_scores` / `tm_score_representatives`), which is exactly what
      `ProteinGraphFeaturiserSingleChain` / `PTFileDataset` expect -- the TM matrix is what
      makes the featuriser draw its k conformers by TM dissimilarity rather than at random.
-  3. Train on the dataset's training split, validate on its held-out split (lib/dataset_splits.py):
-     ATLAS holds out one `cross_val` fold (`--val-fold`, 0 by default -- the fold
-     scripts/train_residue_classifier.py and comparisons/{MapDiff,PiFold} also hold out);
-     mdCATH trains on its topology split's train+test rows and evaluates on `validation` ONLY.
-     Validation is also the only split scored: there is no further held-out test set.
-     * Running the other four ATLAS folds is a matter of repeating the job with --val-fold 1..4.
+  3. Train on the dataset's training split and score its two held-out splits
+     (lib/dataset_splits.py): ATLAS validates on `cross_val` fold `--val-fold` (0 by default)
+     and tests on fold `--test-fold` (4), training on the remaining three; mdCATH uses its
+     topology split's train/validation/test rows, one apiece. These are the same three splits
+     scripts/train_residue_classifier.py and comparisons/{MapDiff,PiFold} cut.
+     * Validation is scored every epoch; the **test** split is scored once, after the last
+       epoch, and is never trained on.
+     * Running the other ATLAS folds is a matter of repeating the job with --val-fold 1..3.
 
 ATLAS and mdCATH are trained and evaluated separately -- one run each (`--ds-name`) --
 matching scripts/train_residue_classifier.py.
@@ -382,7 +384,7 @@ def load_scrmsd_references(traj_h5_path: Path, pdb_ids: list, pdb_cache: Path) -
 
 
 # --------------------------------------------------------------------------------------
-# Step 4: the dataset's held-out split for validation (see lib/dataset_splits.py)
+# Step 4: the dataset's two held-out splits, val and test (see lib/dataset_splits.py)
 # --------------------------------------------------------------------------------------
 
 def load_pretrained_weights(model: torch.nn.Module, ckpt_path: Path) -> None:
@@ -451,16 +453,19 @@ def compute_batch_scrmsd(pred_seqs, refs, esmfold_tokenizer, esmfold_model, devi
 
 
 def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_tokenizer,
-                   esmfold_model, epoch, run, num_params=0):
-    """Score the held-out split and log scripts/train_residue_classifier.py's metric set.
+                   esmfold_model, epoch, run, num_params=0, split_name="val"):
+    """Score one held-out split and log scripts/train_residue_classifier.py's metric set.
 
     `lib.stats_utils.ResidueMetrics` owns every convention here (per-protein top-1/5/10,
     per-protein perplexity, per-residue precision/recall/f1, the confusion matrix and the
     `pred_seqs` table), so the keys this logs are the same keys the sheaf model logs.
+
+    `split_name` prefixes those keys ("val"/"test"), so the per-epoch validation curve and the
+    single end-of-training test score stay separate series in the same W&B run.
     """
     model.eval()
 
-    metrics = ResidueMetrics(three_letter_codes(BASE_AMINO_ACIDS), val_name="val")
+    metrics = ResidueMetrics(three_letter_codes(BASE_AMINO_ACIDS), val_name=split_name)
     # `crit` carries DynamicMPNN's label smoothing (and ignores GAP), which is right for the
     # gradient but would make the reported perplexity incomparable with the sheaf model's --
     # that one is exp() of a plain cross-entropy. Score with a plain one here.
@@ -468,7 +473,7 @@ def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_
     sample_offset = 0
 
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validation"):
+        for batch in tqdm(val_loader, desc=f"{split_name.capitalize()} eval"):
             batch = batch.to(DEVICE)
             logits, valid_mask = model(batch)
             target = batch.seq
@@ -512,7 +517,8 @@ def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_
                 metrics.add_scrmsd(compute_batch_scrmsd(
                     pred_seqs, batch_refs, esmfold_tokenizer, esmfold_model, DEVICE))
 
-    log_dict = metrics.to_log_dict(cm_title="Validation Amino Acid Confusion Matrix", epoch=epoch)
+    log_dict = metrics.to_log_dict(
+        cm_title=f"{split_name.capitalize()} Amino Acid Confusion Matrix", epoch=epoch)
     if run:
         run.log(log_dict)
     print(metrics.summary_line(num_params))
@@ -529,8 +535,11 @@ def parse_args():
     parser.add_argument("--index-csv", type=Path, default=None,
                          help="Split index csv (default: the dataset's standard file name)")
     parser.add_argument("--val-fold", type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
-                         help="ATLAS only: cross_val fold held out for validation (folds != this train). "
+                         help="ATLAS only: cross_val fold used as the validation split. "
                               "mdCATH ignores it -- its split column is categorical.")
+    parser.add_argument("--test-fold", type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
+                         help="ATLAS only: cross_val fold held out as the test split -- never trained "
+                              "on, scored once after the last epoch. mdCATH ignores it.")
     parser.add_argument("--pdb-cache", type=Path, default=THIS_DIR / "pdb_cache",
                          help="Where relaxed (deposited) RCSB entries are cached for scRMSD")
     parser.add_argument("--processed-dir", type=Path, default=None,
@@ -604,14 +613,17 @@ def main():
             artifact.add_file(str(dependency))
     run.log_artifact(artifact)
 
-    train_pdbs, val_pdbs = dataset_splits.get_splits(args.ds_name, index_csv, val_fold=args.val_fold)
+    train_pdbs, val_pdbs, test_pdbs = dataset_splits.get_splits(
+        args.ds_name, index_csv, val_fold=args.val_fold, test_fold=args.test_fold)
     train_pdbs = filter_by_length(train_pdbs, traj_h5, args.max_length)
     val_pdbs = filter_by_length(val_pdbs, traj_h5, args.max_length)
-    logger.info(f"{args.ds_name}: {len(train_pdbs)} train / {len(val_pdbs)} held-out proteins "
-                f"(fold {args.val_fold} held out, max_length={args.max_length})")
+    test_pdbs = filter_by_length(test_pdbs, traj_h5, args.max_length)
+    logger.info(f"{args.ds_name}: {len(train_pdbs)} train / {len(val_pdbs)} val / "
+                f"{len(test_pdbs)} test proteins (val fold {args.val_fold}, test fold "
+                f"{args.test_fold}, max_length={args.max_length})")
 
     build_processed_dataset(
-        pdb_ids=train_pdbs + val_pdbs,
+        pdb_ids=train_pdbs + val_pdbs + test_pdbs,
         traj_h5_path=traj_h5,
         processed_dir=processed_dir,
         pool_size=args.pool_size,
@@ -620,10 +632,10 @@ def main():
     )
 
     # scRMSD scores designs against the *relaxed* (deposited) structure, the same ground
-    # truth comparisons/{MapDiff,PiFold} use. Only the validation split needs them.
-    scrmsd_refs = load_scrmsd_references(traj_h5, val_pdbs, args.pdb_cache)
-    logger.info(f"Loaded relaxed reference structures for {len(scrmsd_refs)}/{len(val_pdbs)} "
-                "validation proteins (scRMSD)")
+    # truth comparisons/{MapDiff,PiFold} use. Only the two scored splits need them.
+    scrmsd_refs = load_scrmsd_references(traj_h5, val_pdbs + test_pdbs, args.pdb_cache)
+    logger.info(f"Loaded relaxed reference structures for {len(scrmsd_refs)}/"
+                f"{len(val_pdbs) + len(test_pdbs)} val+test proteins (scRMSD)")
 
     esmfold_tokenizer, esmfold_model = load_esmfold(device=DEVICE)
 
@@ -674,14 +686,29 @@ def main():
         in_memory=True,
     )
     val_pdb_order = val_tracker.kept_pdb_codes
+
+    test_tracker = PdbTrackingFeaturiser(
+        hydra.utils.instantiate(features_cfg, split="test", device="cpu", distance_eps=DISTANCE_EPS))
+    test_dataset = PTFileDataset(
+        pdb_codes=test_pdbs,
+        cfg_features=test_tracker,
+        processed_dir=processed_dir,
+        split="test",
+        in_memory=True,
+    )
+    test_pdb_order = test_tracker.kept_pdb_codes
+
     # The proteins actually scored, after the featurizer dropped whatever it could not use.
     # MapDiff and PiFold log the same summary key, so the three held-out sets can be diffed
     # rather than assumed identical -- they are cut from the same split index, but each model
     # drops its own failures.
-    logger.info(f"{args.ds_name}: featurized {len(val_pdb_order)}/{len(val_pdbs)} held-out proteins; "
-                f"dropped {sorted(set(val_pdbs) - set(val_pdb_order))}")
-    run.summary["split_counts"] = {"train": len(train_dataset), "val": len(val_dataset)}
-    run.summary["test_split_ids"] = list(val_pdb_order)
+    for split, wanted, kept in (("val", val_pdbs, val_pdb_order), ("test", test_pdbs, test_pdb_order)):
+        logger.info(f"{args.ds_name}: featurized {len(kept)}/{len(wanted)} {split} proteins; "
+                    f"dropped {sorted(set(wanted) - set(kept))}")
+    run.summary["split_counts"] = {"train": len(train_dataset), "val": len(val_dataset),
+                                   "test": len(test_dataset)}
+    run.summary["val_split_ids"] = list(val_pdb_order)
+    run.summary["test_split_ids"] = list(test_pdb_order)
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -689,6 +716,10 @@ def main():
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, collate_fn=safe_collate,
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, collate_fn=safe_collate,
     )
 
@@ -724,6 +755,21 @@ def main():
         print(f"Top-10 Recovery: {metrics['val_top10_acc_mean']:.4f} \\pm {metrics['val_top10_acc_std']:.4f}")
         if "val_rmsd_mean" in metrics:
             print(f"scRMSD: {metrics['val_rmsd_mean']:.4f} \\pm {metrics['val_rmsd_std']:.4f}")
+
+    # The test split is scored exactly once, with the final weights. There is no checkpoint
+    # selection here (no early stopping, no best-epoch restore), so "final" and "selected" are
+    # the same model -- nothing the test split influenced.
+    logger.info(f"Scoring the held-out test split ({len(test_pdb_order)} proteins)")
+    test_metrics = run_validation(model, test_loader, crit, test_pdb_order, scrmsd_refs,
+                                   esmfold_tokenizer, esmfold_model, args.epochs - 1, run,
+                                   num_params=pytorch_total_params, split_name="test")
+    print(f"Test Perplexity: {test_metrics['test_perp_mean']:.4f} \\pm {test_metrics['test_perp_std']:.4f}")
+    print(f"Test Top-1 Recovery: {test_metrics['test_top1_acc_mean']:.4f} \\pm {test_metrics['test_top1_acc_std']:.4f}")
+    print(f"Test Top-5 Recovery: {test_metrics['test_top5_acc_mean']:.4f} \\pm {test_metrics['test_top5_acc_std']:.4f}")
+    print(f"Test Top-10 Recovery: {test_metrics['test_top10_acc_mean']:.4f} \\pm {test_metrics['test_top10_acc_std']:.4f}")
+    if "test_rmsd_mean" in test_metrics:
+        print(f"Test scRMSD: {test_metrics['test_rmsd_mean']:.4f} \\pm {test_metrics['test_rmsd_std']:.4f}")
+    run.summary.update({k: v for k, v in test_metrics.items() if isinstance(v, (int, float))})
 
     run.finish()
 

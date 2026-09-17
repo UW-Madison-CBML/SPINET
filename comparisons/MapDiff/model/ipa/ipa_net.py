@@ -5,11 +5,12 @@ from torch import nn
 from model.ipa.rigid_utils import Rigid
 from model.ipa.ipa_utils import cal_dihedrals, cal_pair_rbf, relative_pairwise_position_idx, LayerNorm
 from model.ipa.ipa_attn import InvariantPointAttention, StructureModuleTransition, EdgeTransition
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 
 
 class NodeMaskEncoder(nn.Module):
-    def __init__(self, emb_dim, num_d_feat=6, num_aa_types=20, max_len=1200):
+    def __init__(self, emb_dim, num_d_feat=6, num_aa_types=20, max_len=600):
         super(NodeMaskEncoder, self).__init__()
         self.emb_dim = emb_dim
         self.aa_in_proj = nn.Linear(num_aa_types, emb_dim)
@@ -103,8 +104,10 @@ class IPANetModel(nn.Module):
             s = post_transit(s)
 
             if edge_transition is not None:
-                z = edge_transition(s, z)
-                # z = checkpoint(edge_transition, s, z)
+                if self.training and torch.is_grad_enabled():
+                    z = checkpoint(edge_transition, s, z, use_reentrant=False)
+                else:
+                    z = edge_transition(s, z)
         return s
 
 

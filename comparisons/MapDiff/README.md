@@ -122,12 +122,16 @@ Splits come from `lib/dataset_splits.py`, identical to
 `scripts/train_residue_classifier.py`:
 
 - **ATLAS** (`--ds-name atlas`, `atlas_cross_val_index.csv`): fold 0 of the `cross_val`
-  column is held out, the other four folds train. ATLAS has no further held-out set, so
-  fold 0 doubles as both validation and test (see `conf/dataset/atlas.yaml`).
-- **mdCATH** (`--ds-name mdcath`, `mdcath_320_0_topology_split.csv`): the `train` and
-  `test` rows both train (both are topology-split slices of the training pool);
-  **evaluation is on the `validation` rows only**, which likewise double as the test
-  split (see `conf/dataset/mdcath.yaml`).
+  column is the validation split and fold 4 the held-out **test** split; the other three
+  folds train (see `conf/dataset/atlas.yaml`).
+- **mdCATH** (`--ds-name mdcath`, `mdcath_320_0_topology_split.csv`): the `train`,
+  `validation` and `test` rows are three disjoint splits, one apiece (see
+  `conf/dataset/mdcath.yaml`).
+
+`data/generate_graph_relaxed.py` featurizes each split into its own directory
+(`train/`, `validation/`, `test/`), which `train_dir`/`val_dir`/`test_dir` point at. The
+test split is never trained on and never drives checkpoint selection; `eval_relaxed.py`
+scores it (pass `--split val` to score the validation split instead).
 
 `train.py` builds its three file lists *from the split index*, not from `os.listdir` of the
 processed-graph directories, so a stale `.pt` left behind by a run with a different

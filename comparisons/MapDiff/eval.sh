@@ -1,7 +1,7 @@
 #!/bin/bash
 # Entry point run inside the MapDiff Docker container by HTCondor (or
 # locally), for evaluating a trained Prior_Diff checkpoint on a dataset's
-# held-out split with eval_relaxed.py.
+# held-out test split with eval_relaxed.py.
 #
 # Extracts a pristine MapDiff.tar.gz, overlays the dataset/wandb/scRMSD support
 # on top of it, copies eval_relaxed.py + the checkpoint/config/wandb key/index
@@ -11,6 +11,13 @@
 #   ./eval.sh --checkpoint ./checkpoint.pt --config ./config.yaml --ds-name mdcath
 #
 set -euo pipefail
+
+# The IPA stack's pair representation is (B, L, L, C), so its transient tensors are both huge
+# and wildly varying in size from batch to batch (padding is to the longest protein *in the
+# batch*). That fragments the caching allocator badly enough to OOM on nominally free memory
+# -- the failure in logs/train_atlas_6211405_0.err asked for 8.45 GiB with 5.47 GiB free.
+# expandable_segments lets PyTorch grow one segment instead of stranding many fixed-size ones.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # api_keys.txt: line 1 = HF_TOKEN, last line = WANDB_KEY (see
 # ../../scripts/train_residue_classifier.sh). `lib.stats_utils.init_wandb` wants a file

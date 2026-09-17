@@ -3,17 +3,18 @@ name: ATLAS
 # Graphs featurized from each protein's *relaxed* (deposited) PDB entry, cropped to the
 # residues its ATLAS trajectory covers -- see ../../data/generate_graph_relaxed.py.
 train_dir: ./surffold_data/atlas_process/train/
-# Fold 0 of atlas_cross_val_index.csv is held out; ATLAS has no further held-out set, so the
-# same fold doubles as validation and test. This is the split
+# atlas_cross_val_index.csv's 5 `cross_val` folds: fold `val_fold` validates, fold `test_fold`
+# is the held-out test set, the other three train. This is the split
 # scripts/train_residue_classifier.py and comparisons/{gvp-pytorch,DynamicMPNN}/train.py use.
 val_dir: ./surffold_data/atlas_process/validation/
-test_dir: ./surffold_data/atlas_process/validation/
+test_dir: ./surffold_data/atlas_process/test/
 
 # Which rows land in which split is decided by lib/dataset_splits.py, not by whatever files
 # happen to sit in the directories above (train.py's `split_file_ids`). Leave index_csv null
 # to use the standard file name train.sh stages into the job's scratch dir.
 index_csv: null
 val_fold: 0
+test_fold: 4
 
 # Proteins longer than this (in residues) are dropped -- must match
 # model.ipa_pe_max_len, which sizes the IPA node encoder's fixed

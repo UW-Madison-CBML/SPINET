@@ -15,12 +15,10 @@
 #   DS_NAME=mdcath ./train.sh dataset=mdcath wandb.use=True
 set -euo pipefail
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 DS_NAME="${DS_NAME:-atlas}"
 
-# api_keys.txt: line 1 = HF_TOKEN, last line = WANDB_KEY (see
-# ../../scripts/train_residue_classifier.sh). `lib.stats_utils.init_wandb` wants a file
-# holding *only* the W&B key, so split it out here -- conf/wandb/basic.yaml's
-# `key_file: ./wandb_api.txt` then resolves without any submit-file override.
 if [[ -f api_keys.txt ]]; then
     export HF_TOKEN=$(head -n 1 api_keys.txt)
     tail -n 1 api_keys.txt > wandb_api.txt
@@ -45,7 +43,10 @@ for f in api_keys.txt wandb_api.txt stats_utils.py scrmsd.py relaxed_pdb.py data
 done
 
 cd MapDiff
-if [[ ! -d "surffold_data/${DS_NAME}_process/train" ]]; then
+# `test/` is checked too, not just `train/`: a scratch dir featurized before the test split
+# existed has train/ and validation/ but no test/, and generate_graph_relaxed.py skips any
+# protein already written, so re-running it is cheap.
+if [[ ! -d "surffold_data/${DS_NAME}_process/train" || ! -d "surffold_data/${DS_NAME}_process/test" ]]; then
     echo ">>> featurizing ${DS_NAME} relaxed (deposited) structures into MapDiff graphs (downloads from RCSB, runs DSSP once per protein)"
     python data/generate_graph_relaxed.py --ds-name "${DS_NAME}"
 fi

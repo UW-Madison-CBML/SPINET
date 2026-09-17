@@ -6,40 +6,31 @@ them have to cut the splits identically or the numbers aren't comparable. The tw
 are indexed differently:
 
 * **ATLAS** -- `atlas_cross_val_index.csv`, column `pdb` (ids like ``1a0a_A``), column
-  `cross_val` giving a pre-assigned 5-fold split. One fold (0 by default) is held out; the
-  other four train. There is no separate test set, so the held-out fold doubles as the test
-  split for models (MapDiff, PiFold) that insist on three.
+  `cross_val` giving a pre-assigned 5-fold split. Fold `val_fold` (0 by default) is the
+  validation split and fold `test_fold` (4) is the held-out **test** split; the remaining
+  three folds train. The test fold is never trained on.
 * **mdCATH** -- `mdcath_320_0_topology_split.csv`, column `domain` (CATH domain ids like
-  ``1a0aA02``), column `split` with values train/test/validation. `train` and `test` are a
-  *topology-based* split of the training pool, so both train; **evaluation is on
-  `validation` only**, matching train_residue_classifier.py.
+  ``1a0aA02``), column `split` with values train/test/validation. Each value is its own
+  split: `train` trains, `validation` is the per-epoch evaluation split, and `test` is the
+  held-out test split (it used to be lumped in with `train`).
 
 The module also owns the handful of *non-split* knobs that have to agree across models for
-the comparison to stay apples-to-apples -- which cross-validation fold is held out, how long
-a protein may be before it is dropped, and the RNG seed -- so that changing one of them
+the comparison to stay apples-to-apples -- which cross-validation folds are held out, how
+long a protein may be before it is dropped, and the RNG seed -- so that changing one of them
 changes it everywhere rather than in one model's argparse default.
 """
 import pandas as pd
 
 DATASETS = ("atlas", "mdcath")
 
-# Which ATLAS cross_val fold is held out. scripts/train_residue_classifier.py hardcodes fold
-# 0 (it reads `index["cross_val"] == 0`), so every comparison model defaults to the same one.
-# mdCATH ignores this -- its split column is categorical, not a fold index.
 DEFAULT_VAL_FOLD = 0
 
-# Proteins longer than this (in residues) are dropped, by every model, from every split.
-# The binding constraint is MapDiff's IPA node encoder, whose fixed positional-encoding table
-# is sized by `model.ipa_pe_max_len` (conf/model/egnn.yaml) -- but the cutoff has to be shared
-# or the models are scored on different proteins. Keep this and `ipa_pe_max_len` in step.
-MAX_LENGTH = 1200
+DEFAULT_TEST_FOLD = 4
 
-# One seed for every comparison run, so that anything still drawing from an RNG (DynamicMPNN's
-# k-of-pool conformer subsampling, weight init, batch order) is reproducible run to run.
+MAX_LENGTH = 3000
+
 SEED = 42
 
-# Default file names as staged by the submit files (see scripts/train_residue_classifier.sub
-# and scripts/train_residue_classifier_mdcath.sub).
 DEFAULT_INDEX_CSV = {
     "atlas": "atlas_cross_val_index.csv",
     "mdcath": "mdcath_320_0_topology_split.csv",
@@ -72,24 +63,35 @@ def _check(ds_name):
     return ds_name
 
 
-def get_splits(ds_name, index_csv=None, val_fold=DEFAULT_VAL_FOLD):
-    """``(train_ids, val_ids)`` for ``ds_name``.
+def get_splits(ds_name, index_csv=None, val_fold=DEFAULT_VAL_FOLD, test_fold=DEFAULT_TEST_FOLD):
+    """``(train_ids, val_ids, test_ids)`` for ``ds_name``.
 
-    ``val_ids`` is the *only* evaluation split for both datasets -- for ATLAS it is the
-    held-out cross-validation fold, for mdCATH the `validation` rows. Callers that need a
-    third "test" split should reuse ``val_ids``; neither dataset has a further held-out set.
+    Three disjoint splits for both datasets: ``val_ids`` is the split scored every epoch (and
+    the one model selection runs on), ``test_ids`` is held out entirely and scored once with
+    the selected model. Neither appears in ``train_ids``.
+
+    ``val_fold``/``test_fold`` are ATLAS-only -- mdCATH's split column is categorical, so its
+    three splits come straight from the `split` values train/validation/test.
     """
     ds_name = _check(ds_name)
     index_df = pd.read_csv(index_csv or default_index_csv(ds_name))
 
     if ds_name == "atlas":
+        if val_fold == test_fold:
+            raise ValueError(
+                "val_fold and test_fold are both {} -- the validation and test splits would be "
+                "the same proteins".format(val_fold)
+            )
         val_mask = index_df["cross_val"] == val_fold
-        return index_df.loc[~val_mask, "pdb"].tolist(), index_df.loc[val_mask, "pdb"].tolist()
+        test_mask = index_df["cross_val"] == test_fold
+        return (index_df.loc[~(val_mask | test_mask), "pdb"].tolist(),
+                index_df.loc[val_mask, "pdb"].tolist(),
+                index_df.loc[test_mask, "pdb"].tolist())
 
-    # mdCATH: train on the topology split's train+test pools, evaluate on validation only.
-    train_ids = index_df.loc[index_df["split"].isin(["train", "test"]), "domain"].tolist()
+    train_ids = index_df.loc[index_df["split"] == "train", "domain"].tolist()
     val_ids = index_df.loc[index_df["split"] == "validation", "domain"].tolist()
-    return train_ids, val_ids
+    test_ids = index_df.loc[index_df["split"] == "test", "domain"].tolist()
+    return train_ids, val_ids, test_ids
 
 
 def all_ids(ds_name, index_csv=None):

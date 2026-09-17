@@ -1,5 +1,5 @@
 # CHTC HTCondor submit file for evaluating a trained MapDiff checkpoint on a
-# dataset's held-out split (Docker universe, GPU), logging results (including
+# dataset's held-out test split (Docker universe, GPU), logging results (including
 # self-consistency RMSD against the relaxed/deposited structure) to W&B.
 #
 # Setup (one-time): same image as training -- see train.sub / README.md.

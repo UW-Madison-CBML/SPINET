@@ -75,6 +75,9 @@ def compute_batch_scrmsd(g_batch, batch_logits, esmfold_tokenizer, esmfold_model
         reference structure, residue-for-residue aligned with the prediction.
     batch_logits: (N_total_nodes_in_batch, 20) predicted amino-acid logits,
         same node ordering as `g_batch`.
+    device: where to run ESMFold -- the *ESMFold* device, not the training one. Nothing
+        crosses devices: the graph's coordinates and the argmaxed sequences are pulled to
+        CPU/python here, and `evaluate_scrmsd` moves them onto `device` itself.
     """
     batch_idx = g_batch.batch.cpu().numpy()
     atom_pos = g_batch.atom_pos.cpu()
@@ -107,6 +110,7 @@ class MapDiffTrainer:
             esmfold_tokenizer,
             esmfold_model,
             wandb_run,
+            esmfold_device=None,
             prior_scheduler=None,
             scheduler=None,
             train_batch_size=512,
@@ -123,6 +127,11 @@ class MapDiffTrainer:
         self.wandb_run = wandb_run
         self.esmfold_tokenizer = esmfold_tokenizer
         self.esmfold_model = esmfold_model
+        # ESMFold normally lives on a *different* GPU than the one being trained on (see
+        # conf/train.yaml's `compute` block): its fp32 weights are ~11GB and would otherwise
+        # sit on the training card for the whole run to be used only here, in the val/test
+        # passes. Default to the training device for single-GPU callers.
+        self.esmfold_device = esmfold_device if esmfold_device is not None else device
         self.evaluator = Evaluator()
 
         Path(self.output_dir + '/model/').mkdir(parents=True, exist_ok=True)
@@ -340,7 +349,8 @@ class MapDiffTrainer:
                                         sequence=''.join(AMINO_ACIDS[j] for j in sample_logits.tolist()))
 
                 metrics.add_scrmsd(compute_batch_scrmsd(
-                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model, self.device))
+                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model,
+                    self.esmfold_device))
 
             mean_recovery, median_recovery = cal_stats_metric(recovery)
             full_recovery = ((all_logits.argmax(dim=1) == all_seq.argmax(dim=1)).sum() / all_seq.shape[0]).item()
@@ -457,7 +467,8 @@ class MapDiffTrainer:
                                         sequence=''.join(AMINO_ACIDS[j] for j in sample_logits.tolist()))
 
                 metrics.add_scrmsd(compute_batch_scrmsd(
-                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model, self.device))
+                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model,
+                    self.esmfold_device))
 
             test_mean_recovery, test_median_recovery = cal_stats_metric(recovery)
             test_mean_nssr42, test_median_nssr42 = cal_stats_metric(nssr42)

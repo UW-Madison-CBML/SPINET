@@ -4,19 +4,20 @@ name: MDCATH
 # residues its mdCATH trajectory covers -- see ../../data/generate_graph_relaxed.py. The
 # `domain` ids (e.g. 12asA00) name the pdb entry and chain the domain comes from.
 train_dir: ./surffold_data/mdcath_process/train/
-# mdcath_320_0_topology_split.csv's train+test rows train (both are topology-split slices of
-# the training pool); evaluation is on the `validation` rows ONLY, matching
-# scripts/train_residue_classifier.py. mdCATH has no further held-out set, so validation
-# doubles as the test split.
+# mdcath_320_0_topology_split.csv's three `split` values map one-to-one onto the three splits:
+# `train` trains, `validation` is scored every epoch and drives model selection, `test` is
+# held out and scored once -- matching scripts/train_residue_classifier.py.
 val_dir: ./surffold_data/mdcath_process/validation/
-test_dir: ./surffold_data/mdcath_process/validation/
+test_dir: ./surffold_data/mdcath_process/test/
 
 # Which rows land in which split is decided by lib/dataset_splits.py, not by whatever files
 # happen to sit in the directories above (train.py's `split_file_ids`). Leave index_csv null
-# to use the standard file name train.sh stages into the job's scratch dir. `val_fold` is
-# ATLAS-only (mdCATH's split column is categorical) and is carried here just for symmetry.
+# to use the standard file name train.sh stages into the job's scratch dir. `val_fold` and
+# `test_fold` are ATLAS-only (mdCATH's split column is categorical) and are carried here just
+# for symmetry.
 index_csv: null
 val_fold: 0
+test_fold: 4
 
 # Proteins longer than this (in residues) are dropped -- must match
 # model.ipa_pe_max_len, which sizes the IPA node encoder's fixed
