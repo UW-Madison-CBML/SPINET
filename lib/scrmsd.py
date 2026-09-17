@@ -10,7 +10,7 @@ BACKBONE_ATOM14_IDX = {"N":0, "CA":1, "C":2, "O":4}  # N, CA, C, O # TODO fix th
 # The repo-wide ground-truth atom order, re-exported by `relaxed_pdb` rather than imported
 # from `load_dynamics`: the comparison models all ship this file, and not all of their images
 # carry mdtraj (which `load_dynamics` pulls in at import time).
-from relaxed_pdb import BACKBONE_ATOMS
+from load_dynamics import BACKBONE_ATOMS
 
 @torch.no_grad()
 def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, device="cpu"):
@@ -119,28 +119,49 @@ def load_esmfold(
     return tokenizer, model
 
 
+
+   
+
 @torch.no_grad()
 def fold_sequences(
     seqs: list[str],
     tokenizer,
     model,
     device: str = None,
+    max_tokens_per_batch: int = 2048,  # tune to your GPU; L_max^3-ish cost, so keep conservative
 ):
-    
     device = torch.device(device) if device is not None else next(model.parameters()).device
     bb_idx = [BACKBONE_ATOM14_IDX[atom] for atom in BACKBONE_ATOMS]
 
-    # Folded one at a time, then padded back to the batch's longest. Folding the padded batch
-    # in one call costs B * L_max^3 in the trunk's attention -- a short sequence batched with a
-    # long one gets folded at the long one's length. Peak memory here is that of the single
-    # longest sequence instead, and the (B, L_max, ...) return contract is unchanged.
-    per_seq = []
-    for seq in seqs:
+    # Sort by length so each batch is length-homogeneous -- padding waste stays low
+    # and no short sequence gets dragged up to a long outlier's L_max.
+    order = sorted(range(len(seqs)), key=lambda i: len(seqs[i]))
+
+    # Greedily pack into batches: add sequences to the current batch as long as
+    # batch_len_if_added^3 * (count+1) stays under budget-ish. Simple heuristic:
+    # cap by (batch's max length)^3 * batch_size.
+    batches = []
+    current = []
+    for i in order:
+        candidate = current + [i]
+        L = len(seqs[max(candidate, key=lambda j: len(seqs[j]))])
+        cost = (L ** 3) * len(candidate)
+        if current and cost > max_tokens_per_batch ** 3 // 64:  # rough knob, see note below
+            batches.append(current)
+            current = [i]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+
+    per_seq = [None] * len(seqs)
+    for batch_idx in tqdm(batches):
+        batch_seqs = [seqs[i] for i in batch_idx]
         inputs = tokenizer(
-            [seq],
+            batch_seqs,
             return_tensors="pt",
-            padding=False,
-            add_special_tokens=False,  # ESMFold doesn't use BOS/EOS
+            padding=True,
+            add_special_tokens=False,
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -149,14 +170,17 @@ def fold_sequences(
         positions = outputs.positions
         if positions.dim() == 6:
             positions = positions[-1]
-        atom14 = positions[-1]  # (1, L, 14, 3) — final structure-module layer
+        atom14 = positions[-1]  # (B, L, 14, 3)
 
-        per_seq.append((atom14[:, :, bb_idx, :].float().squeeze(0),      # (L, 4, 3)
-                        inputs["attention_mask"].bool().squeeze(0)))     # (L,)
-        del outputs, positions, atom14, inputs
+        bb = atom14[:, :, bb_idx, :].float()          # (B, L, 4, 3)
+        m = inputs["attention_mask"].bool()            # (B, L)
+
+        for row, orig_i in enumerate(batch_idx):
+            L_i = int(m[row].sum())
+            per_seq[orig_i] = (bb[row, :L_i], m[row, :L_i])
+
+        del outputs, positions, atom14, inputs, bb, m
         if device.type == "cuda":
-            # the trunk's transient pair tensors fragment the caching allocator badly enough
-            # that the next, longer sequence can OOM on otherwise-free memory
             torch.cuda.empty_cache()
 
     L_max = max(int(m.shape[0]) for _, m in per_seq)
@@ -168,10 +192,6 @@ def fold_sequences(
         mask[i, : m.shape[0]] = m
 
     return backbone_pos, mask
- 
-   
-
-
 
 @torch.no_grad()
 def evaluate_scrmsd(
@@ -255,14 +275,13 @@ def evaluate_batch_rmsd(
 ):
     pred_coords, pred_mask = fold_sequences(sequences, tokenizer, model, device=device)
 
-    B,    R, A, _ = pred_coords.shape
+    B, R, A, _ = pred_coords.shape
 
-    _, T, _, _, _ = ground_truth_coords.shape
     ground_truth_coords = ground_truth_coords.to(device)
     gt_mask = gt_mask.to(device)
 
-    P_backbone = pred_coords.reshape(B, R*A, 3)[:, None, :, :].expand(-1, T, -1, -1)
-    Q_backbone = ground_truth_coords.reshape(B, T, R*A, 3)
+    P_backbone = pred_coords.reshape(B, R*A, 3)
+    Q_backbone = ground_truth_coords
 
     backbone_mask = gt_mask[:,:,:,None].expand(-1, -1, -1, A).reshape(B, T, R*A)
 

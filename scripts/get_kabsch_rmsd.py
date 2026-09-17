@@ -58,16 +58,17 @@ def main(seq_csv):
     rmsds = []
 
     # may need to process hdf5 group name
-    seq_df["pdb"] = seq_df["name"].str.split("/").apply(lambda x: x[0] if len(x) > 0 else None)
+    # if it's just a plain thing it should be robust enough too
+    seq_df["pdb"] = seq_df["pdb"].str.split("/").apply(lambda x: x[0] if len(x) > 0 else None)
 
 
     # if PPPP_C
-    seq_df["pdb_id"] = seq_df["pdb"].str.slice(0,4)
-    seq_df["chain"] = seq_df["pdb"].str.slice(5,6)
-
-    # otherwise PPPPCDD
-    # seq_df["pdb_id"] = seq_df["pdb"].str.slice(0,4)
-    # seq_df["chain"] = seq_df["pdb"].str.slice(4,5)
+    if len(seq_df["pdb"].iloc[0]) == 6:
+        seq_df["pdb_id"] = seq_df["pdb"].str.slice(0,4)
+        seq_df["chain"] = seq_df["pdb"].str.slice(5,6)
+    else:
+        seq_df["pdb_id"] = seq_df["pdb"].str.slice(0,4)
+        seq_df["chain"] = seq_df["pdb"].str.slice(4,5)
 
 
     seq_df["pdb"] = seq_df["pdb_id"] + "_" + seq_df["chain"]
