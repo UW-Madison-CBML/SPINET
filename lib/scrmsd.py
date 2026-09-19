@@ -11,6 +11,7 @@ BACKBONE_ATOM14_IDX = {"N":0, "CA":1, "C":2, "O":4}  # N, CA, C, O # TODO fix th
 # from `load_dynamics`: the comparison models all ship this file, and not all of their images
 # carry mdtraj (which `load_dynamics` pulls in at import time).
 from load_dynamics import BACKBONE_ATOMS
+from tqdm import tqdm
 
 @torch.no_grad()
 def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, device="cpu"):
@@ -118,6 +119,70 @@ def load_esmfold(
 
     return tokenizer, model
 
+RESTYPE_ATOM14_NAMES = {
+    'A': ['N', 'CA', 'C', 'O', 'CB', '', '', '', '', '', '', '', '', ''],
+    'R': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'NE', 'CZ', 'NH1', 'NH2', '', '', ''],
+    'N': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'ND2', '', '', '', '', '', ''],
+    'D': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'OD1', 'OD2', '', '', '', '', '', ''],
+    'C': ['N', 'CA', 'C', 'O', 'CB', 'SG', '', '', '', '', '', '', '', ''],
+    'Q': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'NE2', '', '', '', '', ''],
+    'E': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'OE1', 'OE2', '', '', '', '', ''],
+    'G': ['N', 'CA', 'C', 'O', '', '', '', '', '', '', '', '', '', ''],
+    'H': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'ND1', 'CD2', 'CE1', 'NE2', '', '', '', ''],
+    'I': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2', 'CD1', '', '', '', '', '', ''],
+    'L': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', '', '', '', '', '', ''],
+    'K': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', 'CE', 'NZ', '', '', '', '', ''],
+    'M': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'SD', 'CE', '', '', '', '', '', ''],
+    'F': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', '', '', ''],
+    'P': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD', '', '', '', '', '', '', ''],
+    'S': ['N', 'CA', 'C', 'O', 'CB', 'OG', '', '', '', '', '', '', '', ''],
+    'T': ['N', 'CA', 'C', 'O', 'CB', 'OG1', 'CG2', '', '', '', '', '', '', ''],
+    'W': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'NE1', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'],
+    'Y': ['N', 'CA', 'C', 'O', 'CB', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'OH', '', ''],
+    'V': ['N', 'CA', 'C', 'O', 'CB', 'CG1', 'CG2', '', '', '', '', '', '', ''],
+}
+
+AA3 = {
+    'A': 'ALA', 'R': 'ARG', 'N': 'ASN', 'D': 'ASP', 'C': 'CYS',
+    'Q': 'GLN', 'E': 'GLU', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+    'L': 'LEU', 'K': 'LYS', 'M': 'MET', 'F': 'PHE', 'P': 'PRO',
+    'S': 'SER', 'T': 'THR', 'W': 'TRP', 'Y': 'TYR', 'V': 'VAL',
+}
+
+
+def atom14_to_pdb(atom14, mask, seq, out_path, chain="A", atom14_atom_exists=None):
+    coords = atom14.detach().cpu().numpy() if hasattr(atom14, "detach") else np.asarray(atom14)
+    mask = mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
+    if atom14_atom_exists is not None:
+        exists = atom14_atom_exists.detach().cpu().numpy() if hasattr(atom14_atom_exists, "detach") \
+            else np.asarray(atom14_atom_exists)
+
+    lines = []
+    atom_num = 1
+    for res_idx, (res_coords, valid, aa) in enumerate(zip(coords, mask, seq), start=1):
+        if not valid:
+            continue
+        aa_u = aa.upper()
+        resname = AA3.get(aa_u, "UNK")
+        atom_names = RESTYPE_ATOM14_NAMES.get(aa_u, [""] * 14)
+
+        for slot, (atom_name, (x, y, z)) in enumerate(zip(atom_names, res_coords)):
+            if atom14_atom_exists is not None:
+                if not exists[res_idx - 1, slot]:
+                    continue
+            elif atom_name == "":
+                continue
+            lines.append(
+                f"ATOM  {atom_num:5d}  {atom_name:<3s}{resname:>3s} {chain}{res_idx:4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{0.00:6.2f}          "
+                f"{atom_name[0]:>2s}"
+            )
+            atom_num += 1
+    lines.append("TER")
+    lines.append("END")
+
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
    
@@ -128,18 +193,14 @@ def fold_sequences(
     tokenizer,
     model,
     device: str = None,
-    max_tokens_per_batch: int = 2048,  # tune to your GPU; L_max^3-ish cost, so keep conservative
+    max_tokens_per_batch: int = 2048, # VRAM is O(n**3) here so be careful
+    save_pdbs=None # list of paths if not None
 ):
     device = torch.device(device) if device is not None else next(model.parameters()).device
     bb_idx = [BACKBONE_ATOM14_IDX[atom] for atom in BACKBONE_ATOMS]
 
-    # Sort by length so each batch is length-homogeneous -- padding waste stays low
-    # and no short sequence gets dragged up to a long outlier's L_max.
     order = sorted(range(len(seqs)), key=lambda i: len(seqs[i]))
 
-    # Greedily pack into batches: add sequences to the current batch as long as
-    # batch_len_if_added^3 * (count+1) stays under budget-ish. Simple heuristic:
-    # cap by (batch's max length)^3 * batch_size.
     batches = []
     current = []
     for i in order:
@@ -157,6 +218,8 @@ def fold_sequences(
     per_seq = [None] * len(seqs)
     for batch_idx in tqdm(batches):
         batch_seqs = [seqs[i] for i in batch_idx]
+        if save_pdbs is not None:
+            batch_save_pdbs = [save_pdbs[i] for i in batch_idx]
         inputs = tokenizer(
             batch_seqs,
             return_tensors="pt",
@@ -171,7 +234,15 @@ def fold_sequences(
         if positions.dim() == 6:
             positions = positions[-1]
         atom14 = positions[-1]  # (B, L, 14, 3)
-
+        if save_pdbs is not None:
+            for mol_idx in range(atom14.shape[0]):
+                atom14_to_pdb(
+                    atom14[mol_idx],                          # (L, 14, 3)
+                    inputs["attention_mask"][mol_idx].bool(),
+                    batch_seqs[mol_idx],
+                    batch_save_pdbs[mol_idx], 
+                    atom14_atom_exists=outputs.atom14_atom_exists[mol_idx] if hasattr(outputs, "atom14_atom_exists") else None,
+                )
         bb = atom14[:, :, bb_idx, :].float()          # (B, L, 4, 3)
         m = inputs["attention_mask"].bool()            # (B, L)
 
@@ -271,9 +342,10 @@ def evaluate_batch_rmsd(
     gt_mask: torch.Tensor,
     tokenizer,
     model,
-    device="cpu"
+    device="cpu",
+    save_pdbs = None
 ):
-    pred_coords, pred_mask = fold_sequences(sequences, tokenizer, model, device=device)
+    pred_coords, pred_mask = fold_sequences(sequences, tokenizer, model, device=device, save_pdbs=save_pdbs)
 
     B, R, A, _ = pred_coords.shape
 
@@ -283,6 +355,4 @@ def evaluate_batch_rmsd(
     P_backbone = pred_coords.reshape(B, R*A, 3)
     Q_backbone = ground_truth_coords
 
-    backbone_mask = gt_mask[:,:,:,None].expand(-1, -1, -1, A).reshape(B, T, R*A)
-
-    return kabsch_rmsd(P_backbone, Q_backbone, mask=backbone_mask, device=device).cpu()
+    return kabsch_rmsd(P_backbone, Q_backbone, mask=gt_mask, device=device).cpu()

@@ -416,7 +416,7 @@ def train_residue_classifier(args_dict):
             use_attention=use_attention,
             use_masking=use_masking
         ).to(DEVICE)
-        model = torch.jit.trace(model, Data(x = torch.rand(100, 128, 15, generator=torch_rng), edge_index = torch.randint(100, 2,200, generator=torch_rng), edge_attr=torch.randint(1, 200, 1, generator=torch_rng).to(float), y=torch.randint(20, 100, generator=torch_rng), pos= torch.rand(100, 128, 4, 3, generator=torch_rng), frame_maps=torch.rand(100, 128, 3, 3, generator=torch_rng), node_mask= torch.zeros(100), lengths= torch.tensor([128])))
+        #model = torch.jit.trace(model, Data(x = torch.rand(100, 128, 15, generator=torch_rng), edge_index = torch.randint(100, (2,200), generator=torch_rng), edge_attr=torch.randint(2, (200, 1), generator=torch_rng).to(float), y=torch.randint(20, (100,), generator=torch_rng), pos= torch.rand(100, 128, 4, 3, generator=torch_rng), frame_maps=torch.rand(100, 128, 3, 3, generator=torch_rng), node_mask= torch.zeros(100), lengths= torch.tensor([128])))
 
     elif other_model == "node_only": 
         model = NodeOnlyMLP(

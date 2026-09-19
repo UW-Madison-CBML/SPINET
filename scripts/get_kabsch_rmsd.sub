@@ -15,12 +15,12 @@ Requirements = (Target.HasCHTCStaging == true)
 +wantGPULab = true
 
 transfer_input_files = get_kabsch_rmsd.sh, get_kabsch_rmsd.py, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file)
-
+transfer_output_files = $(file)_pred_pdbs.tar.gz
+transfer_output_remaps = "$(file)_pred_pdbs.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file)_pred_pdbs.tar.gz"
 
 request_cpus = 16
 request_memory = 128GB
 request_disk = 128GB
 request_gpus = 1
-
 
 queue file from get_kabsch_rmsd.txt
