@@ -24,3 +24,4 @@ comparisons/DynamicMPNN/DynamicMPNN.tar.gz
 comparisons/MapDiff/MapDiff.tar.gz
 *.yaml
 dynamicmpnn.modules.layers.*
+**/outputs/

@@ -22,6 +22,8 @@ MapDiff/
     train/train_diff.yaml          stage-2 (diffusion) hyperparameters
     wandb/basic.yaml                new: wandb.use toggle (off by default), one run for both stages
   dataloader/large_dataset.py    + max_length filtering
+  dataloader/pyg_safe_globals.py new: allow-list the PyG classes in our graph cache for torch>=2.6's weights_only load
+  dataloader/pyg_inspector_compat.py new: restore Inspector.distribute, which PyG 2.5 renamed out from under upstream's propagate()
   model/ipa/ipa_net.py           + configurable positional-encoding table size
   data/generate_graph_relaxed.py new: relaxed (deposited) PDB -> MapDiff graph featurization
   train.py                       new: single entry point, runs both training stages in one wandb run
