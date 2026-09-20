@@ -228,12 +228,16 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
     run.log(prf_dict | {f"epoch_{val_name}_loss": avg_loss, "epoch": epoch})
 
 def interpret_sheaves(loader, model, run, device):
+
+    # initiate img_dict
+    img_dict = {}
     with torch.no_grad():
         for batch in tqdm(loader, desc=f"Loading Sheaves", leave=False):
 
             data = batch.to_data_list()[0].to(device)
             data = data.sort() 
             _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
+            _,d,_ = first_sheaf.shape
             first_sheaf = first_sheaf.cpu()
             last_sheaf = last_sheaf.cpu()
             edge_index = data.edge_index.cpu()
@@ -248,18 +252,20 @@ def interpret_sheaves(loader, model, run, device):
             last_eigvals = last_eigs.eigenvalues.real
             last_eigvecs = last_eigs.eigenvectors.real
 
-            img_dict = {}
-            fig, ax = plt.subplots()  
-            ax.plot(np.arange(first_eigvals.shape[0]),first_eigvals.numpy())
-            img_dict["first_sheaf"] = wandb.Image(fig)
+            # work with first sheaf
+            largest_eigval_idx = first_eigvals.argmax().item()
+            largest_eigvec = first_eigvecs[largest_eigval_idx]
+
+            # need to be careful with reshape
+            per_node_signals = largest_eigvec.reshape(-1, d)
+            covariance_mat = F.cosine_similarity(*torch.broadcast_tensors(per_node_signals[:,None,:], per_node_signals[None,:,:]), dim=-1)
+            fig, ax = plt.subplots()
+            ax.imshow(covariance_mat)
+            ax.set_title(f"{traj_id}")
+            img_dict[f"{traj_id.split('/')[0]}_first_sheaf_first_eigvec_covariance"] = wandb.Image(fig)
             plt.close(fig)
 
-            fig, ax = plt.subplots()  
-            ax.plot(np.arange(last_eigvals.shape[0]), last_eigvals.numpy())
-            img_dict["last_sheaf"] = wandb.Image(fig)
-            plt.close(fig)
-            
-            run.log(img_dict)
+    run.log(img_dict)
             
             
          
@@ -389,9 +395,13 @@ def train_residue_classifier(args_dict):
     train_loader = DataLoader(train_dataset, batch_sampler = ProteinSampler(train_dataset, num_nodes, rng=torch_rng), generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_sampler=ProteinSampler(val_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_sampler=ProteinSampler(test_dataset, num_nodes), num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True)
+    
+    print(f"train expected groups: {len(train_dataset.groups)}")
+    print(f"train actual groups: {len(set([train_dataset.index[idx][0] for batch in train_loader.batch_sampler.batches for idx in batch]))}")
 
-    print(f"validation expected groups: {print(val_dataset.groups)}")
-    print(f"validation actual groups: {print(len(set([val_dataset.index[idx][0] for batch in val_loader.batch_sampler.batches for idx in batch])))}")
+
+    print(f"validation expected groups: {len(val_dataset.groups)}")
+    print(f"validation actual groups: {len(set([val_dataset.index[idx][0] for batch in val_loader.batch_sampler.batches for idx in batch]))}")
 
     single_graph_val_loader = itertools.islice(DataLoader(val_dataset, shuffle=True, generator=torch_rng, batch_size=1, num_workers=16, collate_fn=lambda batch:val_dataset.graph_collate(batch), pin_memory=True, drop_last=False), 100)
 
