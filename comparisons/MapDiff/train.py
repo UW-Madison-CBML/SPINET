@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 
 from dataloader.collator import CollatorDiff, CollatorIPAPretrain
 from dataloader.large_dataset import Cath
+from dataloader.pyg_inspector_compat import patch_inspector_distribute
 from dataloader.pyg_safe_globals import allow_pyg_data_pickles
 from model.egnn_pytorch.egnn_net import EGNN_NET
 from model.ipa.ipa_net import IPANetPredictor
@@ -49,6 +50,7 @@ except ImportError:
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 allow_pyg_data_pickles()
+patch_inspector_distribute()
 
 # cfg.dataset.name -> lib/dataset_splits.py dataset name. CATH is upstream's own benchmark
 # and carries its own three directories, so it is not in the table.

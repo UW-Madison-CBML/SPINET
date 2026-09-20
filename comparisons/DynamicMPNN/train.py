@@ -489,6 +489,7 @@ def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_
                     continue
 
                 masked_logits = logits[protein_mask].cpu()
+                # just save masked logits?
                 masked_seq = target[protein_mask].cpu()
 
                 pred_idx = masked_logits.argmax(dim=-1)

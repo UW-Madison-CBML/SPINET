@@ -1,0 +1,106 @@
+# Hyperparameter sweep over DynamicMPNN's k -- the number of MD conformers per protein --
+# on ATLAS. See sweep_k.py's docstring for the full reasoning; the short version:
+#
+#   * k is the hyperparameter this whole comparison is about. MapDiff and PiFold see one
+#     static structure each; DynamicMPNN sees an ensemble, and this sweep is what says how
+#     much recovery that ensemble buys and where the curve flattens.
+#   * The old ceiling of 10 conformers was NOT an architectural limit -- it was train.py's
+#     --pool-size default, i.e. how many frames preprocessing bothered to save. Activation
+#     memory in `forward_single_chain` is linear in k (node/edge features are [N, k, D] /
+#     [E, k, D] through the 8 encoder layers; the decoder runs on the k-independent pooled
+#     representation), so the real ceiling is VRAM. sweep_k.py holds that fixed with
+#     --conf-budget (a cap on k * batch_size) plus gradient accumulation, which is what lets
+#     the grid run out to k=32 in the same footprint as today's --k 10 --batch-size 2 run.
+#
+# ONE job for the whole grid, not one job per k. The conformer pool (an O(n_frames^2)
+# pairwise-TM pass per protein), the relaxed scRMSD reference structures (downloaded from
+# files.rcsb.org) and ESMFold (a 2.8B-parameter Hugging Face download) are all built once
+# and reused by every k -- none of them depend on ensemble size, and rebuilding the pool per
+# k would additionally let each k sample from a differently-chosen set of frames.
+#
+# Each k still logs its own W&B run (DynamicMPNN_atlas_ksweep_k<k>), all sharing one group
+# so they overlay in a single plot, plus a _summary run holding the recovery-vs-k table.
+# sweep_k_atlas.csv is rewritten after every point and transferred back on eviction, so an
+# interrupted sweep keeps the points that finished.
+#
+# Like train.sub, this stays on the trajectory store: the ensemble input IS the thing being
+# benchmarked, so it is not retargeted onto relaxed structures (those are the scRMSD
+# reference only, shared with comparisons/{MapDiff,PiFold}).
+#
+# ATLAS and mdCATH sweep SEPARATELY, one job each. ATLAS is the default; for mdCATH:
+#
+#   condor_submit sweep_k.sub DS_NAME=mdcath \
+#       DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
+#       DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv'
+#
+# To split the grid across jobs (12 points x 8 epochs x per-epoch ESMFold scoring is a long
+# single job, and this machine is shared), submit it in chunks -- the pool is cached in the
+# job's scratch, so only the first chunk pays for preprocessing:
+#
+#   condor_submit sweep_k.sub K_GRID=2,3,4,5,6,8
+#   condor_submit sweep_k.sub K_GRID=10,12,16,20,24,32
+#
+# Note that POOL_SIZE must stay at the top of the FULL grid in that case, so every chunk
+# draws from the same pool: condor_submit sweep_k.sub K_GRID=2,3,4 POOL_SIZE=32
+
+docker_image = cmikulski4/dynamicmpnn:v8
+universe = docker
+
+ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+DS_NAME = atlas
+DS_H5   = $(ResearchDrive)/atlas_data.h5
+DS_CSV  = $(ResearchDrive)/atlas_cross_val_index.csv
+
+#DS_NAME = mdcath
+#DS_H5   = $(ResearchDrive)/mdcath_spinet_320_0.h5
+#DS_CSV  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
+
+# Dense at the low end, where each added conformer is a large relative increase in ensemble
+# coverage and the curve is expected to bend; log-spaced through the tail, where it is not.
+K_GRID = 2,3,4,5,6,8,10,12,16,20,24,32
+
+# Conformers saved per protein. Must be >= the largest k in the FULL grid -- the featurizer
+# pads a short pool by duplicating frames (get_entries' `n < self.k` branch) rather than
+# erroring, which would read as the recovery curve saturating; sweep_k.py's check_pool_sizes
+# turns that into a hard failure instead.
+POOL_SIZE = 32
+
+# Cap on k * batch_size, the real unit of activation memory. 20 == train.sub's `--k 10` at
+# --batch-size 2, the load this machine already carries; sweep_k.py derives each k's batch
+# size from it and adds gradient accumulation so every k still takes an optimizer step every
+# 2 proteins. Lower this (not the grid) if the tail OOMs.
+CONF_BUDGET = 20
+
+shell = ./sweep_k.sh --from-scratch --ds-name $(DS_NAME) --k-grid $(K_GRID) \
+        --pool-size $(POOL_SIZE) --conf-budget $(CONF_BUDGET)
+
+log = logs/sweep_k_$(DS_NAME)_$(Cluster)_$(Process).log
+error = logs/sweep_k_$(DS_NAME)_$(Cluster)_$(Process).err
+output = logs/sweep_k_$(DS_NAME)_$(Cluster)_$(Process).out
+
+# Groups every k's W&B run under one sweep, and keeps a resubmitted chunk distinguishable
+# from the original.
+environment = "CONDOR_CLUSTER=$(Cluster)"
+
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT_OR_EVICT
+# sweep_k_<ds>.csv is rewritten after every completed k, so this brings the finished points
+# home even if the job is evicted part-way through the grid.
+transfer_output_files = sweep_k_$(DS_NAME).csv, logs
+# ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time, and
+# lib/relaxed_pdb.py downloads the relaxed structures from files.rcsb.org, so this needs a
+# machine with internet access -- the same one train.sub uses.
+Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
+
+transfer_input_files = sweep_k.sh, sweep_k.py, train.py, DynamicMPNN.tar.gz, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../../api_keys.txt, ../../scripts/load_dynamics.py, $(DS_H5), $(DS_CSV)
+
+request_cpus = 8
+request_memory = 384GB
+request_disk = 128GB
+request_gpus = 1
+
++WantGPULab             = true
++GPUJobLength           = "long"
+
+queue 1

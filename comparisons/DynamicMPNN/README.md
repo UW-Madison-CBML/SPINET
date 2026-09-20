@@ -97,6 +97,57 @@ draws the *k* conformers it trains on by TM dissimilarity (its own
 `random.sample`. An ensemble `.pt` built before this change has no `tm_scores`
 and is rebuilt automatically.
 
+## Sweeping *k*: how much does ensemble size actually buy?
+
+`sweep_k.py` / `sweep_k.sub` train one model per *k* over a shared conformer
+pool, so the recovery-vs-ensemble-size curve is measured rather than assumed.
+`k` is the hyperparameter this whole comparison is about: MapDiff and PiFold
+each see one static structure, DynamicMPNN sees an ensemble, and the sweep is
+what says where that advantage saturates.
+
+**There is no architectural ceiling on *k*.** The old limit of 10 was
+`train.py`'s `--pool-size` default — how many frames preprocessing bothered to
+save — not a property of the model. `DynamicMPNN.forward_single_chain` embeds
+and encodes all *k* conformers before pooling them (node/edge activations are
+`[N, k, D]` / `[E, k, D]` through the 8 encoder layers; the decoder runs on the
+pooled, *k*-independent representation), so the real ceiling is VRAM, and the
+cost is linear in *k* — a little worse than linear, because the edge topology
+is the *union* of the *k* per-conformer knn_32 graphs, so `E` grows with *k*
+too before saturating.
+
+The sweep therefore budgets `k * batch_size` (`--conf-budget`, default 20 —
+the load `train.sub`'s `--k 10 --batch-size 2` already carries) instead of
+fixing the batch size, and makes up the difference with gradient accumulation
+so every *k* still takes an optimizer step every `--proteins-per-step` (2)
+proteins. Without that, the effective batch would shrink as *k* grew and the
+sweep would be measuring batch size as much as ensemble size. The default grid
+`2,3,4,5,6,8,10,12,16,20,24,32` peaks at 32 conformer-graphs resident, 1.6x
+today's run.
+
+Two things are shared across the grid rather than redone per *k*, because
+neither depends on ensemble size and redoing them would add a second moving
+variable: the conformer **pool** (built once at `--pool-size` = max(grid), so
+every *k* draws from the same candidate frames) and the scRMSD machinery
+(relaxed reference structures + ESMFold). The seed is reset identically before
+each point, so weight init and the *k*-of-pool draw are controlled too.
+
+One trap worth naming: `get_entries` **silently duplicates** conformers when a
+protein's pool is smaller than *k* (its `n < self.k` branch pads by random
+resampling and the `len(confs_list) == k` assert still passes). Across a sweep
+that reads as the curve flattening for a reason that has nothing to do with
+dynamics, so `check_pool_sizes` promotes it to a hard failure before training
+starts. A pool comes up short when a trajectory has fewer coarse-grained frames
+than max(grid) — i.e. when `--course-grain` is too aggressive for it.
+
+```bash
+mkdir -p logs && condor_submit sweep_k.sub          # ATLAS, k = 2..32
+```
+
+Each *k* logs its own W&B run (`DynamicMPNN_atlas_ksweep_k<k>`), all under one
+`group` so they overlay; a `_summary` run holds the `recovery_vs_k` table. The
+same table is rewritten to `sweep_k_atlas.csv` after **every** completed point
+and transferred back on eviction, so an interrupted sweep keeps what finished.
+
 ## Big-picture pipeline
 
 ```
