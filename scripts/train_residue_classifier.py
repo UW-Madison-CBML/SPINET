@@ -280,6 +280,7 @@ def train_residue_classifier(args_dict):
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
+    ablate_edge_features=args_dict["ablate_edge_features"]
     use_attention = not args_dict["ablate_attention"]
     num_heads = 4 if use_attention else 1
     run_name = args_dict["run_name"]
@@ -353,6 +354,7 @@ def train_residue_classifier(args_dict):
             "masking_ratio": masking_ratio,
             "task":"predicting residues from motions",
             "ablate_sheaves":ablate_sheaves,
+            "ablate_edge_features":ablate_edge_features,
             "stalk_dim": stalk_dim,
             "seed":seed,
             "trajectory_subsequence_timesteps":num_timesteps,
@@ -411,6 +413,7 @@ def train_residue_classifier(args_dict):
             num_blocks=num_blocks,
             num_heads=num_heads,
             ablate_sheaves=ablate_sheaves,
+            ablate_edge_features=ablate_edge_features,
             num_timesteps=num_timesteps,
             restriction_map_type=restriction_map_type,
             use_attention=use_attention,
@@ -544,6 +547,7 @@ if __name__ == "__main__":
         description='Trains sheaf node classifier to predict nodes') 
     parser.add_argument('--run-name', type=str, default="residue_classifier")
     parser.add_argument('--ablate-sheaves', action="store_true")
+    parser.add_argument('--ablate-edge-features', action="store_true)
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
     parser.add_argument('--resume', type=str, default="")
