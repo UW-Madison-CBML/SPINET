@@ -56,7 +56,7 @@ THREE_TO_ONE = {name.upper(): letter for name, letter in IUPACData.protein_lette
 RCSB_DOWNLOAD_URL = "https://files.rcsb.org/download/{pdb_id}.{ext}"
 
 # RCSB asks for a contactable user agent on bulk programmatic access.
-_HEADERS = {"User-Agent": "cmikulski@wisc.edu"}
+_HEADERS = {"User-Agent": "cmikulski@wisc.edu"} # hide!
 
 
 def three_to_one(resname):

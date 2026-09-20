@@ -336,11 +336,13 @@ class InitDynamicsEmbedding(MessagePassing):
         edge_stalk = edge_attr_t.view(edge_attr_t.shape[0], self.num_channels, self.stalk_dim)
         return self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps_t)
     """
-    def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, frame_origin="CA", ablate_sheaves=False, restriction_map_type="arbitrary"):
+    def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, frame_origin="CA", ablate_sheaves=False, ablate_edge_features=False, restriction_map_type="arbitrary"):
         super().__init__(aggr='sum', node_dim=0)
         self.input_dim = node_dim
         self.edge_dim = edge_dim
         self.ablate_sheaves = ablate_sheaves
+        # test performance without explicitly encoding dist between residues, etc.
+        self.ablate_edge_features = ablate_edge_features
         self.stalk_dim = stalk_dim
         self.hidden_dim = hidden_dim
         self.num_channels = self.hidden_dim // self.stalk_dim
@@ -370,6 +372,9 @@ class InitDynamicsEmbedding(MessagePassing):
         in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], pos.shape[1], 9)
         pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
         edge_attr = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
+
+        if self.ablate_edge_features:
+            edge_attr = torch.zeros_like(edge_attr)
 
         # calculate restriction maps
         _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
@@ -408,7 +413,7 @@ class InitDynamicsEmbedding(MessagePassing):
 
 
 class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves =False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True, use_masking=True):
+    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves = False, ablate_edge_features = False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True, use_masking=True):
         super(NodeSheafClassifier, self).__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -421,6 +426,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         self.gat_dropout = gat_dropout
         self.num_classes = num_classes
         self.ablate_sheaves = ablate_sheaves
+        self.ablate_edge_features = ablate_edge_features
         self.gat_dropout = gat_dropout
         self.classifier_dropout = classifier_dropout
         self.restriction_map_type = restriction_map_type
@@ -442,6 +448,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.gat_dropout = config.get("gat_dropout", gat_dropout)
                 self.num_classes = config.get("num_classes", num_classes)
                 self.ablate_sheaves = config.get("ablate_sheaves", ablate_sheaves)
+                self.ablate_edge_features = config.get("ablate_edge_features", ablate_edge_features)
                 self.gat_dropout = config.get("gat_dropout", gat_dropout)
                 self.classifier_dropout = config.get("classifier_dropout", classifier_dropout)
                 self.restriction_map_type = config.get("restriction_map_type", restriction_map_type)
@@ -457,13 +464,14 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.gat_dropout = config.gat_dropout
                 self.num_classes = config.num_classes
                 self.ablate_sheaves = config.ablate_sheaves
+                self.ablate_edge_features = config.ablate_edge_features
                 self.gat_dropout = config.gat_dropout
                 self.classifier_dropout = config.classifier_dropout
                 self.restriction_map_type = config.restriction_map_type
                 self.use_attention = config.use_attention
                 self.use_masking = config.use_masking
 
-        self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves, ablate_edge_features=self.ablate_edge_features)
 
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
 
