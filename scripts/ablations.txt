@@ -1,1 +1,1 @@
---run-name our_model --restriction-map-type arbitrary --ablate-attention 
+--run-name simple_ablate_edge_features --ablate-attention --ablate-edge-features --restriction-map-type arbitrary

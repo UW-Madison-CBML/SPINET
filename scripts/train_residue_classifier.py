@@ -26,7 +26,7 @@ from stats_utils import get_confusion_matrix, top_k_acc
 from sheaf_utils import sheaf_laplacian
 from torch.profiler import profile, ProfilerActivity, record_function
 import h5py
-from rgnn import RGNN
+#from rgnn import RGNN
 from torch.utils.data import BatchSampler
 
 
@@ -428,8 +428,8 @@ def train_residue_classifier(args_dict):
              num_classes=num_classes,
              dropout=0.2,
          ).to(DEVICE)
-    else:
-        model = RGNN(15, 13, hidden_dim, atoms=BACKBONE_ATOMS, frame_origin="CA").to(DEVICE)
+    #else:
+        #model = RGNN(15, 13, hidden_dim, atoms=BACKBONE_ATOMS, frame_origin="CA").to(DEVICE)
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run.log({"params": pytorch_total_params})
@@ -547,7 +547,7 @@ if __name__ == "__main__":
         description='Trains sheaf node classifier to predict nodes') 
     parser.add_argument('--run-name', type=str, default="residue_classifier")
     parser.add_argument('--ablate-sheaves', action="store_true")
-    parser.add_argument('--ablate-edge-features', action="store_true)
+    parser.add_argument('--ablate-edge-features', action="store_true")
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
     parser.add_argument('--resume', type=str, default="")

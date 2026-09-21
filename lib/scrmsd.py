@@ -10,7 +10,7 @@ BACKBONE_ATOM14_IDX = {"N":0, "CA":1, "C":2, "O":4}  # N, CA, C, O # TODO fix th
 # The repo-wide ground-truth atom order, re-exported by `relaxed_pdb` rather than imported
 # from `load_dynamics`: the comparison models all ship this file, and not all of their images
 # carry mdtraj (which `load_dynamics` pulls in at import time).
-from load_dynamics import BACKBONE_ATOMS
+from relaxed_pdb import BACKBONE_ATOMS
 from tqdm import tqdm
 
 @torch.no_grad()
