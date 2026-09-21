@@ -1,4 +1,5 @@
-gvp-seq_pred_df_7.csv
-nosheaves-mdcath-seq-preds.csv
-spinet-mdcath-seq-preds.csv
-node-mlp-seq-preds.csv
+gvp-seq_pred_df
+nosheaves_atlas_seq_pred
+spinet_mdcath_seq_pred
+nosheaves_mdcath_seq_pred
+spinet_atlas_seq_pred

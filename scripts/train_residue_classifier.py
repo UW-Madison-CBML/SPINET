@@ -557,7 +557,7 @@ if __name__ == "__main__":
         description='Trains sheaf node classifier to predict nodes') 
     parser.add_argument('--run-name', type=str, default="residue_classifier")
     parser.add_argument('--ablate-sheaves', action="store_true")
-    parser.add_argument('--ablate-edge-features', action="store_true)
+    parser.add_argument('--ablate-edge-features', action="store_true")
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
     parser.add_argument('--resume', type=str, default="")
