@@ -1,3 +1,4 @@
+
 # get_kabsch_rmsd.py
 from scrmsd import evaluate_batch_rmsd, load_esmfold
 import sys
@@ -122,11 +123,10 @@ def main(seq_csv):
         padded_tensors = [F.pad(bb_tensor, (0,0, 0,0, 0,pad_size-bb_tensor.shape[0]), mode="constant", value=0.0) for bb_tensor in backbone_tensors]
 
         backbone_tensor = torch.stack(padded_tensors, dim=0) # B, num_res_padded, 4, 3
-        backbone_tensor = backbone_tensor.reshape(backbone_tensor.shape[0], -1, 3)
-        gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])[:, :, None].expand(-1, -1, 4)
-        gt_seq_mask = gt_seq_mask.reshape(backbone_tensor.shape[0], -1)
+        gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])
 
         pred_seqs = batch_df["seq"].to_list()
+
         rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask,esmfold_model, esmfold_tokenizer, device=DEVICE, save_pdbs = save_pdbs) #list of pdb paths to save sturcture
         rmsds.extend(rmsd.tolist())
     rmsds = np.array(rmsds)

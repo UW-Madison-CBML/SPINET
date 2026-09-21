@@ -7,9 +7,6 @@ import torch
 from transformers import AutoTokenizer, EsmForProteinFolding
 
 BACKBONE_ATOM14_IDX = {"N":0, "CA":1, "C":2, "O":4}  # N, CA, C, O # TODO fix this
-# The repo-wide ground-truth atom order, re-exported by `relaxed_pdb` rather than imported
-# from `load_dynamics`: the comparison models all ship this file, and not all of their images
-# carry mdtraj (which `load_dynamics` pulls in at import time).
 from load_dynamics import BACKBONE_ATOMS
 from tqdm import tqdm
 
@@ -25,7 +22,8 @@ def kabsch_rmsd(P: torch.Tensor, Q: torch.Tensor, mask: torch.Tensor = None, dev
     """
     P = P.to(device)
     Q = Q.to(device)
-    assert Q.shape == P.shape, "P and Q do not have same shape"
+    assert Q.shape == P.shape, f"P and Q do not have same shape: {Q.shape} {P.shape}"
+
     n = P.shape[-1]
     if mask is not None:
         assert mask.any(dim=-1).all().item(), "each molecule must have at least one atom"
@@ -334,10 +332,8 @@ def evaluate_scrmsd(
     return kabsch_rmsd(P.reshape(B, pad_size * num_atoms, 3),
                        Q.reshape(B, pad_size * num_atoms, 3),
                        mask=atom_mask, device=device)
-
-
 def evaluate_batch_rmsd(
-    sequences: List[str], 
+    sequences: List[str],
     ground_truth_coords: torch.Tensor,
     gt_mask: torch.Tensor,
     tokenizer,
@@ -347,12 +343,25 @@ def evaluate_batch_rmsd(
 ):
     pred_coords, pred_mask = fold_sequences(sequences, tokenizer, model, device=device, save_pdbs=save_pdbs)
 
-    B, R, A, _ = pred_coords.shape
+    B, R1, A, _ = ground_truth_coords.shape
+    assert gt_mask.shape == (B, R1)
+
+    B, R2, A, _ = pred_coords.shape
+    R = min(R1, R2)
+    pred_coords = pred_coords[:,:R,:,:]
+    ground_truth_coords = ground_truth_coords[:,:R,:,:]
+    gt_mask = gt_mask[:,:R, None].expand(-1,-1, A)
+
+    ground_truth_coords = ground_truth_coords.reshape(B, R*A, 3)
+    pred_coords = pred_coords.reshape(B, R*A, 3)
+    gt_mask = gt_mask.reshape(B,R*A)
+
 
     ground_truth_coords = ground_truth_coords.to(device)
     gt_mask = gt_mask.to(device)
 
-    P_backbone = pred_coords.reshape(B, R*A, 3)
+    P_backbone = pred_coords.to(device)
     Q_backbone = ground_truth_coords
 
     return kabsch_rmsd(P_backbone, Q_backbone, mask=gt_mask, device=device).cpu()
+
