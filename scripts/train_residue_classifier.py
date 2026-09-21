@@ -93,6 +93,8 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
     recalls = {acid:[] for acid in ResidueClassifierDataset.AMINO_ACIDS}
     pred_seqs = []
     pred_pdbs = []
+    start_idxs = []
+    end_idxs = []
 
     with torch.no_grad():
         for batch in tqdm(loader if not test_val else itertools.islice(loader,100), desc=f"Epoch {epoch} {val_name}", leave=False):
@@ -123,6 +125,8 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
 
                 seq_str = "".join([seq1(ResidueClassifierDataset.AMINO_ACIDS[idx.item()]) for idx in pred_idx])  # length-R_i amino-acid string
                 pred_seqs.append(seq_str )  # accumulates to B entries, insertion order == gt_list order
+                start_idxs.append(gt_data.index.squeeze().cpu()[0])
+                end_idxs.append(gt_data.index.squeeze().cpu()[1])
 
             """# Get gt coordinates from trajectory
             traj_tensors = [prot.pos for prot in gt_list]
@@ -186,7 +190,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
         prf_dict[f"{val_name}_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
         prf_dict[f"{val_name}_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
         prf_dict[f"{val_name}_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
-    pred_string_df = pd.DataFrame({"pdb":pred_pdbs, "seq":pred_seqs})
+    pred_string_df = pd.DataFrame({"pdb":pred_pdbs, "seq":pred_seqs, "start_idx":start_idxs, "end_idx":end_idxs})
     prf_dict["pred_seqs"] = wandb.Table(dataframe=pred_string_df)
 
     # perplexity score
@@ -260,7 +264,7 @@ def interpret_sheaves(loader, model, run, device, rng):
                 last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf, edge_index)
                 shuffled_first_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], first_sheaf[torch.randperm(edge_index.shape[1], generator=rng)], edge_index)
                 shuffled_last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf[torch.randperm(edge_index.shape[1], generator=rng)], edge_index)
-                graph_laplacian = sheaf_laplacian(data.x.shape[0], torch.ones(edge_index.shape[1], 1, 1, device=data.x.device), edge_index)
+                graph_laplacian = sheaf_laplacian(data.x.shape[0], torch.ones(edge_index.shape[1], 1, 1, device=edge_index.device), edge_index)
 
 
                 grp.create_dataset("first_sheaf", data=first_sheaf_laplacian.numpy())
@@ -582,7 +586,7 @@ def train_residue_classifier(args_dict):
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
 
     # Test Check
-    run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="test", test_val=test_val)
+    #run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="test", test_val=test_val)
 
     if not ablate_sheaves and other_model=="spinet":
         interpret_sheaves(single_graph_val_loader, model, run, DEVICE, torch_rng)
