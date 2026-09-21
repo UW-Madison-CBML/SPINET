@@ -2,7 +2,7 @@
 
 Adds the dataset-selection flags our two datasets need (`--data_name ATLAS|MDCATH`, plus the
 split index / trajectory store / PDB cache locations) and the Weights & Biases wiring
-`main.py` uses to log recovery, perplexity and scRMSD.
+`main.py` uses to log recovery and perplexity.
 
 The defaults that have to agree with the other comparison models (held-out fold, max protein
 length, RNG seed) are read straight out of `lib/dataset_splits.py` rather than spelled out
@@ -86,12 +86,6 @@ def create_parser():
     parser.add_argument('--edge_angle', default=1, type=int)
     parser.add_argument('--edge_direct', default=1, type=int)
     parser.add_argument('--virtual_num', default=3, type=int)
-
-    # Self-consistency RMSD (ESMFold) -- see lib/scrmsd.py
-    parser.add_argument('--scrmsd', default=1, type=int,
-                         help='Compute scRMSD against the relaxed structures on the held-out split (0 disables)')
-    parser.add_argument('--scrmsd_batch_size', default=4, type=int,
-                         help='How many designs ESMFold folds per call')
 
     # Weights & Biases
     parser.add_argument('--wandb', default=1, type=int, help='Log to W&B (0 disables)')

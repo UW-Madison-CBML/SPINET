@@ -13,13 +13,6 @@ recovery, perplexity, per-residue precision/recall/f1, an amino-acid confusion
 matrix and a `pred_seqs` table of every design keyed by `<pdb>_<chain>`. That
 set is built by `lib.stats_utils.ResidueMetrics`, which is what keeps the three
 comparison models and the sheaf model reporting the same thing.
-
-Both passes also compute self-consistency RMSD (`lib.scrmsd.evaluate_scrmsd`):
-fold the predicted sequence with ESMFold and Kabsch-RMSD it against the
-protein's ground-truth *relaxed* (deposited) backbone. The graphs MapDiff trains
-and evaluates on are themselves built from those deposited structures (see
-data/generate_graph_relaxed.py), so `atom_pos` below already *is* the relaxed
-reference -- no separate lookup or alignment is needed here.
 """
 import copy
 import datetime
@@ -36,12 +29,11 @@ from tqdm import tqdm
 from evaluator import Evaluator
 from utils import inf_iterator, enable_dropout, cal_stats_metric
 
-# lib/scrmsd.py + lib/stats_utils.py are copied in flat next to this file (see
-# ../README.md and train.sh) -- fall back to walking up to a lib/ directory
-# for local/dev runs from inside the source tree.
+# lib/stats_utils.py is copied in flat next to this file (see ../README.md and
+# train.sh) -- fall back to walking up to a lib/ directory for local/dev runs
+# from inside the source tree.
 try:
     from stats_utils import ResidueMetrics, three_letter_codes
-    from scrmsd import evaluate_scrmsd
 except ImportError:
     import sys
     for _up in ('.', '..', '../..', '../../..'):
@@ -50,7 +42,6 @@ except ImportError:
             sys.path.insert(0, os.path.abspath(_cand))
             break
     from stats_utils import ResidueMetrics, three_letter_codes
-    from scrmsd import evaluate_scrmsd
 
 # Fixed one-letter amino-acid order MapDiff's 20-dim one-hot (`data.x[:, :20]`)
 # is built in -- see (upstream) data/generate_graph_cath.py's
@@ -58,40 +49,6 @@ except ImportError:
 # this exact order.
 AMINO_ACIDS = ['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I',
                'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V']
-
-# `atom_pos` (dataloader.large_dataset.Cath / data.generate_graph_cath) stacks
-# [N, CA, C, CB, O] along dim=1 -- reorder to lib/scrmsd.py's expected
-# CA, N, C, O (see scripts/load_dynamics.py's BACKBONE_ATOMS).
-ATOM_POS_TO_BACKBONE_IDX = [1, 0, 2, 4]
-
-
-def compute_batch_scrmsd(g_batch, batch_logits, esmfold_tokenizer, esmfold_model, device):
-    """Fold every protein's predicted sequence with ESMFold and Kabsch-RMSD it
-    against that protein's ground-truth relaxed backbone (CA, N, C, O).
-
-    g_batch: a `Batch` of per-protein graphs (has `.batch`, `.atom_pos`). Those
-        graphs are featurized straight from the deposited PDB entry
-        (data/generate_graph_relaxed.py), so `atom_pos` is the relaxed
-        reference structure, residue-for-residue aligned with the prediction.
-    batch_logits: (N_total_nodes_in_batch, 20) predicted amino-acid logits,
-        same node ordering as `g_batch`.
-    device: where to run ESMFold -- the *ESMFold* device, not the training one. Nothing
-        crosses devices: the graph's coordinates and the argmaxed sequences are pulled to
-        CPU/python here, and `evaluate_scrmsd` moves them onto `device` itself.
-    """
-    batch_idx = g_batch.batch.cpu().numpy()
-    atom_pos = g_batch.atom_pos.cpu()
-
-    pred_seqs, gt_backbones = [], []
-    for i in range(batch_idx.max() + 1):
-        idx = np.where(batch_idx == i)[0]
-        pred_idx = batch_logits[idx].argmax(dim=1)
-        pred_seqs.append(''.join(AMINO_ACIDS[j.item()] for j in pred_idx))
-        gt_backbones.append(atom_pos[idx][:, ATOM_POS_TO_BACKBONE_IDX, :])
-
-    return evaluate_scrmsd(pred_seqs, gt_backbones, esmfold_tokenizer, esmfold_model,
-                            device=device).tolist()
-
 
 class MapDiffTrainer:
     def __init__(
@@ -107,10 +64,7 @@ class MapDiffTrainer:
             test_dataloader,
             device,
             output_dir,
-            esmfold_tokenizer,
-            esmfold_model,
             wandb_run,
-            esmfold_device=None,
             prior_scheduler=None,
             scheduler=None,
             train_batch_size=512,
@@ -125,13 +79,6 @@ class MapDiffTrainer:
         self.device = device
         self.output_dir = output_dir
         self.wandb_run = wandb_run
-        self.esmfold_tokenizer = esmfold_tokenizer
-        self.esmfold_model = esmfold_model
-        # ESMFold normally lives on a *different* GPU than the one being trained on (see
-        # conf/train.yaml's `compute` block): its fp32 weights are ~11GB and would otherwise
-        # sit on the training card for the whole run to be used only here, in the val/test
-        # passes. Default to the training device for single-GPU callers.
-        self.esmfold_device = esmfold_device if esmfold_device is not None else device
         self.evaluator = Evaluator()
 
         Path(self.output_dir + '/model/').mkdir(parents=True, exist_ok=True)
@@ -171,8 +118,8 @@ class MapDiffTrainer:
         self.best_model = None
 
         self.train_table = PrettyTable(["# Epoch", "# Step", "Train_loss"])
-        self.val_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity", "scRMSD"])
-        self.test_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity", "scRMSD"])
+        self.val_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity"])
+        self.test_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity"])
 
         # Only used to head the LaTeX summary row `ResidueMetrics.summary_line` prints, the
         # same one scripts/train_residue_classifier.py's `run_val` ends with.
@@ -348,19 +295,13 @@ class MapDiffTrainer:
                     metrics.add_protein(batch_logits[idx], sample_seq, pdb_id=batch_names[i],
                                         sequence=''.join(AMINO_ACIDS[j] for j in sample_logits.tolist()))
 
-                metrics.add_scrmsd(compute_batch_scrmsd(
-                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model,
-                    self.esmfold_device))
-
             mean_recovery, median_recovery = cal_stats_metric(recovery)
             full_recovery = ((all_logits.argmax(dim=1) == all_seq.argmax(dim=1)).sum() / all_seq.shape[0]).item()
             perplexity = self.evaluator.cal_perplexity(all_logits, all_seq)
-            scrmsd_t = torch.tensor(metrics.scrmsd)
 
             print(f'Val median recovery rate (step: {self.step}) is {median_recovery}')
             print(f'Val perplexity (step: {self.step}): {perplexity}')
-            print(f'Val scRMSD (step: {self.step}): {scrmsd_t.mean().item():.3f} +/- {scrmsd_t.std().item():.3f}')
-            self.val_table.add_row([self.epoch, self.step, median_recovery, perplexity, scrmsd_t.mean().item()])
+            self.val_table.add_row([self.epoch, self.step, median_recovery, perplexity])
 
             print(metrics.summary_line(self.num_params))
 
@@ -369,7 +310,6 @@ class MapDiffTrainer:
                     cm_title='Validation Amino Acid Confusion Matrix', epoch=self.epoch) | {
                     'val_full_recovery': full_recovery, 'val_perplexity': perplexity,
                     'val_median_recovery': median_recovery, 'val_mean_recovery': mean_recovery,
-                    'val_scrmsd_mean': scrmsd_t.mean().item(), 'val_scrmsd_std': scrmsd_t.std().item(),
                 })
 
             if median_recovery > self.best_val_recovery:
@@ -466,10 +406,6 @@ class MapDiffTrainer:
                     metrics.add_protein(batch_logits[idx], sample_seq, pdb_id=batch_names[i],
                                         sequence=''.join(AMINO_ACIDS[j] for j in sample_logits.tolist()))
 
-                metrics.add_scrmsd(compute_batch_scrmsd(
-                    g_batch, batch_logits, self.esmfold_tokenizer, self.esmfold_model,
-                    self.esmfold_device))
-
             test_mean_recovery, test_median_recovery = cal_stats_metric(recovery)
             test_mean_nssr42, test_median_nssr42 = cal_stats_metric(nssr42)
             test_mean_nssr62, test_median_nssr62 = cal_stats_metric(nssr62)
@@ -478,14 +414,11 @@ class MapDiffTrainer:
 
             test_recovery = ((all_logits.argmax(dim=1) == all_seq.argmax(dim=1)).sum() / all_seq.shape[0]).item()
             test_perplexity = self.evaluator.cal_perplexity(all_logits, all_seq)
-            scrmsd_t = torch.tensor(metrics.scrmsd)
 
             print(f'test median recovery rate with best model (step: {self.best_val_step}) is {test_median_recovery}')
             print(f'test perplexity with the best model (step: {self.best_val_step}) is: {test_perplexity}')
-            print(f'test scRMSD with the best model (step: {self.best_val_step}) is: '
-                  f'{scrmsd_t.mean().item():.3f} +/- {scrmsd_t.std().item():.3f}')
-            self.test_table.add_row([self.best_val_epoch, self.best_val_step, test_median_recovery, test_perplexity,
-                                      scrmsd_t.mean().item()])
+            self.test_table.add_row([self.best_val_epoch, self.best_val_step, test_median_recovery,
+                                      test_perplexity])
 
             print(metrics.summary_line(self.num_params))
 
@@ -500,6 +433,4 @@ class MapDiffTrainer:
                     'test_median_nssr62_with_best_model': test_median_nssr62,
                     'test_median_nssr80_with_best_model': test_median_nssr80,
                     'test_median_nssr90_with_best_model': test_median_nssr90,
-                    'test_scrmsd_mean_with_best_model': scrmsd_t.mean().item(),
-                    'test_scrmsd_std_with_best_model': scrmsd_t.std().item(),
                 })

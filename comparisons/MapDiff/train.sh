@@ -4,7 +4,7 @@
 # pretraining + denoising diffusion training, see train.py).
 #
 # Extracts a *pristine* checkout of peizhenbai/MapDiff (MapDiff.tar.gz) and
-# copies this folder's dataset/wandb/scRMSD additions on top of it -- MapDiff/
+# copies this folder's dataset/wandb additions on top of it -- MapDiff/
 # itself is never modified, so re-cloning/re-pulling it always works. See
 # README.md.
 #
@@ -35,9 +35,9 @@ if [[ ! -d MapDiff ]]; then
     tar -xzf MapDiff.tar.gz
 fi
 
-echo ">>> overlaying dataset support + wandb/scRMSD wiring onto pristine MapDiff/"
+echo ">>> overlaying dataset support + wandb wiring onto pristine MapDiff/"
 cp -r conf dataloader model data train.py trainer.py MapDiff/
-for f in api_keys.txt wandb_api.txt stats_utils.py scrmsd.py relaxed_pdb.py dataset_splits.py \
+for f in api_keys.txt wandb_api.txt stats_utils.py relaxed_pdb.py dataset_splits.py \
          atlas_data.h5 atlas_cross_val_index.csv mdcath_spinet_320_0.h5 mdcath_320_0_topology_split.csv; do
     [[ -f "$f" ]] && cp "$f" MapDiff/
 done

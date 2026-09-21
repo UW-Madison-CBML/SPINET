@@ -43,10 +43,10 @@ executable              = train.sh
 arguments               = --data_name $(DS_NAME) --data_root ./ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt
 
 # The pristine PiFold tarball, this folder's overlay, the API-key file (train.sh
-# splits the W&B key out of it into wandb_api.txt), lib/{scrmsd,relaxed_pdb,dataset_splits,
+# splits the W&B key out of it into wandb_api.txt), lib/{relaxed_pdb,dataset_splits,
 # stats_utils}.py (shared across all models -- see ../../lib), and the dataset's trajectory
 # store + split index.
-transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
+transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
@@ -62,7 +62,6 @@ request_cpus            = 8
 request_memory          = 128GB
 request_disk            = 200GB
 
-# ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time and
 # lib/relaxed_pdb.py downloads from files.rcsb.org, so this needs a machine with internet
 # access -- the same one scripts/train_residue_classifier.sub uses. Also only match GPU
 # nodes with a modern-enough driver/CUDA for the cu118 image.

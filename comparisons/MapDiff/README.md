@@ -3,7 +3,7 @@
 This folder trains/evaluates MapDiff against a **pristine, unmodified
 checkout of [peizhenbai/MapDiff](https://github.com/peizhenbai/MapDiff)** --
 the repo itself never needs to be edited. `train.sh`/`eval.sh` extract a
-tarball of the repo and copy the dataset + wandb/scRMSD support below on top
+tarball of the repo and copy the dataset + wandb support below on top
 of it at run time, so re-cloning/re-pulling `MapDiff/` and re-tarring it
 always works.
 
@@ -28,7 +28,7 @@ MapDiff/
   data/generate_graph_relaxed.py new: relaxed (deposited) PDB -> MapDiff graph featurization
   train.py                       new: single entry point, runs both training stages in one wandb run
   trainer.py                     new: MapDiffTrainer -- merges trainer/trainer.py + trainer/mask_ipa_trainer.py,
-                                  drops comet_ml, adds scRMSD + a confusion-matrix image (see below)
+                                  drops comet_ml, adds a confusion-matrix image (see below)
   eval_relaxed.py                standalone re-eval of a saved checkpoint on the held-out split (+ scRMSD)
 train.sh / train.sub             CHTC entry point + submit file for training
 eval.sh / eval.sub                CHTC entry point + submit file for evaluation
@@ -59,13 +59,6 @@ log to the same W&B run:
 - sequence recovery (top-1/mean/median) and perplexity (as before)
 - BLOSUM-weighted recovery (NSSR42/62/80/90, test only)
 - an amino-acid confusion matrix, logged as a `wandb.Image`
-- **scRMSD**: the predicted sequence is folded with ESMFold
-  (`lib/scrmsd.py`) and Kabsch-RMSD'd against the protein's ground-truth
-  **relaxed (deposited)** backbone (CA/N/C/O) coordinates -- the same
-  self-consistency metric `comparisons/{PiFold,DynamicMPNN}` compute, so
-  results are directly comparable. No alignment step is needed here: the
-  graphs MapDiff trains on are themselves featurized from those deposited
-  structures, so `atom_pos` already *is* the relaxed reference.
 
 Every run additionally logs the *complete* metric set
 `scripts/train_residue_classifier.py`'s `run_val` produces, under exactly the
@@ -82,7 +75,6 @@ and stds are over proteins):
 - `pred_seqs` (`<split>_pred_seqs` outside the val split) -- a `wandb.Table` of
   every argmax design, one row per protein, labelled by `pdb` (`<pdb>_<chain>`
   for ATLAS, the CATH domain id for mdCATH)
-- `<split>_rmsd_{mean,std}` -- scRMSD, under run_val's key
 - `params` -- trainable parameter count
 
 ## 1. Build the pristine repo tarball
@@ -117,8 +109,7 @@ chain to the single CATH *domain* the `domain` id names (e.g. `12asA00` -> entry
 chain `A`, domain 02). Downloads are cached under `pdb_cache/` in the job's scratch dir.
 
 (`comparisons/DynamicMPNN` deliberately does *not* do this -- it keeps training on MD
-conformer ensembles, since that ensemble input is the thing being benchmarked. It uses
-the relaxed structures only as the scRMSD reference.)
+conformer ensembles, since that ensemble input is the thing being benchmarked.)
 
 Splits come from `lib/dataset_splits.py`, identical to
 `scripts/train_residue_classifier.py`:

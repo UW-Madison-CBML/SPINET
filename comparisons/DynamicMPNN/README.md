@@ -24,13 +24,6 @@ protein's relaxed (deposited) PDB entry. DynamicMPNN is **not**: it consumes an 
 conformers sampled from the trajectory, and that ensemble input is exactly the thing being
 benchmarked, so Steps 1–3 below still read the MD store.
 
-What it *does* take from the deposited structures is the **scRMSD reference**. Each design is
-folded with ESMFold (`lib/scrmsd.py`) and Kabsch-RMSD'd against the protein's relaxed
-backbone, so all three comparison models are scored against the same ground truth.
-`lib/relaxed_pdb.py` aligns the deposited chain to the trajectory's own residue sequence and
-returns the residue correspondence, since the two resolve different residue sets (and for an
-mdCATH domain, the deposited chain is much longer than the simulated domain).
-
 ## Metrics logged (a la `scripts/train_residue_classifier.py`)
 
 Every run additionally logs the *complete* metric set
@@ -48,7 +41,6 @@ and stds are over proteins):
 - `pred_seqs` (`<split>_pred_seqs` outside the val split) -- a `wandb.Table` of
   every argmax design, one row per protein, labelled by `pdb` (`<pdb>_<chain>`
   for ATLAS, the CATH domain id for mdCATH)
-- `<split>_rmsd_{mean,std}` -- scRMSD, under run_val's key
 - `params` -- trainable parameter count
 
 ## ATLAS → DynamicMPNN: 5-fold CV eval script
@@ -126,9 +118,8 @@ today's run.
 
 Two things are shared across the grid rather than redone per *k*, because
 neither depends on ensemble size and redoing them would add a second moving
-variable: the conformer **pool** (built once at `--pool-size` = max(grid), so
-every *k* draws from the same candidate frames) and the scRMSD machinery
-(relaxed reference structures + ESMFold). The seed is reset identically before
+variable: the conformer **pool** is built once at `--pool-size` = max(grid), so
+every *k* draws from the same candidate frames. The seed is reset identically before
 each point, so weight init and the *k*-of-pool draw are controlled too.
 
 One trap worth naming: `get_entries` **silently duplicates** conformers when a

@@ -13,10 +13,9 @@
 #     the grid run out to k=32 in the same footprint as today's --k 10 --batch-size 2 run.
 #
 # ONE job for the whole grid, not one job per k. The conformer pool (an O(n_frames^2)
-# pairwise-TM pass per protein), the relaxed scRMSD reference structures (downloaded from
-# files.rcsb.org) and ESMFold (a 2.8B-parameter Hugging Face download) are all built once
-# and reused by every k -- none of them depend on ensemble size, and rebuilding the pool per
-# k would additionally let each k sample from a differently-chosen set of frames.
+# pairwise-TM pass per protein) is built once and reused by every k -- it does not depend on
+# ensemble size, and rebuilding the pool per k would additionally let each k sample from a
+# differently-chosen set of frames.
 #
 # Each k still logs its own W&B run (DynamicMPNN_atlas_ksweep_k<k>), all sharing one group
 # so they overlay in a single plot, plus a _summary run holding the recovery-vs-k table.
@@ -24,8 +23,8 @@
 # interrupted sweep keeps the points that finished.
 #
 # Like train.sub, this stays on the trajectory store: the ensemble input IS the thing being
-# benchmarked, so it is not retargeted onto relaxed structures (those are the scRMSD
-# reference only, shared with comparisons/{MapDiff,PiFold}).
+# benchmarked, so it is not retargeted onto relaxed structures (unlike
+# comparisons/{MapDiff,PiFold}).
 #
 # ATLAS and mdCATH sweep SEPARATELY, one job each. ATLAS is the default; for mdCATH:
 #
@@ -33,7 +32,7 @@
 #       DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
 #       DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv'
 #
-# To split the grid across jobs (12 points x 8 epochs x per-epoch ESMFold scoring is a long
+# To split the grid across jobs (12 points x 8 epochs is a long
 # single job, and this machine is shared), submit it in chunks -- the pool is cached in the
 # job's scratch, so only the first chunk pays for preprocessing:
 #
@@ -88,12 +87,11 @@ when_to_transfer_output = ON_EXIT_OR_EVICT
 # sweep_k_<ds>.csv is rewritten after every completed k, so this brings the finished points
 # home even if the job is evicted part-way through the grid.
 transfer_output_files = sweep_k_$(DS_NAME).csv, logs
-# ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time, and
-# lib/relaxed_pdb.py downloads the relaxed structures from files.rcsb.org, so this needs a
-# machine with internet access -- the same one train.sub uses.
+# W&B logging needs internet access, so this needs a machine that has it -- the same one
+# train.sub uses.
 Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
-transfer_input_files = sweep_k.sh, sweep_k.py, train.py, DynamicMPNN.tar.gz, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../../api_keys.txt, ../../scripts/load_dynamics.py, $(DS_H5), $(DS_CSV)
+transfer_input_files = sweep_k.sh, sweep_k.py, train.py, DynamicMPNN.tar.gz, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../lib/dataset_splits.py, ../../../api_keys.txt, ../../scripts/load_dynamics.py, $(DS_H5), $(DS_CSV)
 
 request_cpus = 8
 request_memory = 384GB

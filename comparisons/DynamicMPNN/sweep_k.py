@@ -15,8 +15,7 @@ three things a sweep needs that a single run does not:
      ONCE, at `--pool-size` = max(grid), and every k draws its k conformers out of that same
      pool. Rebuilding it per k would repeat the O(n_frames^2) pairwise-TM pass for nothing,
      and -- worse -- would let each k sample from a differently-chosen pool, which is a
-     second variable moving alongside the one being swept. ESMFold (scRMSD) and the relaxed
-     reference structures are likewise loaded once and shared.
+     second variable moving alongside the one being swept.
 
   2. **A VRAM budget instead of a fixed batch size.** `forward_single_chain` embeds and
      encodes all k conformers before pooling them (node/edge activations are [N, k, D] and
@@ -68,7 +67,7 @@ from tqdm import tqdm
 
 # `import train` must come first: train.py is what puts lib/, scripts/ and
 # DynamicMPNN/src on sys.path (it mirrors the flat-import convention the rest of the repo's
-# CHTC scripts use), so the `dataset_splits` / `scrmsd` / `dynamicmpnn` imports below resolve
+# CHTC scripts use), so the `dataset_splits` / `dynamicmpnn` imports below resolve
 # only after it has run. Do not let an import sorter reorder these.
 from train import (
     DEVICE,
@@ -79,12 +78,10 @@ from train import (
     build_processed_dataset,
     filter_by_length,
     load_pretrained_weights,
-    load_scrmsd_references,
     run_validation,
 )
 
 import dataset_splits
-from scrmsd import load_esmfold
 
 from dynamicmpnn import constants
 from dynamicmpnn.datamodules.pt_dataset import PTFileDataset
@@ -130,7 +127,6 @@ def parse_args():
     parser.add_argument("--index-csv", type=Path, default=None)
     parser.add_argument("--val-fold", type=int, default=dataset_splits.DEFAULT_VAL_FOLD)
     parser.add_argument("--test-fold", type=int, default=dataset_splits.DEFAULT_TEST_FOLD)
-    parser.add_argument("--pdb-cache", type=Path, default=THIS_DIR / "pdb_cache")
     parser.add_argument("--processed-dir", type=Path, default=None)
     parser.add_argument("--max-length", type=int, default=dataset_splits.MAX_LENGTH)
     parser.add_argument("--course-grain", type=int, default=25)
@@ -226,8 +222,8 @@ def build_datasets(pdb_lists: dict, features_cfg, processed_dir: Path) -> tuple:
     datasets, pdb_orders = {}, {}
     for split in ("train", "val", "test"):
         # Only val/test need PdbTrackingFeaturiser -- run_validation maps batches back to
-        # pdb_codes through it to look up scRMSD references -- but using it for all three
-        # keeps the "featurized n/m" bookkeeping uniform.
+        # pdb_codes through it to label each design -- but using it for all three keeps the
+        # "featurized n/m" bookkeeping uniform.
         tracker = PdbTrackingFeaturiser(hydra.utils.instantiate(
             features_cfg, split=split, device="cpu", distance_eps=DISTANCE_EPS))
         datasets[split] = PTFileDataset(
@@ -241,8 +237,7 @@ def build_datasets(pdb_lists: dict, features_cfg, processed_dir: Path) -> tuple:
     return datasets, pdb_orders
 
 
-def train_one_k(k, args, pdb_lists, processed_dir, scrmsd_refs, esmfold_tokenizer,
-                esmfold_model, group_name):
+def train_one_k(k, args, pdb_lists, processed_dir, group_name):
     """One full train+val+test run at a single k. Returns its test metrics."""
     batch_size, grad_accum = batch_size_for_k(
         k, args.conf_budget, args.proteins_per_step, args.batch_size)
@@ -361,8 +356,7 @@ def train_one_k(k, args, pdb_lists, processed_dir, scrmsd_refs, esmfold_tokenize
         logger.info(f"k={k} epoch {epoch}: train loss "
                     f"{total_loss / max(len(loaders['train']), 1):.4f}")
 
-        metrics = run_validation(model, loaders["val"], crit, pdb_orders["val"], scrmsd_refs,
-                                 esmfold_tokenizer, esmfold_model, epoch, run,
+        metrics = run_validation(model, loaders["val"], crit, pdb_orders["val"], epoch, run,
                                  num_params=num_params)
         print(f"k={k} epoch {epoch}: top-1 {metrics['val_top1_acc_mean']:.4f} "
               f"perp {metrics['val_perp_mean']:.4f}")
@@ -371,8 +365,7 @@ def train_one_k(k, args, pdb_lists, processed_dir, scrmsd_refs, esmfold_tokenize
     # "final" and "selected" are the same model at every k -- nothing the test split touched,
     # and no per-k model selection to make the points incomparable.
     logger.info(f"k={k}: scoring the held-out test split ({len(pdb_orders['test'])} proteins)")
-    test_metrics = run_validation(model, loaders["test"], crit, pdb_orders["test"], scrmsd_refs,
-                                  esmfold_tokenizer, esmfold_model, args.epochs - 1, run,
+    test_metrics = run_validation(model, loaders["test"], crit, pdb_orders["test"], args.epochs - 1, run,
                                   num_params=num_params, split_name="test")
     run.summary.update({m: v for m, v in test_metrics.items() if isinstance(v, (int, float))})
     run.finish()
@@ -424,9 +417,8 @@ def log_summary(rows, args, k_grid, group_name):
     # than from whatever the working tree happens to hold now.
     artifact = wandb.Artifact(name="scripts", type="model_file")
     for dependency in (THIS_DIR / "sweep_k.py", THIS_DIR / "train.py",
-                       REPO_ROOT / "lib" / "scrmsd.py", REPO_ROOT / "lib" / "stats_utils.py",
+                       REPO_ROOT / "lib" / "stats_utils.py",
                        REPO_ROOT / "lib" / "residue_classifier_dataset.py",
-                       REPO_ROOT / "lib" / "relaxed_pdb.py",
                        REPO_ROOT / "lib" / "dataset_splits.py",
                        REPO_ROOT / "scripts" / "load_dynamics.py"):
         if dependency.exists():
@@ -495,21 +487,11 @@ def main():
     )
     check_pool_sizes(processed_dir, all_pdbs, max_k)
 
-    # Both loaded once and reused by every k: the relaxed reference structures are fetched
-    # over the network (files.rcsb.org) and ESMFold is a 2.8B-parameter download, neither of
-    # which has anything to do with ensemble size.
-    scrmsd_refs = load_scrmsd_references(traj_h5, pdb_lists["val"] + pdb_lists["test"],
-                                         args.pdb_cache)
-    logger.info(f"Loaded relaxed reference structures for {len(scrmsd_refs)}/"
-                f"{len(pdb_lists['val']) + len(pdb_lists['test'])} val+test proteins (scRMSD)")
-    esmfold_tokenizer, esmfold_model = load_esmfold(device=DEVICE)
-
     rows = []
     for k in k_grid:
         logger.info(f"===== sweep point k={k} ({k_grid.index(k) + 1}/{len(k_grid)}) =====")
         try:
-            rows.append(train_one_k(k, args, pdb_lists, processed_dir, scrmsd_refs,
-                                    esmfold_tokenizer, esmfold_model, group_name))
+            rows.append(train_one_k(k, args, pdb_lists, processed_dir, group_name))
         except torch.cuda.OutOfMemoryError:
             # Memory grows monotonically with k, so the first OOM is the end of the usable
             # grid -- stop and keep the points already scored rather than losing the sweep.
@@ -530,12 +512,11 @@ def main():
 
     log_summary(rows, args, k_grid, group_name)
 
-    print(f"\n{'k':>4} {'top1':>8} {'top5':>8} {'perp':>8} {'scRMSD':>8}  (held-out test)")
+    print(f"\n{'k':>4} {'top1':>8} {'top5':>8} {'perp':>8}  (held-out test)")
     for row in rows:
         print(f"{row['k']:>4} {row.get('test_top1_acc_mean', float('nan')):>8.4f} "
               f"{row.get('test_top5_acc_mean', float('nan')):>8.4f} "
-              f"{row.get('test_perp_mean', float('nan')):>8.4f} "
-              f"{row.get('test_rmsd_mean', float('nan')):>8.4f}")
+              f"{row.get('test_perp_mean', float('nan')):>8.4f}")
 
 
 if __name__ == "__main__":

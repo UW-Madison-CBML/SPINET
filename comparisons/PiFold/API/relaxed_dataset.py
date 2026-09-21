@@ -10,8 +10,7 @@ deposited chain to the single CATH *domain* the `domain` id names (`12asA00` -> 
 chain `A`, domain 02).
 
 (`comparisons/DynamicMPNN` deliberately still trains on MD conformer ensembles -- that
-ensemble input is the thing being benchmarked -- and uses relaxed structures only as its
-scRMSD reference.)
+ensemble input is the thing being benchmarked.)
 
 ATLAS and mdCATH are trained and evaluated separately (`--data_name ATLAS` / `MDCATH`),
 matching scripts/train_residue_classifier.py's `--ds-name`. Splits come from

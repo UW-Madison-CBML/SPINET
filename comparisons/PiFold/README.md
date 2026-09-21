@@ -14,8 +14,8 @@ re-cloning/re-pulling and re-tarring always works (same pattern as
 API/relaxed_dataset.py   new: relaxed (deposited) PDB -> PiFold dataset, for ATLAS and mdCATH
 API/dataloader.py        + the ATLAS/MDCATH branch that builds it
 API/__init__.py          + re-export of RelaxedStructures
-parser.py                + dataset-selection, scRMSD and W&B flags
-main.py                  + W&B logging and the scRMSD pass
+parser.py                + dataset-selection and W&B flags
+main.py                  + W&B logging and the per-protein metric pass
 run_pifold.sh            CHTC entry point: extract, overlay, run
 pifold.sub               submit file
 Dockerfile / build_and_push.sh
@@ -53,8 +53,7 @@ chain to the single CATH *domain* the `domain` id names (e.g. `12asA00` → entr
 chain `A`, domain 02). Downloads are cached under `pdb_cache/` in the job's scratch dir.
 
 (`comparisons/DynamicMPNN` deliberately does *not* do this — it keeps training on MD
-conformer ensembles, since that ensemble input is the thing being benchmarked. It uses
-the relaxed structures only as the scRMSD reference.)
+conformer ensembles, since that ensemble input is the thing being benchmarked.)
 
 ATLAS and mdCATH are trained and evaluated **separately**, one job each, matching
 `scripts/train_residue_classifier.py`'s `--ds-name`. Splits come from
@@ -98,10 +97,6 @@ The trajectory store and split index csv are staged on Pelican and transferred i
 - per-epoch train/valid loss and perplexity
 - held-out perplexity and sequence recovery (median/mean/std), per upstream's
   `ProDesign.test_one_epoch`
-- **scRMSD** on the final pass: each held-out design is folded with ESMFold
-  (`lib/scrmsd.py`) and Kabsch-RMSD'd against that protein's ground-truth relaxed
-  backbone — the same self-consistency metric `comparisons/{MapDiff,DynamicMPNN}`
-  compute, so results are directly comparable. Pass `--scrmsd 0` to skip it.
 
 Every run additionally logs the *complete* metric set
 `scripts/train_residue_classifier.py`'s `run_val` produces, under exactly the
@@ -118,7 +113,6 @@ and stds are over proteins):
 - `pred_seqs` (`<split>_pred_seqs` outside the val split) -- a `wandb.Table` of
   every argmax design, one row per protein, labelled by `pdb` (`<pdb>_<chain>`
   for ATLAS, the CATH domain id for mdCATH)
-- `<split>_rmsd_{mean,std}` -- scRMSD, under run_val's key
 - `params` -- trainable parameter count
 
 W&B auth comes from `api_keys.txt` (line 1 = HF token, last line = W&B key), which
