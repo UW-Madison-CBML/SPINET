@@ -113,7 +113,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
 
             for i, gt_data in enumerate(gt_list):
                 pred_data = data_list[i]
-                pred_pdbs.append(gt_data.traj_id if isinstance(gt_data.traj_id, str) else gt_data.traj_id[0])
+                pred_pdbs.append(gt_data.traj_id.split("/")[0] if isinstance(gt_data.traj_id, str) else gt_data.traj_id[0].split("/")[0])
 
                 pred_idx = pred_data.x.argmax(dim=-1) # (R_i,) predicted class index per residue, protein i (R_i = residue count, varies per protein)
 
@@ -231,8 +231,12 @@ def interpret_sheaves(loader, model, run, device):
 
     # initiate img_dict
     img_dict = {}
+    spectral_gaps = []# 1st eig - 2nd eig
+    top_eig = []
+    least_eig = []
+    traj_ids = []
     with torch.no_grad():
-        for batch in tqdm(loader, desc=f"Loading Sheaves", leave=False):
+        for batch in tqdm(loader, desc=f"loading sheaves", leave=False):
 
             data = batch.to_data_list()[0].to(device)
             data = data.sort() 
@@ -241,11 +245,13 @@ def interpret_sheaves(loader, model, run, device):
             first_sheaf = first_sheaf.cpu()
             last_sheaf = last_sheaf.cpu()
             edge_index = data.edge_index.cpu()
-            traj_id = data.traj_id if isinstance(data.traj_id, str) else data.traj_id[0]
+            traj_id = data.traj_id.split("/")[0] if isinstance(data.traj_id, str) else data.traj_id[0].split("/")[0]
+
             first_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], first_sheaf, edge_index)
             last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf, edge_index)
             first_eigs = torch.linalg.eig(first_sheaf_laplacian)
             last_eigs = torch.linalg.eig(last_sheaf_laplacian)
+
             # we just need the real components here, sheaf laplacian is real positive semi-definite
             first_eigvals = first_eigs.eigenvalues.real
             first_eigvecs = first_eigs.eigenvectors.real 
@@ -253,8 +259,14 @@ def interpret_sheaves(loader, model, run, device):
             last_eigvecs = last_eigs.eigenvectors.real
 
             # work with first sheaf
-            largest_eigval_idx = first_eigvals.argmax().item()
-            largest_eigvec = first_eigvecs[largest_eigval_idx]
+            largest_idx, second_largest_idx = torch.topk(first_eigvals, 2).indices
+            spectral_gaps.append((first_eigvals[largest_idx]-first_eigvals[second_largest_idx]).item())
+            top_eig.append(first_eigvals[largest_idx].item())
+            smallest_idx = first_eigvals.argmin(dim=-1).item()
+            least_eig.append(first_eigvals[smallest_idx].item())
+            
+            largest_eigvec = first_eigvecs[largest_idx]
+            traj_ids.append(traj_id)
 
             # need to be careful with reshape
             per_node_signals = largest_eigvec.reshape(-1, d)
@@ -262,9 +274,10 @@ def interpret_sheaves(loader, model, run, device):
             fig, ax = plt.subplots()
             ax.imshow(covariance_mat)
             ax.set_title(f"{traj_id}")
-            img_dict[f"{traj_id.split('/')[0]}_first_sheaf_first_eigvec_covariance"] = wandb.Image(fig)
+            img_dict[f"{traj_id}_first_sheaf_first_eigvec_covariance"] = wandb.Image(fig)
             plt.close(fig)
-
+    eig_df = pd.DataFrame({"pdb":traj_ids, "top_eig":top_eig, "least_eig": least_eig, "spectral_gap":spectral_gaps})
+    img_dict["eigval_df"] = wandb.Table(dataframe=eig_df)
     run.log(img_dict)
             
             
@@ -559,7 +572,7 @@ if __name__ == "__main__":
     parser.add_argument('--ablate-sheaves', action="store_true")
     parser.add_argument('--ablate-edge-features', action="store_true")
     parser.add_argument('--ablate-attention', action="store_true")
-    parser.add_argument('--restriction-map-type', type=str, default="low_rank", choices=['low_rank', 'orthogonal', 'arbitrary'])
+    parser.add_argument('--restriction-map-type', type=str, default="arbitrary", choices=['low_rank', 'orthogonal', 'arbitrary'])
     parser.add_argument('--resume', type=str, default="")
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--cross-val', type=int, default=0)

@@ -127,7 +127,9 @@ def main(seq_csv):
 
         pred_seqs = batch_df["seq"].to_list()
 
-        rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask,esmfold_model, esmfold_tokenizer, device=DEVICE, save_pdbs = save_pdbs) #list of pdb paths to save sturcture
+        rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask,esmfold_model, esmfold_tokenizer, device=DEVICE)
+        if rmsd.numel() == 0:
+            print("no rmsds returned somehow")
         rmsds.extend(rmsd.tolist())
     rmsds = np.array(rmsds)
     print(f"${rmsds.mean().item():.3f} \\pm {rmsds.std().item():.3f}$")
