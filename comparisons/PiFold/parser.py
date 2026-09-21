@@ -49,6 +49,14 @@ def create_parser():
                               "whole deposited chains uncropped.")
     parser.add_argument('--pdb_cache', default='', type=str,
                          help='Where downloaded RCSB entries are cached (default: <data_root>/pdb_cache)')
+    parser.add_argument('--structure_source', default='relaxed', choices=['relaxed', 'frame'],
+                         help="What each protein's coordinates come from: its deposited RCSB entry "
+                              "('relaxed', the default) or one frame of its MD trajectory ('frame')")
+    parser.add_argument('--frame_seed', default=dataset_splits.SEED, type=int,
+                         help='--structure_source frame only: seeds the per-protein frame draw')
+    parser.add_argument('--frame_index', default=None, type=int,
+                         help='--structure_source frame only: use this frame index for every protein '
+                              'instead of drawing one at random (0 = first frame)')
     parser.add_argument('--val_fold', default=dataset_splits.DEFAULT_VAL_FOLD, type=int,
                          help='ATLAS only: cross_val fold used as the validation split')
     parser.add_argument('--test_fold', default=dataset_splits.DEFAULT_TEST_FOLD, type=int,

@@ -1,7 +1,8 @@
 """Overlaid onto a pristine PiFold checkout (see ../run_pifold.sh).
 
-Adds the ATLAS and MDCATH datasets, both served from relaxed (deposited) PDB structures by
-`API.relaxed_dataset.RelaxedStructures`. They are trained and evaluated **separately** --
+Adds the ATLAS and MDCATH datasets, both served by `API.relaxed_dataset.RelaxedStructures`
+-- from relaxed (deposited) PDB structures by default, or from one random MD trajectory frame
+per protein with `--structure_source frame`. They are trained and evaluated **separately** --
 one run each, `--data_name ATLAS` or `--data_name MDCATH` -- matching
 scripts/train_residue_classifier.py's `--ds-name`. Each has three disjoint splits (see
 lib/dataset_splits.py): 'test' is held out from training and from model selection.
@@ -39,6 +40,9 @@ def load_data(data_name, method, batch_size, data_root, num_workers=8, **kwargs)
             pdb_cache=kwargs.get('pdb_cache') or None,
             val_fold=kwargs.get('val_fold', 0),
             test_fold=kwargs.get('test_fold', 4),
+            structure_source=kwargs.get('structure_source', 'relaxed'),
+            frame_seed=kwargs.get('frame_seed', 42),
+            frame_index=kwargs.get('frame_index'),
         )
         train_set, valid_set, test_set = map(lambda x: copy.copy(x), [relaxed_set] * 3)
         valid_set.change_mode('valid')

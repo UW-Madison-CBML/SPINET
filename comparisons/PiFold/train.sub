@@ -40,18 +40,23 @@ executable              = train.sh
 # --data_root ./ points API/relaxed_dataset.py at the job's scratch dir, where HTCondor
 # drops the split index and trajectory store flat. Everything here is forwarded straight
 # to main.py (see parser.py).
-arguments               = --data_name $(DS_NAME) --data_root ./ --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt
+#
+# $(STRUCTURE_SOURCE) picks what PiFold trains on: 'relaxed' (each protein's deposited RCSB
+# entry, the default) or 'frame' (one random frame of its MD trajectory, lib/traj_frames.py).
+# Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
+STRUCTURE_SOURCE        = relaxed
+arguments               = --data_name $(DS_NAME) --data_root ./ --structure_source $(STRUCTURE_SOURCE) --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt
 
 # The pristine PiFold tarball, this folder's overlay, the API-key file (train.sh
-# splits the W&B key out of it into wandb_api.txt), lib/{relaxed_pdb,dataset_splits,
+# splits the W&B key out of it into wandb_api.txt), lib/{relaxed_pdb,traj_frames,dataset_splits,
 # stats_utils}.py (shared across all models -- see ../../lib), and the dataset's trajectory
 # store + split index.
-transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
+transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
 transfer_output_files   = PiFold/results
-transfer_output_remaps  = "PiFold/results = ../results/$(DS_NAME)_$(Cluster)_$(Process)"
+transfer_output_remaps  = "PiFold/results = ../results/$(DS_NAME)_$(STRUCTURE_SOURCE)_$(Cluster)_$(Process)"
 
 log                     = logs/pifold_$(DS_NAME)_$(Cluster)_$(Process).log
 output                  = logs/pifold_$(DS_NAME)_$(Cluster)_$(Process).out

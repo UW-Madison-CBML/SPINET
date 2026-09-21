@@ -43,9 +43,9 @@ Then set `docker_image = <your_dockerhub_username>/pifold:latest` in `pifold.sub
 
 ## 3. Dataset
 
-PiFold is a static-structure inverse-folding model, so it trains and evaluates on each
-protein's **relaxed (deposited) PDB entry**, not on a frame pulled out of the MD
-trajectory. `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset
+PiFold is a static-structure inverse-folding model, so by default it trains and evaluates on
+each protein's **relaxed (deposited) PDB entry** rather than on a frame pulled out of the MD
+trajectory (`--structure_source frame` switches that; see below). `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset
 id names, and crops it to the residues the trajectory covers (using the trajectory's own
 residue list as the reference sequence), so PiFold scores the same residues as every
 other model in the comparison. For mdCATH that cropping is also what reduces a deposited
@@ -54,6 +54,30 @@ chain `A`, domain 02). Downloads are cached under `pdb_cache/` in the job's scra
 
 (`comparisons/DynamicMPNN` deliberately does *not* do this — it keeps training on MD
 conformer ensembles, since that ensemble input is the thing being benchmarked.)
+
+### Training on MD frames instead (`--structure_source frame`)
+
+`--structure_source frame` swaps the coordinate source for one random frame of each
+protein's MD trajectory (`lib/traj_frames.py`), leaving splits, length filtering,
+featurization, metrics and W&B keys untouched — so "deposited structure vs. a single MD
+frame" is a one-flag ablation rather than a different pipeline:
+
+```bash
+python main.py --data_name ATLAS --data_root ./ --structure_source frame
+```
+
+or `condor_submit train.sub STRUCTURE_SOURCE=frame` (the results directory and W&B run are
+named after the source, so the two runs do not collide).
+
+- No RCSB download and no cropping: a frame already spans exactly the residues the
+  trajectory simulates (for mdCATH, exactly the domain), so `--pdb_cache` is unused.
+- The frame is drawn deterministically from `(--frame_seed, protein id)`, so a rerun — and
+  MapDiff's run at the same seed — sees the same frame per protein. `--frame_index 0` pins
+  the first frame for every protein instead.
+- Coordinates are converted from the store's nanometres to Angstroms, without which every
+  distance feature collapses into the lowest RBF bin.
+- Frames are **backbone-only** (`CA, N, C, O`), which PiFold's featurizer takes as-is since
+  it reads exactly those four atoms.
 
 ATLAS and mdCATH are trained and evaluated **separately**, one job each, matching
 `scripts/train_residue_classifier.py`'s `--ds-name`. Splits come from
