@@ -112,6 +112,8 @@ def main(seq_csv):
     os.makedirs("pred_pdbs", exist_ok=True)
     for i in tqdm(range(0, len(seq_df), batch_size), desc="running eval"):
         batch_df = seq_df.iloc[i:min(i+batch_size, len(seq_df)-1)]
+        if len(batch_df) == 0:
+            continue
 
         backbone_tensors = [backbone_dict[pdb] for pdb in batch_df["pdb"]]
         save_pdbs = [os.path.abspath(os.path.join("pred_pdbs", f"{pdb}.pdb")) for pdb in batch_df["pdb"]]

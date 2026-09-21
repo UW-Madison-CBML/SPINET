@@ -1,1 +1,1 @@
---run-name resume --restriction-map-type arbitrary --ablate-attention --resume our_model
+--run-name sheaf_test --restriction-map-type arbitrary --ablate-attention --resume our_model --epochs 0

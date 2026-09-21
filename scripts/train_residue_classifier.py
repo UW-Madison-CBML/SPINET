@@ -227,7 +227,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
 
     run.log(prf_dict | {f"epoch_{val_name}_loss": avg_loss, "epoch": epoch})
 
-def interpret_sheaves(loader, model, run, device):
+def interpret_sheaves(loader, model, run, device, rng):
 
     # initiate img_dict
     img_dict = {}
@@ -235,50 +235,77 @@ def interpret_sheaves(loader, model, run, device):
     top_eig = []
     least_eig = []
     traj_ids = []
-    with torch.no_grad():
-        for batch in tqdm(loader, desc=f"loading sheaves", leave=False):
+    seen_pdbs = set()
+    with h5py.File("laplacians.h5", "w") as h5_file:
+        with torch.no_grad():
+            for batch in tqdm(loader, desc=f"loading sheaves", leave=False):
+                
+                data = batch.to_data_list()[0].to(device)
+                traj_id = data.traj_id.split("/")[0] if isinstance(data.traj_id, str) else data.traj_id[0].split("/")[0]
+                if(traj_id in seen_pdbs):
+                    continue
+                else:
+                    seen_pdbs.add(traj_id)
 
-            data = batch.to_data_list()[0].to(device)
-            data = data.sort() 
-            _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
-            _,d,_ = first_sheaf.shape
-            first_sheaf = first_sheaf.cpu()
-            last_sheaf = last_sheaf.cpu()
-            edge_index = data.edge_index.cpu()
-            traj_id = data.traj_id.split("/")[0] if isinstance(data.traj_id, str) else data.traj_id[0].split("/")[0]
 
-            first_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], first_sheaf, edge_index)
-            last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf, edge_index)
-            first_eigs = torch.linalg.eig(first_sheaf_laplacian)
-            last_eigs = torch.linalg.eig(last_sheaf_laplacian)
+                data = data.sort() 
+                _, first_sheaf, last_sheaf = model(data, return_sheaf=True)
+                _,d,_ = first_sheaf.shape
+                first_sheaf = first_sheaf.cpu()
+                last_sheaf = last_sheaf.cpu()
+                edge_index = data.edge_index.cpu()
+                grp = h5_file.require_group(traj_id)
 
-            # we just need the real components here, sheaf laplacian is real positive semi-definite
-            first_eigvals = first_eigs.eigenvalues.real
-            first_eigvecs = first_eigs.eigenvectors.real 
-            last_eigvals = last_eigs.eigenvalues.real
-            last_eigvecs = last_eigs.eigenvectors.real
+                first_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], first_sheaf, edge_index)
+                last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf, edge_index)
+                shuffled_first_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], first_sheaf[torch.randperm(edge_index.shape[1], generator=rng)], edge_index)
+                shuffled_last_sheaf_laplacian = sheaf_laplacian(data.x.shape[0], last_sheaf[torch.randperm(edge_index.shape[1], generator=rng)], edge_index)
+                graph_laplacian = sheaf_laplacian(data.x.shape[0], torch.ones(edge_index.shape[1], 1, 1, device=data.x.device), edge_index)
 
-            # work with first sheaf
-            largest_idx, second_largest_idx = torch.topk(first_eigvals, 2).indices
-            spectral_gaps.append((first_eigvals[largest_idx]-first_eigvals[second_largest_idx]).item())
-            top_eig.append(first_eigvals[largest_idx].item())
-            smallest_idx = first_eigvals.argmin(dim=-1).item()
-            least_eig.append(first_eigvals[smallest_idx].item())
-            
-            largest_eigvec = first_eigvecs[largest_idx]
-            traj_ids.append(traj_id)
 
-            # need to be careful with reshape
-            per_node_signals = largest_eigvec.reshape(-1, d)
-            covariance_mat = F.cosine_similarity(*torch.broadcast_tensors(per_node_signals[:,None,:], per_node_signals[None,:,:]), dim=-1)
-            fig, ax = plt.subplots()
-            ax.imshow(covariance_mat)
-            ax.set_title(f"{traj_id}")
-            img_dict[f"{traj_id}_first_sheaf_first_eigvec_covariance"] = wandb.Image(fig)
-            plt.close(fig)
-    eig_df = pd.DataFrame({"pdb":traj_ids, "top_eig":top_eig, "least_eig": least_eig, "spectral_gap":spectral_gaps})
+                grp.create_dataset("first_sheaf", data=first_sheaf_laplacian.numpy())
+                grp.create_dataset("last_sheaf", data=last_sheaf_laplacian.numpy())
+                grp.create_dataset("shuffled_first_sheaf", data=shuffled_first_sheaf_laplacian.numpy())
+                grp.create_dataset("shuffled_last_sheaf", data=shuffled_last_sheaf_laplacian.numpy())
+                grp.create_dataset("graph", data=graph_laplacian.numpy())
+
+                grp["first_sheaf"].attrs["timesteps"] = data.index.cpu().numpy()
+                grp["last_sheaf"].attrs["timesteps"] = data.index.cpu().numpy()
+                grp["shuffled_first_sheaf"].attrs["timesteps"] = data.index.cpu().numpy()
+                grp["shuffled_last_sheaf"].attrs["timesteps"] = data.index.cpu().numpy()
+                grp["graph"].attrs["timesteps"] = data.index.cpu().numpy()
+
+
+                """first_eigs = torch.linalg.eig(first_sheaf_laplacian)
+                last_eigs = torch.linalg.eig(last_sheaf_laplacian)
+
+                # we just need the real components here, sheaf laplacian is real positive semi-definite
+                first_eigvals = first_eigs.eigenvalues.real
+                first_eigvecs = first_eigs.eigenvectors.real 
+                last_eigvals = last_eigs.eigenvalues.real
+                last_eigvecs = last_eigs.eigenvectors.real
+
+                # work with first sheaf
+                largest_idx, second_largest_idx = torch.topk(first_eigvals, 2).indices
+                spectral_gaps.append((first_eigvals[largest_idx]-first_eigvals[second_largest_idx]).item())
+                top_eig.append(first_eigvals[largest_idx].item())
+                smallest_idx = first_eigvals.argmin(dim=-1).item()
+                least_eig.append(first_eigvals[smallest_idx].item())
+                
+                largest_eigvec = first_eigvecs[largest_idx]
+                traj_ids.append(traj_id)
+
+                # need to be careful with reshape
+                per_node_signals = largest_eigvec.reshape(-1, d)
+                covariance_mat = F.cosine_similarity(*torch.broadcast_tensors(per_node_signals[:,None,:], per_node_signals[None,:,:]), dim=-1)
+                fig, ax = plt.subplots()
+                ax.imshow(covariance_mat)
+                ax.set_title(f"{traj_id}")
+                img_dict[f"{traj_id}_first_sheaf_first_eigvec_covariance"] = wandb.Image(fig)
+                plt.close(fig)"""
+    """eig_df = pd.DataFrame({"pdb":traj_ids, "top_eig":top_eig, "least_eig": least_eig, "spectral_gap":spectral_gaps})
     img_dict["eigval_df"] = wandb.Table(dataframe=eig_df)
-    run.log(img_dict)
+    run.log(img_dict)"""
             
             
          
@@ -558,7 +585,7 @@ def train_residue_classifier(args_dict):
     run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="test", test_val=test_val)
 
     if not ablate_sheaves and other_model=="spinet":
-        interpret_sheaves(single_graph_val_loader, model, run, DEVICE)
+        interpret_sheaves(single_graph_val_loader, model, run, DEVICE, torch_rng)
 
     
     run.finish()
