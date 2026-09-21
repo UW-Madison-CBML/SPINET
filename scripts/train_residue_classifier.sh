@@ -1,4 +1,6 @@
 #!/bin/bash
+mkdir -p logs/
+
 python -m ruff check . --select F821,E9 || exit 1
 
 ls -R

@@ -10,19 +10,18 @@ universe = docker
 shell = ./train_residue_classifier.sh $(ablation)
 
 #  queue number assigned to this set of jobs at the time of submission.
-log = train_residue_classifier_$(Cluster)_$(Process).log
-error = train_residue_classifier_$(Cluster)_$(Process).err
-output = train_residue_classifier_$(Cluster)_$(Process).out
+log = logs/train_residue_classifier_$(Cluster)_$(Process).log
+error = logs/train_residue_classifier_$(Cluster)_$(Process).err
+output = logs/train_residue_classifier_$(Cluster)_$(Process).out
 #should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
 +wantGPULab = true
 
-transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../api_keys.txt, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
+transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../../api_keys.txt, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
 transfer_output_files = laplacians.h5
 transfer_output_remaps = "laplacians.h5 = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/laplacians.h5"
-
 
 
 #file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz

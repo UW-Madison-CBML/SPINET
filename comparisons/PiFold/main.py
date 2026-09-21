@@ -36,7 +36,7 @@ from utils import *
 # lib/scrmsd.py is copied in flat next to this file (see README.md and run_pifold.sh) --
 # fall back to walking up to a lib/ directory for local/dev runs from inside the source tree.
 try:
-    from scrmsd import load_esmfold, evaluate_scrmsd
+    from scrmsd import load_esmfold, evaluate_batch_rmsd
     from stats_utils import ResidueMetrics, three_letter_codes
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
@@ -44,7 +44,7 @@ except ImportError:
         if osp.isdir(_cand):
             sys.path.insert(0, osp.abspath(_cand))
             break
-    from scrmsd import load_esmfold, evaluate_scrmsd
+    from scrmsd import load_esmfold, evaluate_batch_rmsd
     from stats_utils import ResidueMetrics, three_letter_codes
 
 # PiFold's fixed label order (API.featurizer.featurize_GTrans).
@@ -227,7 +227,7 @@ class Exp:
         Designs are produced one protein at a time (as `ProDesign._cal_recovery` does, so the
         residue order matches the dataset entry exactly). When `with_scrmsd` is set they are
         then folded in small batches and Kabsch-RMSD'd against that protein's relaxed
-        (deposited) backbone by `lib.scrmsd.evaluate_scrmsd` -- `lib.scrmsd.fold_sequences`
+        (deposited) backbone by `lib.scrmsd.evaluate_batch_rmsd` -- `lib.scrmsd.fold_sequences`
         folds each sequence on its own anyway, so the batch size only trades peak memory for
         fewer calls.
         """
@@ -267,7 +267,7 @@ class Exp:
             esmfold_tokenizer, esmfold_model = self.esmfold
             step = max(1, self.args.scrmsd_batch_size)
             for start in tqdm(range(0, len(seqs), step), desc='folding designs (ESMFold)'):
-                accumulator.add_scrmsd(evaluate_scrmsd(
+                accumulator.add_scrmsd(evaluate_batch_rmsd(
                     seqs[start:start + step], references[start:start + step],
                     esmfold_tokenizer, esmfold_model, device=self.device).tolist())
 

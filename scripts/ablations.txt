@@ -1,1 +1,2 @@
+--run-name simple_ablate_edge_features --ablate-attention --ablate-edge-features --restriction-map-type arbitrary
 --run-name sheaf_test --restriction-map-type arbitrary --ablate-attention --resume our_model --epochs 0
