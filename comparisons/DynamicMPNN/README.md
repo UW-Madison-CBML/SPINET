@@ -136,8 +136,40 @@ mkdir -p logs && condor_submit sweep_k.sub          # ATLAS, k = 2..32
 
 Each *k* logs its own W&B run (`DynamicMPNN_atlas_ksweep_k<k>`), all under one
 `group` so they overlay; a `_summary` run holds the `recovery_vs_k` table. The
-same table is rewritten to `sweep_k_atlas.csv` after **every** completed point
+same table is rewritten to `--results-csv` after **every** completed point
 and transferred back on eviction, so an interrupted sweep keeps what finished.
+
+**Running the grid in chunks.** Twelve points x 8 epochs is a long single job on a
+shared machine, and a sweep that is evicted or OOMs in the tail is resumed by
+submitting the rest of the grid rather than the whole thing again. Two invariants:
+
+```bash
+condor_submit sweep_k.sub K_GRID=2,3,4,5,6,8,10,12,16,20 POOL_SIZE=32 RESULTS_CSV=sweep_k_atlas_k2_20.csv
+condor_submit sweep_k.sub K_GRID=24,32                   POOL_SIZE=32 RESULTS_CSV=sweep_k_atlas_k24_32.csv
+python merge_sweep_csvs.py sweep_k_atlas.csv sweep_k_atlas_k2_20.csv sweep_k_atlas_k24_32.csv
+```
+
+- `POOL_SIZE` stays at the top of the **full** grid in every chunk, so each *k* draws
+  from the same candidate frames. A chunk rebuilds the pool from scratch in its own
+  job scratch, which is safe because `farthest_point_sample` is a pure argmax with no
+  RNG: same trajectory + same `--course-grain` + same `--pool-size` gives the same pool,
+  and the greedy selection means a pool of 32 extends the pool of 20 rather than
+  replacing it.
+- `RESULTS_CSV` is **unique per chunk**. `write_results_csv` opens with `w`, so two
+  chunks sharing a filename means the second job's `transfer_output_files` overwrites
+  the first job's numbers on the way home. `merge_sweep_csvs.py` stitches the chunks
+  back into one k-sorted table (union of columns; a *k* present in two chunks is an
+  error, not a silent overwrite).
+
+Each chunk's `_summary` W&B run holds only that chunk's points, so the merged CSV --
+not W&B -- is the source of truth for the full recovery-vs-*k* curve.
+
+One caveat when reading the curve across chunks: `batch_size_for_k` floors `batch_size`
+at 1 once `k >= conf_budget` (20), so k = 12, 16, 20, 24 and 32 all run at
+`batch_size` 1 x `grad_accum` 2 while k <= 10 runs at 2 x 1. The optimizer batch is
+2 proteins throughout, but the k <= 10 and k >= 12 halves of the grid differ by how
+that batch is split -- worth stating explicitly rather than reading the k=10 -> k=12
+step as an ensemble-size effect.
 
 ## Big-picture pipeline
 

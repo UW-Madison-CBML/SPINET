@@ -36,20 +36,36 @@
 # single job, and this machine is shared), submit it in chunks -- the pool is cached in the
 # job's scratch, so only the first chunk pays for preprocessing:
 #
-#   condor_submit sweep_k.sub K_GRID=2,3,4,5,6,8
-#   condor_submit sweep_k.sub K_GRID=10,12,16,20,24,32
+#   condor_submit sweep_k.sub K_GRID=2,3,4,5,6,8    RESULTS_CSV=sweep_k_atlas_k2_8.csv
+#   condor_submit sweep_k.sub K_GRID=10,12,16,20,24,32 RESULTS_CSV=sweep_k_atlas_k10_32.csv
 #
-# Note that POOL_SIZE must stay at the top of the FULL grid in that case, so every chunk
-# draws from the same pool: condor_submit sweep_k.sub K_GRID=2,3,4 POOL_SIZE=32
+# (Each of those knobs is set under an `if ! defined` below: condor_submit applies
+# command-line macros BEFORE parsing this file, so a bare assignment here would silently
+# win over the override rather than yield to it.)
+#
+# Two things have to move together when you chunk:
+#   * POOL_SIZE must stay at the top of the FULL grid, so every chunk draws from the same
+#     pool. `farthest_point_sample` is a pure argmax with no RNG, so a chunk that rebuilds
+#     the pool from scratch rebuilds exactly the pool the other chunks used.
+#   * RESULTS_CSV must be unique per chunk. sweep_k.py rewrites its results CSV with `w`
+#     after every point, so two chunks sharing a filename means the second one's transfer
+#     overwrites the first one's numbers. Merge the chunks afterwards with
+#     `python merge_sweep_csvs.py sweep_k_atlas.csv sweep_k_atlas_k*.csv`.
 
 docker_image = cmikulski4/dynamicmpnn:v8
 universe = docker
 
 ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
-DS_NAME = atlas
-DS_H5   = $(ResearchDrive)/atlas_data.h5
-DS_CSV  = $(ResearchDrive)/atlas_cross_val_index.csv
+if ! defined DS_NAME
+  DS_NAME = atlas
+endif
+if ! defined DS_H5
+  DS_H5   = $(ResearchDrive)/atlas_data.h5
+endif
+if ! defined DS_CSV
+  DS_CSV  = $(ResearchDrive)/atlas_cross_val_index.csv
+endif
 
 #DS_NAME = mdcath
 #DS_H5   = $(ResearchDrive)/mdcath_spinet_320_0.h5
@@ -57,22 +73,34 @@ DS_CSV  = $(ResearchDrive)/atlas_cross_val_index.csv
 
 # Dense at the low end, where each added conformer is a large relative increase in ensemble
 # coverage and the curve is expected to bend; log-spaced through the tail, where it is not.
-K_GRID = 2,3,4,5,6,8,10,12,16,20,24,32
+if ! defined K_GRID
+  K_GRID = 2,3,4,5,6,8,10,12,16,20,24,32
+endif
+
+# Where this job writes its recovery-vs-k table. Override it per chunk (see above) so a
+# resubmitted chunk never transfers back over another chunk's results.
+if ! defined RESULTS_CSV
+  RESULTS_CSV = sweep_k_$(DS_NAME).csv
+endif
 
 # Conformers saved per protein. Must be >= the largest k in the FULL grid -- the featurizer
 # pads a short pool by duplicating frames (get_entries' `n < self.k` branch) rather than
 # erroring, which would read as the recovery curve saturating; sweep_k.py's check_pool_sizes
 # turns that into a hard failure instead.
-POOL_SIZE = 32
+if ! defined POOL_SIZE
+  POOL_SIZE = 32
+endif
 
 # Cap on k * batch_size, the real unit of activation memory. 20 == train.sub's `--k 10` at
 # --batch-size 2, the load this machine already carries; sweep_k.py derives each k's batch
 # size from it and adds gradient accumulation so every k still takes an optimizer step every
 # 2 proteins. Lower this (not the grid) if the tail OOMs.
-CONF_BUDGET = 20
+if ! defined CONF_BUDGET
+  CONF_BUDGET = 20
+endif
 
 shell = ./sweep_k.sh --from-scratch --ds-name $(DS_NAME) --k-grid $(K_GRID) \
-        --pool-size $(POOL_SIZE) --conf-budget $(CONF_BUDGET)
+        --pool-size $(POOL_SIZE) --conf-budget $(CONF_BUDGET) --results-csv $(RESULTS_CSV)
 
 log = logs/sweep_k_$(DS_NAME)_$(Cluster)_$(Process).log
 error = logs/sweep_k_$(DS_NAME)_$(Cluster)_$(Process).err
@@ -86,7 +114,7 @@ should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 # sweep_k_<ds>.csv is rewritten after every completed k, so this brings the finished points
 # home even if the job is evicted part-way through the grid.
-transfer_output_files = sweep_k_$(DS_NAME).csv, logs
+transfer_output_files = $(RESULTS_CSV), logs
 # W&B logging needs internet access, so this needs a machine that has it -- the same one
 # train.sub uses.
 Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")

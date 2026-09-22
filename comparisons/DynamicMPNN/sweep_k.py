@@ -487,6 +487,12 @@ def main():
     )
     check_pool_sizes(processed_dir, all_pdbs, max_k)
 
+    # Create the results file before the first point so it exists even if k=grid[0] OOMs
+    # immediately. HTCondor's transfer_output_files lists it, and a missing output file
+    # holds the job without transferring anything -- including the .err log that says which
+    # k ran out of memory, which is the one thing worth having after that failure.
+    Path(args.results_csv).touch()
+
     rows = []
     for k in k_grid:
         logger.info(f"===== sweep point k={k} ({k_grid.index(k) + 1}/{len(k_grid)}) =====")
