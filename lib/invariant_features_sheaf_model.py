@@ -510,8 +510,10 @@ class NodeOnlyMLP(nn.Module):
         hidden_dim=32,
         num_classes=20,
         dropout=0.2,
+        input_slice=slice(0,15)
     ):
         super().__init__()
+        self.input_slice = input_slice
 
         # same encoder applied independently to every residue at every frame
         self.frame_encoder = nn.Sequential(
@@ -531,7 +533,7 @@ class NodeOnlyMLP(nn.Module):
         )
 
     def forward(self, data): # data.x: (N_residues, T, 15)
-        h = self.frame_encoder(data.x) # (N_residues, T, hidden_dim)
+        h = self.frame_encoder(data.x[:,:,self.input_slice]) # (N_residues, T, hidden_dim)
         h = h.mean(dim=1) # (N_residues, hidden_dim)
         data.x = self.classifier(h) # (N_residues, num_classes)
         return data

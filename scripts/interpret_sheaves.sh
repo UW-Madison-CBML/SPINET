@@ -1,4 +1,4 @@
 #!/bin/bash
 # interpret_sheaves.sh
 
-python interpret_sheaves.py
+python interpret_sheaves.py "$@"
