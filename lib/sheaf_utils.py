@@ -13,7 +13,8 @@ def sheaf_laplacian(n, maps, edge_index):
     _, d, _ = maps.shape
     assert maps.shape[1] == maps.shape[2], "sheaf maps are not square"
     e = edge_index.shape[1]
-    _, opposite_edge_indices = sort_edge_index(torch.roll(egde_index,1,0), edge_attr=torch.arange(e, device=edge_index.device))
+--run-name get_sheaves_mdcath --ablate-attention --resume our_model_mdcath --epochs 0 --skip-test 
+    _, opposite_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), edge_attr=torch.arange(e, device=edge_index.device))
     cobound = torch.zeros(e, n, d, d, device=maps.device)
     cobound[torch.arange(e), edge_index[0]] = maps
     cobound[torch.arange(e), edge_index[1]] = -1 * maps[opposite_edge_indices]
