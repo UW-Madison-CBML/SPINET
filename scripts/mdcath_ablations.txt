@@ -1,1 +1,3 @@
---run-name get_sheaves_mdcath --ablate-attention --resume our_model_mdcath --epochs 0 --skip-test
+--run-name node_only_all_mdcath --other-model node_only_all
+--run-name node_only_dihedrals_mdcath --other-model node_only_dihedrals
+--run-name node_only_positions_mdcath --other-model node_only_positions
