@@ -89,6 +89,58 @@ draws the *k* conformers it trains on by TM dissimilarity (its own
 `random.sample`. An ensemble `.pt` built before this change has no `tm_scores`
 and is rebuilt automatically.
 
+## Zero-shot: scoring the *released* checkpoints
+
+`eval_ckpt.py` / `eval_ckpt.sh` / `eval_ckpt.sub` run upstream's published
+weights over our held-out splits with no training at all:
+
+```
+condor_submit eval_ckpt.sub                        # ATLAS, single_chain_k2.ckpt
+condor_submit eval_ckpt.sub DS_NAME=mdcath \
+    DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
+    DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv'
+```
+
+Same `.pt` conformer ensembles, same splits, same `ResidueMetrics` keys as
+`train.py` — it imports the conversion and the scoring loop from it — so the
+zero-shot row drops straight into the table next to the from-scratch row. Both
+held-out splits are scored in one pass (nothing here is trained on, so there is
+no reason to hold `test` back for the end).
+
+Two things are not obvious and are worth knowing before reading the numbers:
+
+* **The released checkpoints are not the architecture `train.py` builds.** Their
+  own `hyper_parameters` record the legacy pair model — `node_in_dim (26, 2)` /
+  `edge_in_dim (17, 1)`, 4 encoder + 4 decoder layers, `representation: ca`, no
+  `sequence` node feature and no `edge_type` edge feature — against
+  `AR1_single_chain.yaml`'s 27/18, 8+4 and `pooling_strategy: single_chain_k`.
+  `config_from_ckpt` reads the config out of the checkpoint and retargets its
+  `dynamicprot_single.src.*` class paths onto the vendored `dynamicmpnn.*` ones,
+  so k2/k3/k5 all load without a hand-written yaml per checkpoint.
+* **All three are *pair* models, whatever the file name says.** The featuriser
+  they were trained with (`ProteinGraphFeaturiser`, not
+  `…SingleChain`) is hard-coded to two conformations, so `single_chain_k5.ckpt`
+  sees 2 conformers here, not 5 — the run logs `k: 2` accordingly. It also keys
+  `pyg_dict` by `member.split('_')[0].upper()`, i.e. codnas' `<PDB>_<chain>`,
+  where our pools key by `<pdb>_frame<t>`; fed ours unadapted it would resolve
+  both members to the same frame and score a "2-conformer" model on one
+  structure. `LegacyPairAdapter` picks the pair (by default the most TM-dissimilar
+  one in the pool, deterministically) and re-presents it under the naming and the
+  per-conformer fields that featuriser expects, leaving the actual feature
+  computation to upstream's own code.
+
+A third wrinkle is internal: in the pair path the encoder graph carries two nodes
+per residue while the decoder — and therefore the logits — carries one, pooled
+over the pair, so `batch.batch` is twice as long as `run_validation` expects.
+`DecoderNodeBatching` rewrites it from `num_decoder_nodes` after the forward
+pass; without it the per-protein slicing would be silently wrong.
+
+Expect ~36% top-1 on well-converted data: that is what `single_chain_k2.ckpt`
+scored on upstream's own `val_pt_single_chain` files, and it is the check that
+caught the nanometre/Angstrom bug documented at `train.py`'s `NM_TO_ANGSTROM`
+(7.3% recovery, loss 116, before the conversion). A pretrained model scoring near
+chance on our `.pt` files is evidence about *our features*, not about the model.
+
 ## Sweeping *k*: how much does ensemble size actually buy?
 
 `sweep_k.py` / `sweep_k.sub` train one model per *k* over a shared conformer
