@@ -319,7 +319,7 @@ def interpret_sheaves(loader, model, run, device, rng):
 def train_residue_classifier(args_dict):
     # hyperparameters
     epsilon = 5.0 # in Angstroms
-    learning_rate = 4e-3
+    learning_rate = 1e-3
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
@@ -344,6 +344,8 @@ def train_residue_classifier(args_dict):
     resume = args_dict["resume"] != ""
     nth_cross_val = args_dict["cross_val"]
     nth_cross_test = args_dict["cross_test"]
+    skip_test = args_dict["skip_test"]
+    temp = args_dict["temp"]
 
     assert nth_cross_val >= 0 and nth_cross_val < 5
     assert nth_cross_test >= 0 and nth_cross_test < 5
@@ -380,8 +382,8 @@ def train_residue_classifier(args_dict):
 
     # mdCATH
     else:
-        h5_path = os.path.abspath("mdcath_spinet_320_0.h5")
-        index = pd.read_csv(os.path.abspath("mdcath_320_0_topology_split.csv"))
+        h5_path = os.path.abspath(f"mdcath_spinet_{temp}_0.h5")
+        index = pd.read_csv(os.path.abspath(f"mdcath_{temp}_0_topology_split.csv"))
 
         train_pdbs = index[index["split"] == "train"]["domain"].tolist()
         test_pdbs = index[index["split"] == "test"]["domain"].tolist()
@@ -586,7 +588,8 @@ def train_residue_classifier(args_dict):
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
 
     # Test Check
-    #run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="test", test_val=test_val)
+    if not skip_test:
+        run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="test", test_val=test_val)
 
     if not ablate_sheaves and other_model=="spinet":
         interpret_sheaves(single_graph_val_loader, model, run, DEVICE, torch_rng)
@@ -599,7 +602,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog='Train sheaf protein node residue classifier',
         description='Trains sheaf node classifier to predict nodes') 
-    parser.add_argument('--run-name', type=str, default="residue_classifier")
+    parser.add_argument('--run-name', type=str, default="default_repo")
     parser.add_argument('--ablate-sheaves', action="store_true")
     parser.add_argument('--ablate-edge-features', action="store_true")
     parser.add_argument('--ablate-attention', action="store_true")
@@ -610,6 +613,8 @@ if __name__ == "__main__":
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
     parser.add_argument('--other-model', type=str, default="spinet", choices=["rgnn", "spinet", "node_only"])
     parser.add_argument('--cross-test', type=int, default=4)
+    parser.add_argument('--skip-test', action="store_true")
+    parser.add_argument('--temp', default=320, type=int)
 
     args = parser.parse_args()
     train_residue_classifier(vars(args))

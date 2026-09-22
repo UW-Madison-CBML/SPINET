@@ -50,7 +50,7 @@ class ResidueClassifierDataset(Dataset):
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
     
-    def __init__(self, h5_path, np_rng, groups:list|None=None, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None, step=32):
+    def __init__(self, h5_path, np_rng, groups:list|None=None, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None, step=8):
         """
         self
         h5_path: the dataframe containing trajectory information 

@@ -362,6 +362,7 @@ class InitDynamicsEmbedding(MessagePassing):
         self.mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
 
         self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True)
+        self.temp_mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim,self.hidden_dim))
 
 
     def forward(self, x, pos, frame_maps, edge_index, edge_attr):
@@ -391,7 +392,7 @@ class InitDynamicsEmbedding(MessagePassing):
         agg = self.propagate(edge_index, x=x_stalk, maps=maps, edge_attr=edge_stalk, reverse_edge_indices=reverse_edge_indices)
 
         # flatten
-        agg_flat = agg.view(x.shape[0],x.shape[1], self.hidden_dim)
+        agg_flat = self.temp_mlp(agg.view(x.shape[0],x.shape[1], self.hidden_dim))
 
         _, temp_agg = self.node_temporal_product(agg_flat)
 

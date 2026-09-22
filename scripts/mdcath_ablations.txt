@@ -1,1 +1,2 @@
---run-name resume_mdcath --restriction-map-type arbitrary --ablate-attention --resume our_model_mdcath
+--run-name our_model_mdcath_450 --ablate-attention 
+--run-name no_sheaves_mdcath_450 --ablate-sheaves --ablate-attention 
