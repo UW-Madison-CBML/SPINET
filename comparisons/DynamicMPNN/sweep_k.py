@@ -70,6 +70,7 @@ from tqdm import tqdm
 # CHTC scripts use), so the `dataset_splits` / `dynamicmpnn` imports below resolve
 # only after it has run. Do not let an import sorter reorder these.
 from train import (
+    DEFAULT_COURSE_GRAIN,
     DEVICE,
     GAP_TOKEN,
     THIS_DIR,
@@ -129,7 +130,9 @@ def parse_args():
     parser.add_argument("--test-fold", type=int, default=dataset_splits.DEFAULT_TEST_FOLD)
     parser.add_argument("--processed-dir", type=Path, default=None)
     parser.add_argument("--max-length", type=int, default=dataset_splits.MAX_LENGTH)
-    parser.add_argument("--course-grain", type=int, default=25)
+    parser.add_argument("--course-grain", type=int, default=None,
+                        help="time subsampling for the pairwise-TM matrix (default: "
+                             f"{DEFAULT_COURSE_GRAIN}, keyed on --ds-name)")
     parser.add_argument("--force-rebuild", action="store_true")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -179,7 +182,7 @@ def batch_size_for_k(k: int, conf_budget: int, proteins_per_step: int, override)
     return batch_size, grad_accum
 
 
-def check_pool_sizes(processed_dir: Path, pdb_ids: list, max_k: int) -> None:
+def check_pool_sizes(processed_dir: Path, pdb_ids: list, max_k: int, course_grain=None) -> None:
     """Fail before training if any protein's saved pool is smaller than the largest k.
 
     `ProteinGraphFeaturiserSingleChain.get_entries` handles `n < k` by duplicating conformers
@@ -205,9 +208,32 @@ def check_pool_sizes(processed_dir: Path, pdb_ids: list, max_k: int) -> None:
             f"({max_k}); the smallest is {worst}. The featurizer would pad these by "
             f"duplicating frames, which looks like the recovery curve flattening. "
             f"Offenders: {dict(sorted(short.items(), key=lambda kv: kv[1])[:10])}"
-            f"{' ...' if len(short) > 10 else ''}. Lower the top of --k-grid to {worst}, or "
-            f"lower --course-grain so more frames survive subsampling, then --force-rebuild."
+            f"{' ...' if len(short) > 10 else ''}. {_pool_remedy(worst, max_k, course_grain)}"
         )
+
+
+def _pool_remedy(worst: int, max_k: int, course_grain) -> str:
+    """The actionable half of check_pool_sizes' error.
+
+    Capping --k-grid at `worst` is the literal fix but almost never the right one: when a
+    whole dataset comes up short it is because --course-grain was tuned for a different
+    store's trajectory length, and the fix is to subsample less aggressively rather than to
+    abandon the top of the grid. `worst` frames survived at the current stride, so the
+    trajectory holds roughly `worst * course_grain` frames and a stride of
+    `worst * course_grain // max_k` puts max_k of them back in reach.
+    """
+    if not course_grain:
+        return (f"Lower --course-grain so more frames survive subsampling (then "
+                f"--force-rebuild), or lower the top of --k-grid to {worst}.")
+    suggested = max(1, (worst * course_grain) // max_k)
+    if suggested >= course_grain:
+        return (f"The shortest trajectory has only ~{worst * course_grain} frames, so k={max_k} "
+                f"is out of reach at any stride; lower the top of --k-grid to {worst} or drop "
+                f"these proteins.")
+    return (f"--course-grain is {course_grain}, tuned for a longer-trajectory store; the "
+            f"shortest trajectory here holds only ~{worst * course_grain} frames. Rerun with "
+            f"--course-grain {suggested} --force-rebuild to fit k={max_k}, or lower the top of "
+            f"--k-grid to {worst}.")
 
 
 def build_datasets(pdb_lists: dict, features_cfg, processed_dir: Path) -> tuple:
@@ -440,6 +466,11 @@ def log_summary(rows, args, k_grid, group_name):
 
 def main():
     args = parse_args()
+    # Per-dataset default (see DEFAULT_COURSE_GRAIN): ATLAS's 1001-frame trajectories and
+    # mdCATH's 130..501-frame ones cannot share one subsampling stride.
+    if args.course_grain is None:
+        args.course_grain = DEFAULT_COURSE_GRAIN[args.ds_name]
+        logger.info(f"--course-grain defaulted to {args.course_grain} for {args.ds_name}")
     k_grid = parse_k_grid(args.k_grid)
     max_k = k_grid[-1]
 
@@ -485,7 +516,13 @@ def main():
         course_grain=args.course_grain,
         force_rebuild=args.force_rebuild,
     )
-    check_pool_sizes(processed_dir, all_pdbs, max_k)
+    check_pool_sizes(processed_dir, all_pdbs, max_k, args.course_grain)
+
+    # Create the results file before the first point so it exists even if k=grid[0] OOMs
+    # immediately. HTCondor's transfer_output_files lists it, and a missing output file
+    # holds the job without transferring anything -- including the .err log that says which
+    # k ran out of memory, which is the one thing worth having after that failure.
+    Path(args.results_csv).touch()
 
     rows = []
     for k in k_grid:

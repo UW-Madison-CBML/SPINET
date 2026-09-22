@@ -89,6 +89,58 @@ draws the *k* conformers it trains on by TM dissimilarity (its own
 `random.sample`. An ensemble `.pt` built before this change has no `tm_scores`
 and is rebuilt automatically.
 
+## Zero-shot: scoring the *released* checkpoints
+
+`eval_ckpt.py` / `eval_ckpt.sh` / `eval_ckpt.sub` run upstream's published
+weights over our held-out splits with no training at all:
+
+```
+condor_submit eval_ckpt.sub                        # ATLAS, single_chain_k2.ckpt
+condor_submit eval_ckpt.sub DS_NAME=mdcath \
+    DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
+    DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv'
+```
+
+Same `.pt` conformer ensembles, same splits, same `ResidueMetrics` keys as
+`train.py` — it imports the conversion and the scoring loop from it — so the
+zero-shot row drops straight into the table next to the from-scratch row. Both
+held-out splits are scored in one pass (nothing here is trained on, so there is
+no reason to hold `test` back for the end).
+
+Two things are not obvious and are worth knowing before reading the numbers:
+
+* **The released checkpoints are not the architecture `train.py` builds.** Their
+  own `hyper_parameters` record the legacy pair model — `node_in_dim (26, 2)` /
+  `edge_in_dim (17, 1)`, 4 encoder + 4 decoder layers, `representation: ca`, no
+  `sequence` node feature and no `edge_type` edge feature — against
+  `AR1_single_chain.yaml`'s 27/18, 8+4 and `pooling_strategy: single_chain_k`.
+  `config_from_ckpt` reads the config out of the checkpoint and retargets its
+  `dynamicprot_single.src.*` class paths onto the vendored `dynamicmpnn.*` ones,
+  so k2/k3/k5 all load without a hand-written yaml per checkpoint.
+* **All three are *pair* models, whatever the file name says.** The featuriser
+  they were trained with (`ProteinGraphFeaturiser`, not
+  `…SingleChain`) is hard-coded to two conformations, so `single_chain_k5.ckpt`
+  sees 2 conformers here, not 5 — the run logs `k: 2` accordingly. It also keys
+  `pyg_dict` by `member.split('_')[0].upper()`, i.e. codnas' `<PDB>_<chain>`,
+  where our pools key by `<pdb>_frame<t>`; fed ours unadapted it would resolve
+  both members to the same frame and score a "2-conformer" model on one
+  structure. `LegacyPairAdapter` picks the pair (by default the most TM-dissimilar
+  one in the pool, deterministically) and re-presents it under the naming and the
+  per-conformer fields that featuriser expects, leaving the actual feature
+  computation to upstream's own code.
+
+A third wrinkle is internal: in the pair path the encoder graph carries two nodes
+per residue while the decoder — and therefore the logits — carries one, pooled
+over the pair, so `batch.batch` is twice as long as `run_validation` expects.
+`DecoderNodeBatching` rewrites it from `num_decoder_nodes` after the forward
+pass; without it the per-protein slicing would be silently wrong.
+
+Expect ~36% top-1 on well-converted data: that is what `single_chain_k2.ckpt`
+scored on upstream's own `val_pt_single_chain` files, and it is the check that
+caught the nanometre/Angstrom bug documented at `train.py`'s `NM_TO_ANGSTROM`
+(7.3% recovery, loss 116, before the conversion). A pretrained model scoring near
+chance on our `.pt` files is evidence about *our features*, not about the model.
+
 ## Sweeping *k*: how much does ensemble size actually buy?
 
 `sweep_k.py` / `sweep_k.sub` train one model per *k* over a shared conformer
@@ -136,8 +188,86 @@ mkdir -p logs && condor_submit sweep_k.sub          # ATLAS, k = 2..32
 
 Each *k* logs its own W&B run (`DynamicMPNN_atlas_ksweep_k<k>`), all under one
 `group` so they overlay; a `_summary` run holds the `recovery_vs_k` table. The
-same table is rewritten to `sweep_k_atlas.csv` after **every** completed point
+same table is rewritten to `--results-csv` after **every** completed point
 and transferred back on eviction, so an interrupted sweep keeps what finished.
+
+**Running the grid in chunks.** Twelve points x 8 epochs is a long single job on a
+shared machine, and a sweep that is evicted or OOMs in the tail is resumed by
+submitting the rest of the grid rather than the whole thing again. Two invariants:
+
+```bash
+condor_submit sweep_k.sub K_GRID=2,3,4,5,6,8,10,12,16,20 POOL_SIZE=32 RESULTS_CSV=sweep_k_atlas_k2_20.csv
+condor_submit sweep_k.sub K_GRID=24,32                   POOL_SIZE=32 RESULTS_CSV=sweep_k_atlas_k24_32.csv
+python merge_sweep_csvs.py sweep_k_atlas.csv sweep_k_atlas_k2_20.csv sweep_k_atlas_k24_32.csv
+```
+
+- `POOL_SIZE` stays at the top of the **full** grid in every chunk, so each *k* draws
+  from the same candidate frames. A chunk rebuilds the pool from scratch in its own
+  job scratch, which is safe because `farthest_point_sample` is a pure argmax with no
+  RNG: same trajectory + same `--course-grain` + same `--pool-size` gives the same pool,
+  and the greedy selection means a pool of 32 extends the pool of 20 rather than
+  replacing it.
+- `RESULTS_CSV` is **unique per chunk**. `write_results_csv` opens with `w`, so two
+  chunks sharing a filename means the second job's `transfer_output_files` overwrites
+  the first job's numbers on the way home. `merge_sweep_csvs.py` stitches the chunks
+  back into one k-sorted table (union of columns; a *k* present in two chunks is an
+  error, not a silent overwrite).
+
+Each chunk's `_summary` W&B run holds only that chunk's points, so the merged CSV --
+not W&B -- is the source of truth for the full recovery-vs-*k* curve.
+
+One caveat when reading the curve across chunks: `batch_size_for_k` floors `batch_size`
+at 1 once `k >= conf_budget` (20), so k = 12, 16, 20, 24 and 32 all run at
+`batch_size` 1 x `grad_accum` 2 while k <= 10 runs at 2 x 1. The optimizer batch is
+2 proteins throughout, but the k <= 10 and k >= 12 halves of the grid differ by how
+that batch is split -- worth stating explicitly rather than reading the k=10 -> k=12
+step as an ensemble-size effect.
+
+## mdCATH: two things that differ from ATLAS
+
+**Coordinate units are not the same in the two stores, and the code no longer assumes they
+are.** Measured median consecutive CA-CA distance over 60 trajectories per store: ATLAS
+0.3835 (nanometres, straight out of `traj.xyz`), mdCATH 3.8357 (already Angstroms).
+`build_ensemble` used to multiply both by `NM_TO_ANGSTROM`, which for mdCATH inflates every
+coordinate 10x. That is silent in exactly the way the nm-vs-A note at the top of `train.py`
+describes, only in reverse: knn topology and the angle features are scale-invariant, but every
+`edge_distance` / `rbf_16` channel saturates, and TM-score's `d0` is an Angstrom quantity, so
+every frame reads as maximally dissimilar. Measured min-pairwise-TM over 40 mdCATH domains is
+**0.046 scaled vs 0.682 unscaled** -- i.e. under the bug, farthest-point selection draws its
+pool out of numerical noise and the `is_flat` warning can never fire. `detect_coord_scale`
+now reads the factor off the store's own CA-CA geometry and raises rather than guessing if it
+matches neither convention.
+
+Any mdCATH `.pt` files built before this fix are wrong, and `needs_rebuild` will not catch
+them (it only checks that `tm_scores` exists). A condor run starts from empty job scratch so
+it rebuilds anyway; pass `--force-rebuild` if you are reusing a persistent `--processed-dir`.
+ATLAS is unaffected -- it still resolves to 10.0, so the completed k = 2..20 sweep stands.
+
+**`--course-grain` is now per dataset**, because the trajectories are very different lengths:
+
+| store  | T (frames)              | cg | pool per protein     | supports k=32? |
+|--------|-------------------------|----|----------------------|----------------|
+| ATLAS  | 1001, every trajectory  | 25 | 41, every trajectory | yes            |
+| mdCATH | 130-501 (median 500)    | 25 | 6-21 (median 20)     | **no**         |
+| mdCATH | 130-501 (median 500)    | 4  | 33-126 (median 125)  | yes            |
+
+At cg=25 *no* mdCATH protein can support k > 21 and 2074 of the 5327 split members cannot
+support k = 20 either, which is what `check_pool_sizes` catches. cg=4 is the largest stride
+that keeps the shortest trajectory (130 frames) at >= 32. `DEFAULT_COURSE_GRAIN` in `train.py`
+holds both values; ATLAS deliberately stays at 25 so its finished sweep stays reproducible.
+
+The cost is preprocessing. `compute_pairwise_tm` is a serial O(n_coarse^2) Kabsch loop:
+measured 0.21 s/protein at cg=25 and 1.38 s/protein at cg=4, so building the mdCATH pool is
+**~2 h** for 5327 proteins versus ~19 min at cg=25. It is paid once per pool directory, but
+job scratch does not persist, so each chunked mdCATH submission pays it again -- worth
+preferring one long job over several chunks here, the opposite of the ATLAS advice above.
+
+```bash
+condor_submit sweep_k.sub DS_NAME=mdcath \
+    DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
+    DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv' \
+    RESULTS_CSV=sweep_k_mdcath.csv
+```
 
 ## Big-picture pipeline
 

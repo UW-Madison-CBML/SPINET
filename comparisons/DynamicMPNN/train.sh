@@ -7,7 +7,9 @@
 # ATLAS and mdCATH are trained and evaluated separately, one job each (--ds-name),
 # matching scripts/train_residue_classifier.py.
 set -e
-mkdir -p logs/
+# weights/ is created up front: train.sub lists it in transfer_output_files, and a missing
+# output holds the job without transferring the logs that say why it failed.
+mkdir -p logs/ weights/
 
 python -m ruff check . --select F821,E9 || exit 1
 

@@ -94,6 +94,57 @@ CA_ATOM_IDX = BACKBONE_ATOMS.index("CA")
 # 116) on ours. The conversion matters for conformer selection too: TM-score's d0 is in
 # Angstroms, so scoring nanometre coordinates would call every frame identical.
 NM_TO_ANGSTROM = 10.0
+
+# A backbone CA-CA virtual bond is ~3.80 A / 0.380 nm in every folded protein, so measuring it
+# in a store IS the unit test for that store's units. ATLAS (`traj.xyz` straight out of mdtraj)
+# is in nm; the mdCATH store is already in Angstroms. Multiplying the latter by NM_TO_ANGSTROM
+# is the same failure documented above, running the other way: it does not touch knn topology
+# or the angle features, but it pushes every edge_distance / rbf_16 channel into the TOP bin
+# and, worse, makes TM-score's d0 (an Angstrom quantity) call every frame maximally DISSIMILAR
+# -- measured min-pairwise-TM over 40 mdCATH domains is 0.046 scaled vs 0.682 unscaled -- so
+# farthest-point selection picks its pool out of noise and `is_flat` can never fire.
+# Time subsampling for the pairwise-TM matrix, per dataset -- these are NOT interchangeable,
+# because the two stores have very different trajectory lengths:
+#
+#   ATLAS : T = 1001 frames for every trajectory -> cg=25 gives a 41-frame pool everywhere.
+#   mdCATH: T = 130..501 (median 500) over the 5327 split members -> cg=25 gives a pool of
+#           6..21 (median 20), so NO mdCATH protein can support k > 21 and half cannot
+#           support k = 20. cg=4 is the largest value that keeps the shortest trajectory at
+#           >= 32 frames (130 -> 33), i.e. that runs the full k grid with nothing padded.
+#
+# ATLAS stays at 25 so the completed k = 2..20 sweep remains reproducible from this script;
+# lowering it would silently re-pool ATLAS and make new points incomparable with the old CSV.
+# The cost of mdCATH's cg=4 is preprocessing: compute_pairwise_tm is a serial O(n_coarse^2)
+# Kabsch loop, measured at 0.21 s/protein at cg=25 and 1.38 s/protein at cg=4, i.e. ~19 min
+# vs ~2 h for 5327 proteins. It is paid once per pool directory, but job scratch does not
+# survive, so every chunked mdCATH submission pays it again.
+DEFAULT_COURSE_GRAIN = {"atlas": 25, "mdcath": 4}
+
+CA_CA_ANGSTROM = 3.80
+CA_CA_TOLERANCE = 0.30  # observed spread over 60 trajectories per store is < 0.03 A
+
+
+def detect_coord_scale(coords_ds) -> float:
+    """Factor converting this store's coordinates to Angstroms, read off its own geometry.
+
+    Returns 1.0 for an Angstrom store and NM_TO_ANGSTROM for a nanometre one, and raises if
+    the CA-CA distance matches neither -- a store whose units cannot be identified must not be
+    guessed at, because both wrong answers are silent (see the comment above).
+    """
+    ca = np.asarray(coords_ds[:, 0, CA_ATOM_IDX, :], dtype=np.float64)  # num_res, 3 @ frame 0
+    if ca.shape[0] < 2:
+        raise ValueError("cannot detect coordinate units from a single-residue chain")
+    spacing = float(np.median(np.linalg.norm(np.diff(ca, axis=0), axis=1)))
+
+    for scale in (1.0, NM_TO_ANGSTROM):
+        if abs(spacing * scale - CA_CA_ANGSTROM) <= CA_CA_TOLERANCE:
+            return scale
+    raise ValueError(
+        f"median consecutive CA-CA distance is {spacing:.4f}, which is neither "
+        f"{CA_CA_ANGSTROM} A (Angstrom store) nor {CA_CA_ANGSTROM / NM_TO_ANGSTROM} "
+        f"(nanometre store) within {CA_CA_TOLERANCE}. Refusing to guess the units: both wrong "
+        f"answers corrupt the TM matrix and the RBF edge features silently."
+    )
 GAP_TOKEN = len(BASE_AMINO_ACIDS)      # 20
 UNKNOWN_TOKEN = len(BASE_AMINO_ACIDS) + 1  # 21
 
@@ -218,10 +269,12 @@ def build_ensemble(
     subsample `k` of them at train/val time -- exactly how the multi-chain codnas pipeline
     defers pair/subset selection to the featurizer instead of preprocessing.
     """
-    coords_ds = h5_file[group_name + "/coordinates"]  # num_res, T, num_atoms, 3 (NANOMETRES)
+    coords_ds = h5_file[group_name + "/coordinates"]  # num_res, T, num_atoms, 3
+    # Units are read off the store rather than assumed: ATLAS is nm, mdCATH is already A.
+    to_angstrom = detect_coord_scale(coords_ds)
 
     coarse_coords = (torch.from_numpy(coords_ds[:, ::course_grain]).permute(1, 0, 2, 3).float()
-                     * NM_TO_ANGSTROM)
+                     * to_angstrom)
 
     tm_matrix = compute_pairwise_tm(coarse_coords)
     off_diagonal = ~torch.eye(tm_matrix.shape[0], dtype=torch.bool)
@@ -237,7 +290,7 @@ def build_ensemble(
     pool_tm = tm_matrix[torch.tensor(pool_order)][:, torch.tensor(pool_order)]
 
     residue_type = residues_to_type_ids(h5_file[group_name + "/residues"][:])
-    pool_frames = coords_ds[:, real_frame_idx] * NM_TO_ANGSTROM  # num_res, pool, num_atoms, 3
+    pool_frames = coords_ds[:, real_frame_idx] * to_angstrom  # num_res, pool, num_atoms, 3
 
     pyg_dict = {}
     for pool_pos, frame_idx in enumerate(real_frame_idx):
@@ -359,6 +412,27 @@ def load_pretrained_weights(model: torch.nn.Module, ckpt_path: Path) -> None:
     logger.info(f"Loaded pretrained weights from {ckpt_path} ({len(stripped)} tensors)")
 
 
+def save_weights(model: torch.nn.Module, optimizer: torch.optim.Optimizer, save_path: Path,
+                 epoch: int, step: int, model_cfg, features_cfg, args) -> None:
+    # Keys carry the same `GNN_model.` prefix as upstream's Lightning checkpoints, so a saved
+    # run reloads through `load_pretrained_weights` via `--ckpt <path>` like any other.
+    checkpoint = {
+        "state_dict": {f"GNN_model.{k}": v for k, v in model.state_dict().items()},
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "step": step,
+        "hyper_parameters": {
+            "model": OmegaConf.to_container(model_cfg, resolve=True),
+            "features": OmegaConf.to_container(features_cfg, resolve=True),
+            "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        },
+    }
+    # Write-then-rename, so an eviction mid-save never leaves a truncated file behind.
+    tmp_path = save_path.with_suffix(".tmp")
+    torch.save(checkpoint, tmp_path)
+    tmp_path.replace(save_path)
+
+
 class PdbTrackingFeaturiser:
     """Wraps a DynamicMPNN featuriser to record, in order, which pdb_codes survive
     featurization. `PTFileDataset(..., return_pdb_codes=True, in_memory=True)` can't be used
@@ -466,7 +540,9 @@ def parse_args():
                               "PiFold also apply (lib/dataset_splits.MAX_LENGTH). Pass 0 to disable.")
     parser.add_argument("--k", type=int, default=2, help="conformers sampled per protein at train/val time")
     parser.add_argument("--pool-size", type=int, default=10, help="conformer pool saved per protein's .pt file")
-    parser.add_argument("--course-grain", type=int, default=25, help="time subsampling for the RMSD matrix")
+    parser.add_argument("--course-grain", type=int, default=None,
+                        help="time subsampling for the pairwise-TM matrix (default: "
+                             f"{DEFAULT_COURSE_GRAIN}, keyed on --ds-name)")
     parser.add_argument("--force-rebuild", action="store_true")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--epochs", type=int, default=8)
@@ -476,11 +552,18 @@ def parse_args():
     parser.add_argument("--from-scratch", action="store_true", help="skip loading a pretrained checkpoint")
     parser.add_argument("--ckpt", type=Path, default=None, help="override the default single_chain_k{k}.ckpt")
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--save-dir", type=Path, default=THIS_DIR / "weights",
+                        help="trained weights land here as <run_name>_<wandb run id>.ckpt")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    # Per-dataset default (see DEFAULT_COURSE_GRAIN): ATLAS's 1001-frame trajectories and
+    # mdCATH's 130..501-frame ones cannot share one subsampling stride.
+    if args.course_grain is None:
+        args.course_grain = DEFAULT_COURSE_GRAIN[args.ds_name]
+        logger.info(f"--course-grain defaulted to {args.course_grain} for {args.ds_name}")
     # `random` and `np.random`, not just torch: DynamicMPNN's featurizer picks which k of each
     # protein's saved conformer pool to use with `random.sample` / `np.random.choice`
     # (ProteinGraphFeaturiserSingleChain.get_entries). Because the datasets below are built
@@ -635,6 +718,12 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     crit = torch.nn.CrossEntropyLoss(label_smoothing=0.05, ignore_index=GAP_TOKEN)
 
+    # The W&B run id keeps resubmitted jobs from overwriting each other once HTCondor copies
+    # every job's weights/ back into the same submit-side directory.
+    args.save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = args.save_dir / f"{run_name}_{run.id}.ckpt"
+    run.summary["weights_path"] = save_path.name
+
     step = 0
     for epoch in range(args.epochs):
         model.train()
@@ -661,6 +750,11 @@ def main():
         print(f"Top-1 Recovery: {metrics['val_top1_acc_mean']:.4f} \\pm {metrics['val_top1_acc_std']:.4f}")
         print(f"Top-5 Recovery: {metrics['val_top5_acc_mean']:.4f} \\pm {metrics['val_top5_acc_std']:.4f}")
         print(f"Top-10 Recovery: {metrics['val_top10_acc_mean']:.4f} \\pm {metrics['val_top10_acc_std']:.4f}")
+
+        # Overwritten every epoch, so an evicted job still brings home its latest weights. After
+        # the last epoch this file holds exactly the weights the test split is scored on.
+        save_weights(model, optimizer, save_path, epoch, step, model_cfg, features_cfg, args)
+        logger.info(f"Saved epoch {epoch} weights to {save_path}")
 
     # The test split is scored exactly once, with the final weights. There is no checkpoint
     # selection here (no early stopping, no best-epoch restore), so "final" and "selected" are

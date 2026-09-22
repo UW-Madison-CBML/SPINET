@@ -51,7 +51,8 @@ DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 # 'frame' (one random frame of its MD trajectory, lib/traj_frames.py). train.sh derives both
 # the featurization flag and dataset.process_root from this, so they cannot disagree.
 # Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
-STRUCTURE_SOURCE        = relaxed
+#STRUCTURE_SOURCE        = frame
+STRUCTURE_SOURCE 	 = frame
 
 executable              = train.sh
 environment             = "DS_NAME=$(DS_NAME) STRUCTURE_SOURCE=$(STRUCTURE_SOURCE)"

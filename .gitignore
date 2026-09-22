@@ -10,6 +10,7 @@ api_keys.txt
 *.pdb
 *.pyc
 #pytorch
+*.ckpt
 *.bin
 *.pt
 *.pth
