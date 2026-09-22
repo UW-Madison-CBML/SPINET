@@ -223,6 +223,52 @@ at 1 once `k >= conf_budget` (20), so k = 12, 16, 20, 24 and 32 all run at
 that batch is split -- worth stating explicitly rather than reading the k=10 -> k=12
 step as an ensemble-size effect.
 
+## mdCATH: two things that differ from ATLAS
+
+**Coordinate units are not the same in the two stores, and the code no longer assumes they
+are.** Measured median consecutive CA-CA distance over 60 trajectories per store: ATLAS
+0.3835 (nanometres, straight out of `traj.xyz`), mdCATH 3.8357 (already Angstroms).
+`build_ensemble` used to multiply both by `NM_TO_ANGSTROM`, which for mdCATH inflates every
+coordinate 10x. That is silent in exactly the way the nm-vs-A note at the top of `train.py`
+describes, only in reverse: knn topology and the angle features are scale-invariant, but every
+`edge_distance` / `rbf_16` channel saturates, and TM-score's `d0` is an Angstrom quantity, so
+every frame reads as maximally dissimilar. Measured min-pairwise-TM over 40 mdCATH domains is
+**0.046 scaled vs 0.682 unscaled** -- i.e. under the bug, farthest-point selection draws its
+pool out of numerical noise and the `is_flat` warning can never fire. `detect_coord_scale`
+now reads the factor off the store's own CA-CA geometry and raises rather than guessing if it
+matches neither convention.
+
+Any mdCATH `.pt` files built before this fix are wrong, and `needs_rebuild` will not catch
+them (it only checks that `tm_scores` exists). A condor run starts from empty job scratch so
+it rebuilds anyway; pass `--force-rebuild` if you are reusing a persistent `--processed-dir`.
+ATLAS is unaffected -- it still resolves to 10.0, so the completed k = 2..20 sweep stands.
+
+**`--course-grain` is now per dataset**, because the trajectories are very different lengths:
+
+| store  | T (frames)              | cg | pool per protein     | supports k=32? |
+|--------|-------------------------|----|----------------------|----------------|
+| ATLAS  | 1001, every trajectory  | 25 | 41, every trajectory | yes            |
+| mdCATH | 130-501 (median 500)    | 25 | 6-21 (median 20)     | **no**         |
+| mdCATH | 130-501 (median 500)    | 4  | 33-126 (median 125)  | yes            |
+
+At cg=25 *no* mdCATH protein can support k > 21 and 2074 of the 5327 split members cannot
+support k = 20 either, which is what `check_pool_sizes` catches. cg=4 is the largest stride
+that keeps the shortest trajectory (130 frames) at >= 32. `DEFAULT_COURSE_GRAIN` in `train.py`
+holds both values; ATLAS deliberately stays at 25 so its finished sweep stays reproducible.
+
+The cost is preprocessing. `compute_pairwise_tm` is a serial O(n_coarse^2) Kabsch loop:
+measured 0.21 s/protein at cg=25 and 1.38 s/protein at cg=4, so building the mdCATH pool is
+**~2 h** for 5327 proteins versus ~19 min at cg=25. It is paid once per pool directory, but
+job scratch does not persist, so each chunked mdCATH submission pays it again -- worth
+preferring one long job over several chunks here, the opposite of the ATLAS advice above.
+
+```bash
+condor_submit sweep_k.sub DS_NAME=mdcath \
+    DS_H5='$(ResearchDrive)/mdcath_spinet_320_0.h5' \
+    DS_CSV='$(ResearchDrive)/mdcath_320_0_topology_split.csv' \
+    RESULTS_CSV=sweep_k_mdcath.csv
+```
+
 ## Big-picture pipeline
 
 ```
