@@ -1,0 +1,26 @@
+# interpret_sheaves.sub
+
+docker_image = jenslundsgaard/sheaf_training:v3.2
+
+universe = docker
+file = atlas_laplacians.h5
+shell = ./interpret_sheaves.sh $(file)
+
+#  queue number assigned to this set of jobs at the time of submission.
+log = logs/interpret_sheaves_$(Cluster)_$(Process).log
+error = logs/interpret_sheaves_$(Cluster)_$(Process).err
+output = logs/interpret_sheaves_$(Cluster)_$(Process).out
+#should_transfer_files = YES
+when_to_transfer_output = ON_EXIT_OR_EVICT
+Requirements = (Target.HasCHTCStaging == true) 
+
+transfer_input_files = interpret_sheaves.sh, interpret_sheaves.py, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file)
+
+
+
+request_cpus = 16
+request_memory = 128GB
+request_disk = 128GB
+
+
+queue 1

@@ -1,1 +1,1 @@
---run-name our_model --ablate-attention 
+--run-name get_sheaves --ablate-attention --resume our_model --epochs 0 --skip-test

@@ -231,7 +231,7 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
 
     run.log(prf_dict | {f"epoch_{val_name}_loss": avg_loss, "epoch": epoch})
 
-def interpret_sheaves(loader, model, run, device, rng):
+def interpret_sheaves(loader, model, run, device, rng, h5_filename):
 
     # initiate img_dict
     img_dict = {}
@@ -240,7 +240,7 @@ def interpret_sheaves(loader, model, run, device, rng):
     least_eig = []
     traj_ids = []
     seen_pdbs = set()
-    with h5py.File("laplacians.h5", "w") as h5_file:
+    with h5py.File(h5_filename, "w") as h5_file:
         with torch.no_grad():
             for batch in tqdm(loader, desc=f"loading sheaves", leave=False):
                 
@@ -592,7 +592,7 @@ def train_residue_classifier(args_dict):
         run_val(run, model, test_loader, test_dataset, -1, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="test", test_val=test_val)
 
     if not ablate_sheaves and other_model=="spinet":
-        interpret_sheaves(single_graph_val_loader, model, run, DEVICE, torch_rng)
+        interpret_sheaves(single_graph_val_loader, model, run, DEVICE, torch_rng, "atlas_laplacians.h5" if ds_name == "atlas" else "mdcath_laplacians.h5")
 
     
     run.finish()

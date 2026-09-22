@@ -20,14 +20,14 @@ Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.ch
 +wantGPULab = true
 
 transfer_input_files = train_residue_classifier.sh, train_residue_classifier.py, ../../api_keys.txt, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv
-#transfer_output_files = laplacians.h5
-#transfer_output_remaps = "laplacians.h5 = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/laplacians.h5"
+transfer_output_files = atlas_laplacians.h5
+transfer_output_remaps = "atlas_laplacians.h5 = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_laplacians.h5"
 
 
 #file:///staging/groups/bhaskar_group/sheaf_protein_dynamics/md_data.tar.gz
 
 request_cpus = 16
-request_memory = 128GB
+request_memory = 180GB
 request_disk = 128GB
 request_gpus = 1
 
