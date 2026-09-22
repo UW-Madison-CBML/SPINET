@@ -359,6 +359,27 @@ def load_pretrained_weights(model: torch.nn.Module, ckpt_path: Path) -> None:
     logger.info(f"Loaded pretrained weights from {ckpt_path} ({len(stripped)} tensors)")
 
 
+def save_weights(model: torch.nn.Module, optimizer: torch.optim.Optimizer, save_path: Path,
+                 epoch: int, step: int, model_cfg, features_cfg, args) -> None:
+    # Keys carry the same `GNN_model.` prefix as upstream's Lightning checkpoints, so a saved
+    # run reloads through `load_pretrained_weights` via `--ckpt <path>` like any other.
+    checkpoint = {
+        "state_dict": {f"GNN_model.{k}": v for k, v in model.state_dict().items()},
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+        "step": step,
+        "hyper_parameters": {
+            "model": OmegaConf.to_container(model_cfg, resolve=True),
+            "features": OmegaConf.to_container(features_cfg, resolve=True),
+            "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        },
+    }
+    # Write-then-rename, so an eviction mid-save never leaves a truncated file behind.
+    tmp_path = save_path.with_suffix(".tmp")
+    torch.save(checkpoint, tmp_path)
+    tmp_path.replace(save_path)
+
+
 class PdbTrackingFeaturiser:
     """Wraps a DynamicMPNN featuriser to record, in order, which pdb_codes survive
     featurization. `PTFileDataset(..., return_pdb_codes=True, in_memory=True)` can't be used
@@ -476,6 +497,8 @@ def parse_args():
     parser.add_argument("--from-scratch", action="store_true", help="skip loading a pretrained checkpoint")
     parser.add_argument("--ckpt", type=Path, default=None, help="override the default single_chain_k{k}.ckpt")
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--save-dir", type=Path, default=THIS_DIR / "weights",
+                        help="trained weights land here as <run_name>_<wandb run id>.ckpt")
     return parser.parse_args()
 
 
@@ -635,6 +658,12 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     crit = torch.nn.CrossEntropyLoss(label_smoothing=0.05, ignore_index=GAP_TOKEN)
 
+    # The W&B run id keeps resubmitted jobs from overwriting each other once HTCondor copies
+    # every job's weights/ back into the same submit-side directory.
+    args.save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = args.save_dir / f"{run_name}_{run.id}.ckpt"
+    run.summary["weights_path"] = save_path.name
+
     step = 0
     for epoch in range(args.epochs):
         model.train()
@@ -661,6 +690,11 @@ def main():
         print(f"Top-1 Recovery: {metrics['val_top1_acc_mean']:.4f} \\pm {metrics['val_top1_acc_std']:.4f}")
         print(f"Top-5 Recovery: {metrics['val_top5_acc_mean']:.4f} \\pm {metrics['val_top5_acc_std']:.4f}")
         print(f"Top-10 Recovery: {metrics['val_top10_acc_mean']:.4f} \\pm {metrics['val_top10_acc_std']:.4f}")
+
+        # Overwritten every epoch, so an evicted job still brings home its latest weights. After
+        # the last epoch this file holds exactly the weights the test split is scored on.
+        save_weights(model, optimizer, save_path, epoch, step, model_cfg, features_cfg, args)
+        logger.info(f"Saved epoch {epoch} weights to {save_path}")
 
     # The test split is scored exactly once, with the final weights. There is no checkpoint
     # selection here (no early stopping, no best-epoch restore), so "final" and "selected" are

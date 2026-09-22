@@ -30,6 +30,9 @@ output = logs/train_$(DS_NAME)_$(Cluster)_$(Process).out
 
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
+# train.py rewrites weights/<run_name>_<wandb id>.ckpt after every epoch, so this brings the
+# latest weights home even if the job is evicted part-way through training.
+transfer_output_files = weights, logs
 # The job needs a machine with internet access (W&B) -- same one
 # scripts/train_residue_classifier.sub uses.
 Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
