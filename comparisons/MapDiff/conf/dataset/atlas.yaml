@@ -2,12 +2,12 @@ name: ATLAS
 
 # Graphs featurized from each protein's *relaxed* (deposited) PDB entry, cropped to the
 # residues its ATLAS trajectory covers -- see ../../data/generate_graph_relaxed.py.
-train_dir: ./surffold_data/atlas_process/train/
+train_dir: ${dataset.process_root}/train/
 # atlas_cross_val_index.csv's 5 `cross_val` folds: fold `val_fold` validates, fold `test_fold`
 # is the held-out test set, the other three train. This is the split
 # scripts/train_residue_classifier.py and comparisons/{gvp-pytorch,DynamicMPNN}/train.py use.
-val_dir: ./surffold_data/atlas_process/validation/
-test_dir: ./surffold_data/atlas_process/test/
+val_dir: ${dataset.process_root}/validation/
+test_dir: ${dataset.process_root}/test/
 
 # Which rows land in which split is decided by lib/dataset_splits.py, not by whatever files
 # happen to sit in the directories above (train.py's `split_file_ids`). Leave index_csv null
@@ -22,4 +22,11 @@ test_fold: 4
 # filters on. All three have to move together or the models score different proteins.
 max_length: 1200
 
+# Where data/generate_graph_relaxed.py wrote its graphs. Switching MapDiff onto MD frames
+# instead of deposited structures is these two overrides plus the matching --structure-source
+# on that script (train.sh does both from STRUCTURE_SOURCE):
+#
+#   dataset.process_root=./surffold_data/atlas_frame_process \
+#   dataset.marginal_train_dir=./surffold_data/train_marginal_x_atlas_frame.pt
+process_root: ./surffold_data/atlas_process
 marginal_train_dir: ./surffold_data/train_marginal_x_atlas.pt

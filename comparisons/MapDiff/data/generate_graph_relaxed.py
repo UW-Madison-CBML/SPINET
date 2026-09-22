@@ -1,12 +1,20 @@
-"""Turn *relaxed* (deposited) structures into MapDiff's per-residue graph format.
+"""Turn structures into MapDiff's per-residue graph format.
 
-MapDiff is a static-structure inverse-folding model, so it is trained and evaluated on the
-deposited PDB entry for each protein in our datasets -- not on a frame pulled out of the MD
-trajectory, which is what this script used to do. `lib/relaxed_pdb.py` downloads the entry
-from RCSB, picks the chain the dataset id names, and crops it to the residues the trajectory
-covers (using the trajectory's own residue list as the reference sequence), so MapDiff scores
-the same residues as every other model in the comparison. DynamicMPNN deliberately still
-trains on MD ensembles -- that ensemble input is the thing being benchmarked.
+MapDiff is a static-structure inverse-folding model, so by default it is trained and
+evaluated on the deposited PDB entry for each protein in our datasets rather than on a frame
+pulled out of the MD trajectory. `lib/relaxed_pdb.py` downloads the entry from RCSB, picks
+the chain the dataset id names, and crops it to the residues the trajectory covers (using the
+trajectory's own residue list as the reference sequence), so MapDiff scores the same residues
+as every other model in the comparison. DynamicMPNN deliberately still trains on MD
+ensembles -- that ensemble input is the thing being benchmarked.
+
+`--structure-source frame` switches the input to one random frame per protein's trajectory
+(`lib/traj_frames.py`) instead, with everything downstream -- splits, featurization, the
+marginal -- unchanged. That makes "relaxed vs. a single MD frame" a one-flag ablation on an
+otherwise identical pipeline. The frame is chosen deterministically from
+``(--frame-seed, protein id)``; pass `--frame-index` to pin one index for every protein.
+Write it to a *different* `--save-root`, since the .pt files are the only record of which
+source a graph came from.
 
 Both shared datasets are supported, trained/evaluated separately (`--ds-name`), matching
 scripts/train_residue_classifier.py:
@@ -57,6 +65,7 @@ from dataloader.pyg_safe_globals import allow_pyg_data_pickles
 try:
     import dataset_splits
     import relaxed_pdb
+    import traj_frames
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
         _cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), _up, 'lib')
@@ -65,6 +74,7 @@ except ImportError:
             break
     import dataset_splits
     import relaxed_pdb
+    import traj_frames
 
 
 allow_pyg_data_pickles()
@@ -77,9 +87,20 @@ def create_parser():
     parser.add_argument('--index-csv', default=None,
                          help="Split index csv (default: the dataset's standard file name)")
     parser.add_argument('--traj-h5', default=None,
-                         help="Trajectory store, read only for each protein's reference residue "
-                              "sequence (default: the dataset's standard file name). Pass '' to "
-                              "featurize whole deposited chains uncropped.")
+                         help="Trajectory store (default: the dataset's standard file name). With "
+                              "--structure-source relaxed it is read only for each protein's "
+                              "reference residue sequence, and '' featurizes whole deposited "
+                              "chains uncropped; with --structure-source frame it is the "
+                              "coordinate source and is required.")
+    parser.add_argument('--structure-source', default='relaxed', choices=('relaxed', 'frame'),
+                         help="Where each protein's coordinates come from: its deposited RCSB "
+                              "entry ('relaxed', the default) or one frame of its MD trajectory "
+                              "('frame'). Use a separate --save-root per source.")
+    parser.add_argument('--frame-seed', type=int, default=dataset_splits.SEED,
+                         help="--structure-source frame only: seeds the per-protein frame draw")
+    parser.add_argument('--frame-index', type=int, default=None,
+                         help="--structure-source frame only: use this frame index for every "
+                              "protein instead of drawing one at random (0 = first frame)")
     parser.add_argument('--val-fold', type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
                          help="ATLAS only: cross_val fold used as the validation split")
     parser.add_argument('--test-fold', type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
@@ -96,7 +117,14 @@ def create_parser():
 
 
 def process_split(records, split_name, save_dir):
-    """Featurize each loaded relaxed structure into a MapDiff graph .pt. Returns the ids that failed."""
+    """Featurize each loaded structure into a MapDiff graph .pt. Returns the ids that failed.
+
+    Source-agnostic: `lib/traj_frames.py` hands back records in the same shape
+    `lib/relaxed_pdb.py` does, so `write_record_pdb` and `pdb2graph` are unchanged. A frame's
+    PDB is backbone-only, which MapDiff's featurizer already tolerates (`place_missing_cb` /
+    `place_missing_o` fill CB and O); only DSSP's SASA is affected, so SASA is not comparable
+    across the two sources.
+    """
     os.makedirs(save_dir, exist_ok=True)
     pending = [p for p in records if not os.path.exists(os.path.join(save_dir, f'{p}.pt'))]
     if not pending:
@@ -144,8 +172,11 @@ def compute_marginal(save_dir, out_path, train_ids):
 
 def main():
     args = create_parser()
-    save_root = args.save_root or f'./surffold_data/{args.ds_name}_process/'
-    marginal_out = args.marginal_out or f'./surffold_data/train_marginal_x_{args.ds_name}.pt'
+    # The source is part of the default path: a relaxed run and a frame run must not write
+    # their graphs into the same directory.
+    suffix = '' if args.structure_source == 'relaxed' else f'_{args.structure_source}'
+    save_root = args.save_root or f'./surffold_data/{args.ds_name}{suffix}_process/'
+    marginal_out = args.marginal_out or f'./surffold_data/train_marginal_x_{args.ds_name}{suffix}.pt'
     traj_h5 = dataset_splits.default_h5(args.ds_name) if args.traj_h5 is None else args.traj_h5
 
     train_ids, val_ids, test_ids = dataset_splits.get_splits(
@@ -154,18 +185,27 @@ def main():
     print(f'{args.ds_name}: {len(train_ids)} train / {len(val_ids)} validation / '
           f'{len(test_ids)} test proteins')
 
-    # Crop each deposited chain to the residues the trajectory covers, so MapDiff scores the
-    # same residue set as the sheaf model. For mdCATH this is also what reduces a deposited
-    # chain to the single CATH *domain* the dataset id names.
-    reference_seqs = {}
-    if traj_h5:
-        reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, all_ids)
-        print(f'Reference residue sequences found for {len(reference_seqs)}/'
-              f'{len(all_ids)} proteins in {traj_h5}')
+    if args.structure_source == 'frame':
+        # A trajectory frame already spans exactly the simulated residues (for mdCATH, exactly
+        # the domain), so there is nothing to crop and no RCSB download.
+        if not traj_h5:
+            raise SystemExit('--structure-source frame needs --traj-h5')
+        records, failures = traj_frames.load_frame_structures(
+            all_ids, traj_h5, seed=args.frame_seed, frame_index=args.frame_index)
+        print(f'Loaded {len(records)} trajectory frames from {traj_h5}, {len(failures)} unavailable')
+    else:
+        # Crop each deposited chain to the residues the trajectory covers, so MapDiff scores the
+        # same residue set as the sheaf model. For mdCATH this is also what reduces a deposited
+        # chain to the single CATH *domain* the dataset id names.
+        reference_seqs = {}
+        if traj_h5:
+            reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, all_ids)
+            print(f'Reference residue sequences found for {len(reference_seqs)}/'
+                  f'{len(all_ids)} proteins in {traj_h5}')
 
-    records, failures = relaxed_pdb.load_relaxed_structures(
-        all_ids, cache_dir=args.pdb_cache, reference_seqs=reference_seqs)
-    print(f'Loaded {len(records)} relaxed structures, {len(failures)} unavailable')
+        records, failures = relaxed_pdb.load_relaxed_structures(
+            all_ids, cache_dir=args.pdb_cache, reference_seqs=reference_seqs)
+        print(f'Loaded {len(records)} relaxed structures, {len(failures)} unavailable')
 
     all_errors = {
         'train': process_split({p: records[p] for p in train_ids if p in records},

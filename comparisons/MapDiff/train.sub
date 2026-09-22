@@ -5,7 +5,7 @@
 # MapDiff.tar.gz should be a tarball of a *pristine* checkout of
 # peizhenbai/MapDiff (`git clone https://github.com/peizhenbai/MapDiff &&
 # tar czf MapDiff.tar.gz MapDiff/`) -- train.sh overlays this folder's
-# dataset/wandb/scRMSD additions on top of it at run time, so the repo itself
+# dataset/wandb additions on top of it at run time, so the repo itself
 # is never modified. See README.md.
 #
 # Setup (one-time):
@@ -28,9 +28,8 @@
 #
 # wandb.use=True below logs both stages to a single Weights & Biases run
 # (key-file auth works fine non-interactively -- see wandb_api.txt, not
-# checked in). ESMFold (self-consistency RMSD) needs internet access to
-# download facebook/esmfold_v1, and so does the RCSB download -- pinned to a
-# machine that has it.
+# checked in). The RCSB download needs internet access -- pinned to a machine
+# that has it.
 #
 # Submit:
 #   mkdir -p logs && condor_submit train.sub
@@ -48,42 +47,42 @@ DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 #DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
 #DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
 
-executable              = train.sh
-environment             = "DS_NAME=$(DS_NAME)"
-# Forwarded verbatim to `python train.py ...` -- see conf/train.yaml. The dataset.*
-# defaults in conf/dataset/$(DS_NAME).yaml already match where train.sh featurizes
-# into, so only the run/wandb wiring needs setting here. Pass prior_model.path=<ckpt>
-# to skip stage 1 and load an already-trained mask-prior IPA checkpoint instead.
-arguments               = dataset=$(DS_NAME) wandb.use=True wandb.key_file=./wandb_api.txt experiment.name=$(DS_NAME)_mapdiff
+# What MapDiff trains on: 'relaxed' (each protein's deposited RCSB entry, the default) or
+# 'frame' (one random frame of its MD trajectory, lib/traj_frames.py). train.sh derives both
+# the featurization flag and dataset.process_root from this, so they cannot disagree.
+# Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
+STRUCTURE_SOURCE        = relaxed
 
-# The pristine MapDiff tarball, this folder's dataset/wandb/scRMSD additions, the
+executable              = train.sh
+environment             = "DS_NAME=$(DS_NAME) STRUCTURE_SOURCE=$(STRUCTURE_SOURCE)"
+# Forwarded verbatim to `python train.py ...` -- see conf/train.yaml. train.sh prepends the
+# dataset.process_root / dataset.marginal_train_dir that match $(STRUCTURE_SOURCE), so only
+# the run/wandb wiring needs setting here. Pass prior_model.path=<ckpt> to skip stage 1 and
+# load an already-trained mask-prior IPA checkpoint instead.
+arguments               = dataset=$(DS_NAME) wandb.use=True wandb.key_file=./wandb_api.txt experiment.name=$(DS_NAME)_$(STRUCTURE_SOURCE)_mapdiff
+
+# The pristine MapDiff tarball, this folder's dataset/wandb additions, the
 # API-key file (train.sh splits the W&B key out of it into wandb_api.txt),
-# lib/{scrmsd,stats_utils,relaxed_pdb,dataset_splits}.py (shared across all models --
+# lib/{stats_utils,relaxed_pdb,traj_frames,dataset_splits}.py (shared across all models --
 # see ../../lib), and the dataset's trajectory store + split index.
-transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(DS_H5), $(DS_CSV)
+transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(DS_H5), $(DS_CSV)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
 transfer_output_files   = MapDiff/outputs
-transfer_output_remaps  = "MapDiff/outputs = ./results/$(DS_NAME)_mapdiff_$(Cluster)_$(Process)"
+transfer_output_remaps  = "MapDiff/outputs = ./results/$(DS_NAME)_$(STRUCTURE_SOURCE)_mapdiff_$(Cluster)_$(Process)"
 
 log                     = logs/train_$(DS_NAME)_$(Cluster)_$(Process).log
 output                  = logs/train_$(DS_NAME)_$(Cluster)_$(Process).out
 error                   = logs/train_$(DS_NAME)_$(Cluster)_$(Process).err
 
-# 2 GPUs: the EGNN/IPA training on cuda:0, ESMFold (self-consistency RMSD) on
-# cuda:1. ESMFold's fp32 weights are ~11GB and stay resident for the whole run
-# although they are only used in the val/test passes -- sharing one card with
-# them OOMs the diffusion stage at the configured batch size. See the `compute`
-# block in conf/train.yaml; override compute.esmfold_device=cuda:0 (and lower
-# train.batch_size/mask_train.batch_size) to go back to a single GPU.
-request_gpus            = 2
+request_gpus            = 1
 request_cpus            = 16
 request_memory          = 128GB
 request_disk            = 200GB
 
 
-# ESMFold + RCSB downloads need internet access -- pin to the same machine
+# The RCSB download needs internet access -- pin to the same machine
 # scripts/train_residue_classifier.sub uses for that reason. Also only
 # match GPU nodes with a modern-enough driver/CUDA for the cu124 image.
 Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")

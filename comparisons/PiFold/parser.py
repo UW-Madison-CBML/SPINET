@@ -2,7 +2,7 @@
 
 Adds the dataset-selection flags our two datasets need (`--data_name ATLAS|MDCATH`, plus the
 split index / trajectory store / PDB cache locations) and the Weights & Biases wiring
-`main.py` uses to log recovery, perplexity and scRMSD.
+`main.py` uses to log recovery and perplexity.
 
 The defaults that have to agree with the other comparison models (held-out fold, max protein
 length, RNG seed) are read straight out of `lib/dataset_splits.py` rather than spelled out
@@ -49,6 +49,14 @@ def create_parser():
                               "whole deposited chains uncropped.")
     parser.add_argument('--pdb_cache', default='', type=str,
                          help='Where downloaded RCSB entries are cached (default: <data_root>/pdb_cache)')
+    parser.add_argument('--structure_source', default='relaxed', choices=['relaxed', 'frame'],
+                         help="What each protein's coordinates come from: its deposited RCSB entry "
+                              "('relaxed', the default) or one frame of its MD trajectory ('frame')")
+    parser.add_argument('--frame_seed', default=dataset_splits.SEED, type=int,
+                         help='--structure_source frame only: seeds the per-protein frame draw')
+    parser.add_argument('--frame_index', default=None, type=int,
+                         help='--structure_source frame only: use this frame index for every protein '
+                              'instead of drawing one at random (0 = first frame)')
     parser.add_argument('--val_fold', default=dataset_splits.DEFAULT_VAL_FOLD, type=int,
                          help='ATLAS only: cross_val fold used as the validation split')
     parser.add_argument('--test_fold', default=dataset_splits.DEFAULT_TEST_FOLD, type=int,
@@ -86,12 +94,6 @@ def create_parser():
     parser.add_argument('--edge_angle', default=1, type=int)
     parser.add_argument('--edge_direct', default=1, type=int)
     parser.add_argument('--virtual_num', default=3, type=int)
-
-    # Self-consistency RMSD (ESMFold) -- see lib/scrmsd.py
-    parser.add_argument('--scrmsd', default=1, type=int,
-                         help='Compute scRMSD against the relaxed structures on the held-out split (0 disables)')
-    parser.add_argument('--scrmsd_batch_size', default=4, type=int,
-                         help='How many designs ESMFold folds per call')
 
     # Weights & Biases
     parser.add_argument('--wandb', default=1, type=int, help='Log to W&B (0 disables)')

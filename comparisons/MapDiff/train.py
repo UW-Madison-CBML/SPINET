@@ -30,13 +30,9 @@ from utils import set_seed
 
 from trainer import MapDiffTrainer
 
-# lib/stats_utils.py + lib/scrmsd.py are copied in flat next to this file (see
-# ../README.md and train.sh) -- fall back to walking up to a lib/ directory
-# for local/dev runs from inside the source tree.
 try:
     import dataset_splits
     import stats_utils
-    from scrmsd import load_esmfold
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
         _cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), _up, 'lib')
@@ -45,7 +41,6 @@ except ImportError:
             break
     import dataset_splits
     import stats_utils
-    from scrmsd import load_esmfold
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -58,14 +53,10 @@ SPLIT_DATASETS = {'ATLAS': 'atlas', 'MDCATH': 'mdcath'}
 
 
 def resolve_devices(cfg):
-    """``(training device, ESMFold device)`` from ``cfg.compute``.
+    """The training device named by ``cfg.compute``.
 
-    ESMFold's fp32 weights (~11GB) would otherwise sit on the training GPU for the whole
-    run to be used only in the val/test passes, which is what pushes the diffusion stage
-    into OOM at the configured batch size -- conf/train.yaml puts it on a second GPU.
     A requested index that does not exist on this machine falls back to cuda:0 with a
-    warning rather than crashing, so single-GPU dev runs still work (at a smaller
-    batch size).
+    warning rather than crashing, so single-GPU dev runs still work.
     """
     if not torch.cuda.is_available():
         print('No CUDA device available -- running everything on CPU')
@@ -82,7 +73,7 @@ def resolve_devices(cfg):
             return torch.device('cuda:0')
         return dev
 
-    return pick(cfg.compute.device, 'training'), pick(cfg.compute.esmfold_device, 'ESMFold')
+    return pick(cfg.compute.device, 'training')
 
 
 def count_parameters(model):
@@ -131,8 +122,8 @@ def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
     print(f"Output directory: {output_dir}")
 
-    device, esmfold_device = resolve_devices(cfg)
-    print(f"Training on {device}; ESMFold (scRMSD) on {esmfold_device}")
+    device = resolve_devices(cfg)
+    print(f"Training on {device}.")
     # The one seed every comparison run uses (lib/dataset_splits.SEED), rather than each
     # model's own upstream default.
     set_seed(dataset_splits.SEED)
@@ -246,15 +237,12 @@ def main(cfg: DictConfig):
     if cfg.train.scheduler:
         scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=cfg.train.lr, total_steps=train_num_steps)
 
-    esmfold_tokenizer, esmfold_model = load_esmfold(device=str(esmfold_device))
-
     trainer = MapDiffTrainer(
         cfg,
         prior_model=prior_model, prior_optimizer=prior_optimizer, mask_train_dataloader=mask_train_loader,
         diffusion_model=diffusion_model, optimizer=optimizer,
         train_dataloader=train_loader, val_dataloader=val_loader, test_dataloader=test_loader,
-        device=device, esmfold_device=esmfold_device, output_dir=output_dir,
-        esmfold_tokenizer=esmfold_tokenizer, esmfold_model=esmfold_model, wandb_run=wandb_run,
+        device=device, output_dir=output_dir, wandb_run=wandb_run,
         prior_scheduler=prior_scheduler, scheduler=scheduler,
         train_batch_size=cfg.train.batch_size, train_num_steps=train_num_steps,
         save_and_sample_every=cfg.train.save_and_sample_every,

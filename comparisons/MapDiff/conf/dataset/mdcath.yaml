@@ -3,12 +3,12 @@ name: MDCATH
 # Graphs featurized from each CATH domain's *relaxed* (deposited) PDB entry, cropped to the
 # residues its mdCATH trajectory covers -- see ../../data/generate_graph_relaxed.py. The
 # `domain` ids (e.g. 12asA00) name the pdb entry and chain the domain comes from.
-train_dir: ./surffold_data/mdcath_process/train/
+train_dir: ${dataset.process_root}/train/
 # mdcath_320_0_topology_split.csv's three `split` values map one-to-one onto the three splits:
 # `train` trains, `validation` is scored every epoch and drives model selection, `test` is
 # held out and scored once -- matching scripts/train_residue_classifier.py.
-val_dir: ./surffold_data/mdcath_process/validation/
-test_dir: ./surffold_data/mdcath_process/test/
+val_dir: ${dataset.process_root}/validation/
+test_dir: ${dataset.process_root}/test/
 
 # Which rows land in which split is decided by lib/dataset_splits.py, not by whatever files
 # happen to sit in the directories above (train.py's `split_file_ids`). Leave index_csv null
@@ -25,4 +25,11 @@ test_fold: 4
 # filters on. All three have to move together or the models score different proteins.
 max_length: 1200
 
+# Where data/generate_graph_relaxed.py wrote its graphs. Switching MapDiff onto MD frames
+# instead of deposited structures is these two overrides plus the matching --structure-source
+# on that script (train.sh does both from STRUCTURE_SOURCE):
+#
+#   dataset.process_root=./surffold_data/mdcath_frame_process \
+#   dataset.marginal_train_dir=./surffold_data/train_marginal_x_mdcath_frame.pt
+process_root: ./surffold_data/mdcath_process
 marginal_train_dir: ./surffold_data/train_marginal_x_mdcath.pt

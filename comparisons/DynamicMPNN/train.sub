@@ -3,9 +3,7 @@ universe = docker
 
 # DynamicMPNN takes an ENSEMBLE of conformers sampled from the MD trajectory -- that
 # ensemble input is the thing being benchmarked, so unlike comparisons/{MapDiff,PiFold}
-# it is not retargeted onto relaxed structures. It does download the relaxed (deposited)
-# structures, but only as the scRMSD reference, so all three models are scored against
-# the same ground truth.
+# it is not retargeted onto relaxed structures.
 #
 # ATLAS and mdCATH are trained and evaluated SEPARATELY -- one job each, matching
 # scripts/train_residue_classifier.py's --ds-name. ATLAS is the default; for mdCATH:
@@ -32,12 +30,11 @@ output = logs/train_$(DS_NAME)_$(Cluster)_$(Process).out
 
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
-# ESMFold (scRMSD) downloads facebook/esmfold_v1 from Hugging Face at run time, and
-# lib/relaxed_pdb.py downloads the relaxed structures from files.rcsb.org, so this needs a
-# machine with internet access -- same one scripts/train_residue_classifier.sub uses.
+# The job needs a machine with internet access (W&B) -- same one
+# scripts/train_residue_classifier.sub uses.
 Requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
-transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, ../../../api_keys.txt, ../../scripts/load_dynamics.py, $(DS_H5), $(DS_CSV)
+transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../lib/dataset_splits.py, ../../../api_keys.txt, ../../scripts/load_dynamics.py, $(DS_H5), $(DS_CSV)
 
 request_cpus = 8
 request_memory = 128GB

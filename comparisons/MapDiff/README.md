@@ -3,7 +3,7 @@
 This folder trains/evaluates MapDiff against a **pristine, unmodified
 checkout of [peizhenbai/MapDiff](https://github.com/peizhenbai/MapDiff)** --
 the repo itself never needs to be edited. `train.sh`/`eval.sh` extract a
-tarball of the repo and copy the dataset + wandb/scRMSD support below on top
+tarball of the repo and copy the dataset + wandb support below on top
 of it at run time, so re-cloning/re-pulling `MapDiff/` and re-tarring it
 always works.
 
@@ -28,7 +28,7 @@ MapDiff/
   data/generate_graph_relaxed.py new: relaxed (deposited) PDB -> MapDiff graph featurization
   train.py                       new: single entry point, runs both training stages in one wandb run
   trainer.py                     new: MapDiffTrainer -- merges trainer/trainer.py + trainer/mask_ipa_trainer.py,
-                                  drops comet_ml, adds scRMSD + a confusion-matrix image (see below)
+                                  drops comet_ml, adds a confusion-matrix image (see below)
   eval_relaxed.py                standalone re-eval of a saved checkpoint on the held-out split (+ scRMSD)
 train.sh / train.sub             CHTC entry point + submit file for training
 eval.sh / eval.sub                CHTC entry point + submit file for evaluation
@@ -59,13 +59,6 @@ log to the same W&B run:
 - sequence recovery (top-1/mean/median) and perplexity (as before)
 - BLOSUM-weighted recovery (NSSR42/62/80/90, test only)
 - an amino-acid confusion matrix, logged as a `wandb.Image`
-- **scRMSD**: the predicted sequence is folded with ESMFold
-  (`lib/scrmsd.py`) and Kabsch-RMSD'd against the protein's ground-truth
-  **relaxed (deposited)** backbone (CA/N/C/O) coordinates -- the same
-  self-consistency metric `comparisons/{PiFold,DynamicMPNN}` compute, so
-  results are directly comparable. No alignment step is needed here: the
-  graphs MapDiff trains on are themselves featurized from those deposited
-  structures, so `atom_pos` already *is* the relaxed reference.
 
 Every run additionally logs the *complete* metric set
 `scripts/train_residue_classifier.py`'s `run_val` produces, under exactly the
@@ -82,7 +75,6 @@ and stds are over proteins):
 - `pred_seqs` (`<split>_pred_seqs` outside the val split) -- a `wandb.Table` of
   every argmax design, one row per protein, labelled by `pdb` (`<pdb>_<chain>`
   for ATLAS, the CATH domain id for mdCATH)
-- `<split>_rmsd_{mean,std}` -- scRMSD, under run_val's key
 - `params` -- trainable parameter count
 
 ## 1. Build the pristine repo tarball
@@ -107,9 +99,9 @@ Then set `docker_image = <your_dockerhub_username>/mapdiff:[version]` in
 
 ## 3. Dataset
 
-MapDiff is a static-structure inverse-folding model, so it trains and evaluates on each
-protein's **relaxed (deposited) PDB entry**, not on a frame pulled out of the MD
-trajectory. `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset id
+MapDiff is a static-structure inverse-folding model, so by default it trains and evaluates
+on each protein's **relaxed (deposited) PDB entry** rather than on a frame pulled out of the
+MD trajectory (`--structure-source frame` switches that; see below). `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset id
 names, and crops it to the residues the trajectory covers (using the trajectory's own
 residue list as the reference sequence), so MapDiff scores the same residues as every
 other model in the comparison. For mdCATH that cropping is also what reduces a deposited
@@ -117,8 +109,49 @@ chain to the single CATH *domain* the `domain` id names (e.g. `12asA00` -> entry
 chain `A`, domain 02). Downloads are cached under `pdb_cache/` in the job's scratch dir.
 
 (`comparisons/DynamicMPNN` deliberately does *not* do this -- it keeps training on MD
-conformer ensembles, since that ensemble input is the thing being benchmarked. It uses
-the relaxed structures only as the scRMSD reference.)
+conformer ensembles, since that ensemble input is the thing being benchmarked.)
+
+### Training on MD frames instead (`--structure-source frame`)
+
+`data/generate_graph_relaxed.py --structure-source frame` builds the graphs from one random
+frame of each protein's MD trajectory (`lib/traj_frames.py`) rather than from its deposited
+entry, leaving splits, filtering, featurization, metrics and W&B keys untouched — so
+"deposited structure vs. a single MD frame" is a one-flag ablation rather than a different
+pipeline. `train.sh` drives both halves from one variable:
+
+```bash
+STRUCTURE_SOURCE=frame ./train.sh wandb.use=True
+```
+
+or `condor_submit train.sub STRUCTURE_SOURCE=frame`. It featurizes into
+`surffold_data/<ds>_frame_process/` and passes the matching
+`dataset.process_root` / `dataset.marginal_train_dir` to `train.py`, so the graphs a run
+reads can never disagree with the ones it wrote. Doing it by hand is the same two steps:
+
+```bash
+python data/generate_graph_relaxed.py --ds-name atlas --structure-source frame \
+    --save-root ./surffold_data/atlas_frame_process \
+    --marginal-out ./surffold_data/train_marginal_x_atlas_frame.pt
+python train.py dataset=atlas \
+    dataset.process_root=./surffold_data/atlas_frame_process \
+    dataset.marginal_train_dir=./surffold_data/train_marginal_x_atlas_frame.pt
+```
+
+`eval_relaxed.py` takes the same `--structure-source` / `--frame-seed` / `--frame-index`;
+pass whatever the checkpoint was trained on, since scoring a frame-trained model on
+deposited structures measures the domain shift rather than the model.
+
+- No RCSB download and no cropping: a frame already spans exactly the residues the
+  trajectory simulates (for mdCATH, exactly the domain), so `--pdb-cache` is unused.
+- The frame is drawn deterministically from `(--frame-seed, protein id)`, so a rerun — and
+  PiFold's run at the same seed — sees the same frame per protein. `--frame-index 0` pins
+  the first frame for every protein instead.
+- Coordinates are converted from the store's nanometres to Angstroms, without which every
+  distance feature collapses into the lowest RBF bin.
+- Frames are **backbone-only** (`CA, N, C, O`). MapDiff already handles that — its
+  featurizer requires only CA/N/C and `place_missing_cb` / `place_missing_o` fill the rest
+  — but DSSP computes solvent accessibility on a backbone-only chain, so the `sasa` feature
+  is **not** comparable residue-for-residue against a relaxed run.
 
 Splits come from `lib/dataset_splits.py`, identical to
 `scripts/train_residue_classifier.py`:

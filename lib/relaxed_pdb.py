@@ -2,12 +2,13 @@
 Load *relaxed* (experimentally deposited) structures from the RCSB PDB, given the protein
 ids our datasets are keyed by.
 
-Every comparison model in `comparisons/` now needs the same thing: "for this set of pdb ids,
-give me the deposited structure, the sequence it resolves, and its backbone coordinates".
-MapDiff and PiFold train and evaluate on those structures directly (rather than on a single
-MD frame), and all three models -- MapDiff, PiFold and DynamicMPNN -- score self-consistency
-RMSD against them. DynamicMPNN keeps training on MD conformer ensembles (that ensemble input
-*is* the model being benchmarked), so it only uses this module for the scRMSD reference.
+`comparisons/{MapDiff,PiFold}` need the same thing: "for this set of pdb ids, give me the
+deposited structure, the sequence it resolves, and its backbone coordinates". Both train and
+evaluate on those structures directly. `lib/traj_frames.py` is the alternative source they
+can be pointed at instead -- one MD frame per protein, same record format -- which is what
+their `--structure-source frame` uses. DynamicMPNN does not use this module at all: it
+trains on MD conformer ensembles straight out of the trajectory store, since that ensemble
+input *is* the thing being benchmarked.
 
 Two id conventions are in play, both handled by `parse_structure_id`:
 
@@ -23,7 +24,8 @@ have unresolved loops and expression tags, and an mdCATH *domain* is only a slic
 chain. `crop_to_reference` pairwise-aligns the deposited chain's sequence against a reference
 sequence (the trajectory's own residue list, via `reference_seqs_from_h5`) and keeps only the
 aligned residues. That way every model -- sheaf, MapDiff, PiFold, DynamicMPNN -- sees the
-same residues for a given protein, which is the whole point of the comparison.
+same residues for a given protein, which is the whole point of the comparison. (A trajectory
+frame needs none of this: it already spans exactly those residues.)
 
 Network access is required (files.rcsb.org); downloads are cached on disk by pdb code, so a
 job only pays for them once.

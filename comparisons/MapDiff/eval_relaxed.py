@@ -53,6 +53,7 @@ try:
     import dataset_splits
     import relaxed_pdb
     import stats_utils
+    import traj_frames
     from scrmsd import load_esmfold, evaluate_scrmsd
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
@@ -63,6 +64,7 @@ except ImportError:
     import dataset_splits
     import relaxed_pdb
     import stats_utils
+    import traj_frames
     from scrmsd import load_esmfold, evaluate_scrmsd
 
 allow_pyg_data_pickles()
@@ -98,6 +100,16 @@ def create_parser():
                          help="Trajectory store, read only for each protein's reference residue "
                               "sequence (default: the dataset's standard file name)")
     parser.add_argument('--pdb-cache', default='./pdb_cache', help="Where downloaded RCSB entries are cached")
+    parser.add_argument('--structure-source', default='relaxed', choices=('relaxed', 'frame'),
+                         help="What each protein's coordinates come from: its deposited RCSB entry "
+                              "('relaxed', the default) or one frame of its MD trajectory ('frame'). "
+                              "Match whatever the checkpoint was trained on.")
+    parser.add_argument('--frame-seed', type=int, default=dataset_splits.SEED,
+                         help="--structure-source frame only: seeds the per-protein frame draw. Use "
+                              "the same seed training used to score the same frames.")
+    parser.add_argument('--frame-index', type=int, default=None,
+                         help="--structure-source frame only: use this frame index for every protein "
+                              "instead of drawing one at random (0 = first frame)")
     parser.add_argument('--val-fold', type=int, default=dataset_splits.DEFAULT_VAL_FOLD,
                          help="ATLAS only: cross_val fold used as the validation split")
     parser.add_argument('--test-fold', type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
@@ -136,18 +148,32 @@ def find_checkpoint(run_dir):
 
 
 def load_split_entries(ds_name, index_csv, traj_h5, pdb_cache, val_fold, test_fold, max_length,
-                        split='test'):
-    """Featurize the relaxed (deposited) structure of every protein in `split` ('test'/'val')."""
+                        split='test', structure_source='relaxed', frame_seed=dataset_splits.SEED,
+                        frame_index=None):
+    """Featurize every protein in `split` ('test'/'val') from its chosen structure source.
+
+    `structure_source` must match what the checkpoint was trained on -- scoring a
+    frame-trained model on deposited structures (or the reverse) measures the domain shift,
+    not the model. See data/generate_graph_relaxed.py's --structure-source.
+    """
     _, val_ids, test_ids = dataset_splits.get_splits(
         ds_name, index_csv, val_fold=val_fold, test_fold=test_fold)
     split_ids = test_ids if split == 'test' else val_ids
     traj_h5 = dataset_splits.default_h5(ds_name) if traj_h5 is None else traj_h5
 
-    reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, split_ids) if traj_h5 else {}
-    records, failures = relaxed_pdb.load_relaxed_structures(
-        split_ids, cache_dir=pdb_cache, reference_seqs=reference_seqs)
-    if failures:
-        print(f'{len(failures)}/{len(split_ids)} {split} proteins had no usable deposited structure')
+    if structure_source == 'frame':
+        if not traj_h5:
+            raise SystemExit('--structure-source frame needs --traj-h5')
+        records, failures = traj_frames.load_frame_structures(
+            split_ids, traj_h5, seed=frame_seed, frame_index=frame_index)
+        if failures:
+            print(f'{len(failures)}/{len(split_ids)} {split} proteins had no usable trajectory frame')
+    else:
+        reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, split_ids) if traj_h5 else {}
+        records, failures = relaxed_pdb.load_relaxed_structures(
+            split_ids, cache_dir=pdb_cache, reference_seqs=reference_seqs)
+        if failures:
+            print(f'{len(failures)}/{len(split_ids)} {split} proteins had no usable deposited structure')
 
     entries = []
     for protein_id in tqdm(split_ids, desc=f'featurizing {ds_name} {split} proteins'):
@@ -243,7 +269,9 @@ def main():
     ddim_steps = args.ddim_steps or cfg.diffusion.ddim_steps
 
     entries = load_split_entries(args.ds_name, args.index_csv, args.traj_h5, args.pdb_cache,
-                                  args.val_fold, args.test_fold, args.max_length, split=args.split)
+                                  args.val_fold, args.test_fold, args.max_length, split=args.split,
+                                  structure_source=args.structure_source,
+                                  frame_seed=args.frame_seed, frame_index=args.frame_index)
     if len(entries) == 0:
         raise RuntimeError("No usable {} proteins found for dataset {}".format(args.split, args.ds_name))
     print("Loaded {} {} {} proteins".format(len(entries), args.ds_name, args.split))

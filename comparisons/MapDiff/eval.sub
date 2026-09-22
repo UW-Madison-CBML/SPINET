@@ -50,9 +50,9 @@ CHECKPOINT              = atlas_mapdiff_best.pt
 # The pristine MapDiff tarball, this folder's dataset/wandb/scRMSD additions, the
 # eval script, the trained checkpoint + its resolved Hydra config, the API-key file
 # (eval.sh splits the W&B key out of it into wandb_api.txt),
-# lib/{scrmsd,stats_utils,relaxed_pdb,dataset_splits}.py, and the dataset's
+# lib/{scrmsd,stats_utils,relaxed_pdb,traj_frames,dataset_splits}.py, and the dataset's
 # trajectory store (reference residue sequences) + split index.
-transfer_input_files    = eval.sh, eval_relaxed.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(RUN_DIR)/model/$(CHECKPOINT), $(RUN_DIR)/configs/config.yaml, $(DS_H5), $(DS_CSV)
+transfer_input_files    = eval.sh, eval_relaxed.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(RUN_DIR)/model/$(CHECKPOINT), $(RUN_DIR)/configs/config.yaml, $(DS_H5), $(DS_CSV)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT

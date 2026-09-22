@@ -2,9 +2,7 @@
 Unlike MapDiff and PiFold -- which are static-structure models and so train on each
 protein's relaxed (deposited) PDB entry -- DynamicMPNN takes an **ensemble of conformers
 sampled from the MD trajectory**, and that ensemble input is precisely the thing being
-benchmarked. So the input pipeline below deliberately stays on the trajectory store. The
-relaxed structures are pulled in only as the scRMSD *reference*, so all three comparison
-models are scored against the same ground truth.
+benchmarked. So the input pipeline below deliberately stays on the trajectory store.
 
 Pipeline (see README.md for the full reasoning):
   1. For every protein in the dataset's split index, pull its trajectory out of the hdf5
@@ -31,8 +29,7 @@ Logs to a single Weights & Biases run, under the same keys
 scripts/train_residue_classifier.py's `run_val` uses (see `lib.stats_utils.ResidueMetrics`):
 per-step train loss, parameter count, and per-epoch per-protein recovery (top-1/5/10),
 perplexity, per-residue precision/recall/f1, an amino-acid confusion matrix, a `pred_seqs`
-table of every held-out design keyed by ``<pdb>_<chain>``, and scRMSD (predicted sequence
-folded with ESMFold, Kabsch-RMSD'd against the protein's ground-truth *relaxed* backbone).
+table of every held-out design keyed by ``<pdb>_<chain>``.
 """
 
 import argparse
@@ -55,9 +52,6 @@ from tqdm import tqdm
 THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = THIS_DIR.parents[1]
 
-# `residue_classifier_dataset` / `scrmsd` / `stats_utils` (lib/) and `load_dynamics`
-# (scripts/) use bare, flat imports -- mirror the convention the rest of the repo's CHTC
-# scripts rely on.
 for extra_path in (REPO_ROOT / "lib", REPO_ROOT / "scripts"):
     if str(extra_path) not in sys.path:
         sys.path.insert(0, str(extra_path))
@@ -69,10 +63,8 @@ if str(DYNAMICMPNN_SRC) not in sys.path:
     sys.path.insert(0, str(DYNAMICMPNN_SRC))
 
 import dataset_splits  # noqa: E402
-import relaxed_pdb
 from load_dynamics import BACKBONE_ATOMS
 from residue_classifier_dataset import ResidueClassifierDataset
-from scrmsd import load_esmfold, evaluate_scrmsd
 from stats_utils import ResidueMetrics, three_letter_codes
 
 from dynamicmpnn import constants
@@ -205,10 +197,6 @@ def frame_to_pyg_data(frame_coords: np.ndarray, residue_type: torch.Tensor) -> D
     """One selected conformer -> the minimal per-conformer fields
     `ProteinGraphFeaturiserSingleChain.stack_conformations` actually reads.
 
-    No ground-truth backbone is stored alongside: scRMSD scores designs against the
-    protein's *relaxed* (deposited) structure, which `load_scrmsd_references` fetches
-    separately, not against a trajectory frame.
-
     frame_coords: num_res, num_atoms (hdf5 order == BACKBONE_ATOMS order, CA/N/C/O), 3
     """
     coords = torch.from_numpy(frame_coords[:, NCA_C_ATOM_IDX, :]).float()  # num_res, 3 (N,CA,C), 3
@@ -276,9 +264,6 @@ def build_processed_dataset(
 ) -> None:
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    # An ensemble saved before conformer selection moved from RMSD to TM has no `tm_scores`,
-    # so the featuriser would silently fall back to `random.sample` on a pool that was chosen
-    # by the wrong metric. Rebuild those rather than reuse them.
     def needs_rebuild(pdb_id):
         path = processed_dir / f"{pdb_id}.pt"
         if force_rebuild or not path.exists():
@@ -346,43 +331,6 @@ def filter_by_length(pdb_ids: list, traj_h5_path: Path, max_length: int) -> list
     return kept
 
 
-def load_scrmsd_references(traj_h5_path: Path, pdb_ids: list, pdb_cache: Path) -> dict:
-    """Ground-truth *relaxed* (deposited) structures to score designs against.
-
-    DynamicMPNN designs over the trajectory's residues, but the deposited chain resolves a
-    different (and, for an mdCATH domain, larger) set of them, so a plain positional
-    comparison would be wrong. `relaxed_pdb.crop_to_reference` aligns the deposited chain
-    against the trajectory's own residue sequence and hands back both the cropped
-    coordinates and `reference_index` -- the trajectory positions those coordinates
-    correspond to -- which is exactly the correspondence `lib.scrmsd.evaluate_scrmsd` wants.
-
-    Returns ``{pdb_id: {'coords': (n, 4, 3) tensor, 'pred_index': (n,) int array,
-    'num_residues': int}}``, where `num_residues` is the trajectory's residue count (used to
-    check that a batch's design lines up before scoring it).
-    """
-    reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5_path, pdb_ids)
-    records, failures = relaxed_pdb.load_relaxed_structures(
-        pdb_ids, cache_dir=str(pdb_cache), reference_seqs=reference_seqs)
-    if failures:
-        logger.warning(f"{len(failures)}/{len(pdb_ids)} validation proteins have no usable "
-                        "deposited structure; they are skipped for scRMSD.")
-
-    references = {}
-    for pdb_id, record in records.items():
-        if record.get("reference_index") is None:
-            # No trajectory residue sequence to align against, so there is no correspondence
-            # between the design and the deposited chain -- scoring it would be meaningless.
-            logger.warning(f"{pdb_id}: no reference residue sequence in {traj_h5_path}; "
-                            "skipped for scRMSD.")
-            continue
-        references[pdb_id] = {
-            "coords": torch.from_numpy(record["coords"]).float(),
-            "pred_index": record.get("reference_index"),
-            "num_residues": len(reference_seqs.get(pdb_id, "")),
-        }
-    return references
-
-
 # --------------------------------------------------------------------------------------
 # Step 4: the dataset's two held-out splits, val and test (see lib/dataset_splits.py)
 # --------------------------------------------------------------------------------------
@@ -433,27 +381,9 @@ class PdbTrackingFeaturiser:
         return getattr(self.featuriser, name)
 
 
-def compute_batch_scrmsd(pred_seqs, refs, esmfold_tokenizer, esmfold_model, device):
-    """Fold each protein's designed sequence with ESMFold and Kabsch-RMSD it against that
-    protein's ground-truth *relaxed* (deposited) backbone (CA, N, C, O) -- the same
-    self-consistency metric comparisons/{MapDiff,PiFold} compute.
 
-    `refs` are `load_scrmsd_references` entries: the design spans the trajectory's residues
-    and the reference only the deposited subset of them, so `pred_index` carries the
-    correspondence and the reference is scored over all of its own residues.
-    """
-    return evaluate_scrmsd(
-        pred_seqs,
-        [ref["coords"] for ref in refs],
-        esmfold_tokenizer, esmfold_model,
-        pred_indices=[ref["pred_index"] for ref in refs],
-        ref_indices=[np.arange(ref["coords"].shape[0]) for ref in refs],
-        device=device,
-    ).tolist()
-
-
-def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_tokenizer,
-                   esmfold_model, epoch, run, num_params=0, split_name="val"):
+def run_validation(model, val_loader, crit, val_pdb_order,
+                   epoch, run, num_params=0, split_name="val"):
     """Score one held-out split and log scripts/train_residue_classifier.py's metric set.
 
     `lib.stats_utils.ResidueMetrics` owns every convention here (per-protein top-1/5/10,
@@ -482,7 +412,6 @@ def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_
             batch_pdb_ids = val_pdb_order[sample_offset:sample_offset + num_proteins_in_batch]
             sample_offset += num_proteins_in_batch
 
-            pred_seqs, batch_refs = [], []
             for p_idx, pdb_id in zip(range(num_proteins_in_batch), batch_pdb_ids):
                 protein_mask = (batch.batch == p_idx) & valid_mask
                 if not protein_mask.any():
@@ -497,7 +426,7 @@ def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_
 
                 # GAP/UNKNOWN targets have no column in the 20-class confusion matrix, so
                 # they are dropped from the scoring (the design above still spans every
-                # residue -- scRMSD needs the whole chain).
+                # residue).
                 keep = masked_seq < len(BASE_AMINO_ACIDS)
                 if keep.any():
                     kept_logits, kept_seq = masked_logits[keep], masked_seq[keep]
@@ -506,17 +435,6 @@ def run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs, esmfold_
                         nll=scoring_crit(kept_logits, kept_seq).item(),
                         sequence=design,
                     )
-
-                ref = scrmsd_refs.get(pdb_id)
-                # `pred_index` indexes the trajectory's residues, so the design has to span
-                # all of them -- skip any protein the featurizer's valid_mask trimmed.
-                if ref is not None and ref["num_residues"] == pred_idx.shape[0]:
-                    pred_seqs.append(design)
-                    batch_refs.append(ref)
-
-            if pred_seqs:
-                metrics.add_scrmsd(compute_batch_scrmsd(
-                    pred_seqs, batch_refs, esmfold_tokenizer, esmfold_model, DEVICE))
 
     log_dict = metrics.to_log_dict(
         cm_title=f"{split_name.capitalize()} Amino Acid Confusion Matrix", epoch=epoch)
@@ -541,8 +459,6 @@ def parse_args():
     parser.add_argument("--test-fold", type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
                          help="ATLAS only: cross_val fold held out as the test split -- never trained "
                               "on, scored once after the last epoch. mdCATH ignores it.")
-    parser.add_argument("--pdb-cache", type=Path, default=THIS_DIR / "pdb_cache",
-                         help="Where relaxed (deposited) RCSB entries are cached for scRMSD")
     parser.add_argument("--processed-dir", type=Path, default=None,
                          help="Where the .pt conformer ensembles live (default: ./processed_data_<ds>)")
     parser.add_argument("--max-length", type=int, default=dataset_splits.MAX_LENGTH,
@@ -606,9 +522,9 @@ def main():
     # WANDB artifact logging
     artifact = wandb.Artifact(name="scripts", type="model_file")
     artifact.add_file(os.path.abspath(__file__))
-    for dependency in (REPO_ROOT / "lib" / "scrmsd.py", REPO_ROOT / "lib" / "stats_utils.py",
+    for dependency in (REPO_ROOT / "lib" / "stats_utils.py",
                        REPO_ROOT / "lib" / "residue_classifier_dataset.py",
-                       REPO_ROOT / "lib" / "relaxed_pdb.py", REPO_ROOT / "lib" / "dataset_splits.py",
+                       REPO_ROOT / "lib" / "dataset_splits.py",
                        REPO_ROOT / "scripts" / "load_dynamics.py"):
         if dependency.exists():
             artifact.add_file(str(dependency))
@@ -631,14 +547,6 @@ def main():
         course_grain=args.course_grain,
         force_rebuild=args.force_rebuild,
     )
-
-    # scRMSD scores designs against the *relaxed* (deposited) structure, the same ground
-    # truth comparisons/{MapDiff,PiFold} use. Only the two scored splits need them.
-    scrmsd_refs = load_scrmsd_references(traj_h5, val_pdbs + test_pdbs, args.pdb_cache)
-    logger.info(f"Loaded relaxed reference structures for {len(scrmsd_refs)}/"
-                f"{len(val_pdbs) + len(test_pdbs)} val+test proteins (scRMSD)")
-
-    esmfold_tokenizer, esmfold_model = load_esmfold(device=DEVICE)
 
     model_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "model" / "AR1_single_chain.yaml")
     features_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "features" / "ca_bb_single_chain.yaml")
@@ -675,8 +583,8 @@ def main():
         split="train",
         in_memory=True,
     )
-    # Wrapped in PdbTrackingFeaturiser so run_validation can map each batch's samples back to
-    # the pdb_code they came from (needed to look up ground-truth backbones for scRMSD).
+    # Wrapped in PdbTrackingFeaturiser so run_validation can label each batch's samples with
+    # the pdb_code they came from.
     val_tracker = PdbTrackingFeaturiser(
         hydra.utils.instantiate(features_cfg, split="val", device="cpu", distance_eps=DISTANCE_EPS))
     val_dataset = PTFileDataset(
@@ -747,29 +655,23 @@ def main():
 
         logger.info(f"Epoch {epoch}: train loss {total_loss / max(len(train_loader), 1):.4f}")
 
-        metrics = run_validation(model, val_loader, crit, val_pdb_order, scrmsd_refs,
-                                  esmfold_tokenizer, esmfold_model, epoch, run,
+        metrics = run_validation(model, val_loader, crit, val_pdb_order, epoch, run,
                                   num_params=pytorch_total_params)
         print(f"Val Perplexity: {metrics['val_perp_mean']:.4f} \\pm {metrics['val_perp_std']:.4f}")
         print(f"Top-1 Recovery: {metrics['val_top1_acc_mean']:.4f} \\pm {metrics['val_top1_acc_std']:.4f}")
         print(f"Top-5 Recovery: {metrics['val_top5_acc_mean']:.4f} \\pm {metrics['val_top5_acc_std']:.4f}")
         print(f"Top-10 Recovery: {metrics['val_top10_acc_mean']:.4f} \\pm {metrics['val_top10_acc_std']:.4f}")
-        if "val_rmsd_mean" in metrics:
-            print(f"scRMSD: {metrics['val_rmsd_mean']:.4f} \\pm {metrics['val_rmsd_std']:.4f}")
 
     # The test split is scored exactly once, with the final weights. There is no checkpoint
     # selection here (no early stopping, no best-epoch restore), so "final" and "selected" are
     # the same model -- nothing the test split influenced.
     logger.info(f"Scoring the held-out test split ({len(test_pdb_order)} proteins)")
-    test_metrics = run_validation(model, test_loader, crit, test_pdb_order, scrmsd_refs,
-                                   esmfold_tokenizer, esmfold_model, args.epochs - 1, run,
+    test_metrics = run_validation(model, test_loader, crit, test_pdb_order, args.epochs - 1, run,
                                    num_params=pytorch_total_params, split_name="test")
     print(f"Test Perplexity: {test_metrics['test_perp_mean']:.4f} \\pm {test_metrics['test_perp_std']:.4f}")
     print(f"Test Top-1 Recovery: {test_metrics['test_top1_acc_mean']:.4f} \\pm {test_metrics['test_top1_acc_std']:.4f}")
     print(f"Test Top-5 Recovery: {test_metrics['test_top5_acc_mean']:.4f} \\pm {test_metrics['test_top5_acc_std']:.4f}")
     print(f"Test Top-10 Recovery: {test_metrics['test_top10_acc_mean']:.4f} \\pm {test_metrics['test_top10_acc_std']:.4f}")
-    if "test_rmsd_mean" in test_metrics:
-        print(f"Test scRMSD: {test_metrics['test_rmsd_mean']:.4f} \\pm {test_metrics['test_rmsd_std']:.4f}")
     run.summary.update({k: v for k, v in test_metrics.items() if isinstance(v, (int, float))})
 
     run.finish()

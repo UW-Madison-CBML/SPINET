@@ -14,8 +14,8 @@ re-cloning/re-pulling and re-tarring always works (same pattern as
 API/relaxed_dataset.py   new: relaxed (deposited) PDB -> PiFold dataset, for ATLAS and mdCATH
 API/dataloader.py        + the ATLAS/MDCATH branch that builds it
 API/__init__.py          + re-export of RelaxedStructures
-parser.py                + dataset-selection, scRMSD and W&B flags
-main.py                  + W&B logging and the scRMSD pass
+parser.py                + dataset-selection and W&B flags
+main.py                  + W&B logging and the per-protein metric pass
 run_pifold.sh            CHTC entry point: extract, overlay, run
 pifold.sub               submit file
 Dockerfile / build_and_push.sh
@@ -43,9 +43,9 @@ Then set `docker_image = <your_dockerhub_username>/pifold:latest` in `pifold.sub
 
 ## 3. Dataset
 
-PiFold is a static-structure inverse-folding model, so it trains and evaluates on each
-protein's **relaxed (deposited) PDB entry**, not on a frame pulled out of the MD
-trajectory. `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset
+PiFold is a static-structure inverse-folding model, so by default it trains and evaluates on
+each protein's **relaxed (deposited) PDB entry** rather than on a frame pulled out of the MD
+trajectory (`--structure_source frame` switches that; see below). `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset
 id names, and crops it to the residues the trajectory covers (using the trajectory's own
 residue list as the reference sequence), so PiFold scores the same residues as every
 other model in the comparison. For mdCATH that cropping is also what reduces a deposited
@@ -53,8 +53,31 @@ chain to the single CATH *domain* the `domain` id names (e.g. `12asA00` → entr
 chain `A`, domain 02). Downloads are cached under `pdb_cache/` in the job's scratch dir.
 
 (`comparisons/DynamicMPNN` deliberately does *not* do this — it keeps training on MD
-conformer ensembles, since that ensemble input is the thing being benchmarked. It uses
-the relaxed structures only as the scRMSD reference.)
+conformer ensembles, since that ensemble input is the thing being benchmarked.)
+
+### Training on MD frames instead (`--structure_source frame`)
+
+`--structure_source frame` swaps the coordinate source for one random frame of each
+protein's MD trajectory (`lib/traj_frames.py`), leaving splits, length filtering,
+featurization, metrics and W&B keys untouched — so "deposited structure vs. a single MD
+frame" is a one-flag ablation rather than a different pipeline:
+
+```bash
+python main.py --data_name ATLAS --data_root ./ --structure_source frame
+```
+
+or `condor_submit train.sub STRUCTURE_SOURCE=frame` (the results directory and W&B run are
+named after the source, so the two runs do not collide).
+
+- No RCSB download and no cropping: a frame already spans exactly the residues the
+  trajectory simulates (for mdCATH, exactly the domain), so `--pdb_cache` is unused.
+- The frame is drawn deterministically from `(--frame_seed, protein id)`, so a rerun — and
+  MapDiff's run at the same seed — sees the same frame per protein. `--frame_index 0` pins
+  the first frame for every protein instead.
+- Coordinates are converted from the store's nanometres to Angstroms, without which every
+  distance feature collapses into the lowest RBF bin.
+- Frames are **backbone-only** (`CA, N, C, O`), which PiFold's featurizer takes as-is since
+  it reads exactly those four atoms.
 
 ATLAS and mdCATH are trained and evaluated **separately**, one job each, matching
 `scripts/train_residue_classifier.py`'s `--ds-name`. Splits come from
@@ -98,10 +121,6 @@ The trajectory store and split index csv are staged on Pelican and transferred i
 - per-epoch train/valid loss and perplexity
 - held-out perplexity and sequence recovery (median/mean/std), per upstream's
   `ProDesign.test_one_epoch`
-- **scRMSD** on the final pass: each held-out design is folded with ESMFold
-  (`lib/scrmsd.py`) and Kabsch-RMSD'd against that protein's ground-truth relaxed
-  backbone — the same self-consistency metric `comparisons/{MapDiff,DynamicMPNN}`
-  compute, so results are directly comparable. Pass `--scrmsd 0` to skip it.
 
 Every run additionally logs the *complete* metric set
 `scripts/train_residue_classifier.py`'s `run_val` produces, under exactly the
@@ -118,7 +137,6 @@ and stds are over proteins):
 - `pred_seqs` (`<split>_pred_seqs` outside the val split) -- a `wandb.Table` of
   every argmax design, one row per protein, labelled by `pdb` (`<pdb>_<chain>`
   for ATLAS, the CATH domain id for mdCATH)
-- `<split>_rmsd_{mean,std}` -- scRMSD, under run_val's key
 - `params` -- trainable parameter count
 
 W&B auth comes from `api_keys.txt` (line 1 = HF token, last line = W&B key), which
