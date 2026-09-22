@@ -48,8 +48,8 @@ fi
 echo ">>> overlaying dataset support + wandb wiring onto pristine PiFold/"
 cp -r API main.py parser.py PiFold/
 for f in wandb_api.txt relaxed_pdb.py traj_frames.py dataset_splits.py stats_utils.py \
-         atlas_data.h5 atlas_cross_val_index.csv mdcath_spinet_320_0.h5 mdcath_320_0_topology_split.csv; do
-    [[ -f "$f" ]] && cp "$f" PiFold/
+         atlas_data.h5 atlas_cross_val_index.csv "${DS_H5_FILE:-}" "${DS_CSV_FILE:-}"; do
+    [[ -n "$f" && -f "$f" ]] && cp "$f" PiFold/
 done
 
 cd PiFold

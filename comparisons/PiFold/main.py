@@ -36,6 +36,7 @@ except ImportError:
             sys.path.insert(0, osp.abspath(_cand))
             break
     from stats_utils import ResidueMetrics, three_letter_codes
+import dataset_splits  # noqa: E402 -- lib/ is on sys.path by now
 
 # PiFold's fixed label order (API.featurizer.featurize_GTrans).
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
@@ -70,7 +71,9 @@ class Exp:
         return wandb.init(
             entity=self.args.wandb_entity,
             project=self.args.wandb_project,
-            name=self.args.wandb_run_name or '{}_PiFold'.format(self.args.data_name),
+            name=self.args.wandb_run_name or 'PiFold_{}_{}'.format(
+                dataset_splits.dataset_tag(self.args.data_name, self.args.traj_h5),
+                self.args.structure_source),
             config=self.args.__dict__,
         )
 

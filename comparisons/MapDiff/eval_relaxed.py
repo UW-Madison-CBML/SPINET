@@ -288,7 +288,8 @@ def main():
 
     run = stats_utils.init_wandb(
         args.wandb_key_file, args.wandb_entity, args.wandb_project,
-        args.wandb_run_name or 'Eval_{}_MapDiff'.format(args.ds_name.upper()),
+        args.wandb_run_name or 'Eval_MapDiff_{}_{}'.format(
+            dataset_splits.dataset_tag(args.ds_name, args.traj_h5), args.structure_source),
         config={
             'checkpoint': checkpoint_path,
             'config_path': config_path,

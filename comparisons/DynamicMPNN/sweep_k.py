@@ -487,9 +487,10 @@ def main():
     index_csv = args.index_csv or Path(dataset_splits.default_index_csv(args.ds_name))
     # Pool size is baked into the .pt files, so a sweep's pool must not be confused with the
     # pool_size=10 one train.py writes -- keep them in separate directories.
-    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{args.ds_name}_pool{args.pool_size}")
-    args.run_name = args.run_name or f"DynamicMPNN_{args.ds_name}_ksweep"
-    args.results_csv = args.results_csv or (THIS_DIR / f"sweep_k_{args.ds_name}.csv")
+    ds_tag = dataset_splits.dataset_tag(args.ds_name, traj_h5)
+    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{ds_tag}_pool{args.pool_size}")
+    args.run_name = args.run_name or f"DynamicMPNN_{ds_tag}_ksweep"
+    args.results_csv = args.results_csv or (THIS_DIR / f"sweep_k_{ds_tag}.csv")
     group_name = f"{args.run_name}_{os.getenv('CONDOR_CLUSTER', 'local')}"
 
     wandb.login(key=os.getenv("WANDB_KEY"))

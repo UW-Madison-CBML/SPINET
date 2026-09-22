@@ -18,7 +18,17 @@ The module also owns the handful of *non-split* knobs that have to agree across 
 the comparison to stay apples-to-apples -- which cross-validation folds are held out, how
 long a protein may be before it is dropped, and the RNG seed -- so that changing one of them
 changes it everywhere rather than in one model's argparse default.
+
+The file names below are only fallbacks. mdCATH comes in several builds -- one
+`mdcath_spinet_<temperature>_<replica>.h5` store per simulation temperature (320 K, 450 K, ...),
+each with its own split csv -- so a job picks one by setting `$DS_H5_FILE` / `$DS_CSV_FILE` to
+the names of the files it staged; every comparison's `.sub` derives them from its `DS_H5` /
+`DS_CSV` paths. `dataset_tag` turns that choice into a short label (``mdcath450``) for W&B run
+names and cache directories, so runs and featurizations of different builds never collide.
 """
+import os
+import re
+
 import pandas as pd
 
 DATASETS = ("atlas", "mdcath")
@@ -45,11 +55,27 @@ ID_COLUMN = {"atlas": "pdb", "mdcath": "domain"}
 
 
 def default_index_csv(ds_name):
-    return DEFAULT_INDEX_CSV[_check(ds_name)]
+    return os.environ.get("DS_CSV_FILE") or DEFAULT_INDEX_CSV[_check(ds_name)]
 
 
 def default_h5(ds_name):
-    return DEFAULT_H5[_check(ds_name)]
+    return os.environ.get("DS_H5_FILE") or DEFAULT_H5[_check(ds_name)]
+
+
+def dataset_tag(ds_name, h5=None):
+    """Short label naming the dataset *build*, e.g. ``atlas``, ``mdcath320``, ``mdcath450``.
+
+    Read off the trajectory store's file name (``h5``, default `default_h5`): an mdCATH store
+    named ``mdcath_spinet_<temperature>_<replica>.h5`` gives ``mdcath<temperature>``, plus
+    ``_r<replica>`` for any replica but 0. Anything else is just the dataset name.
+    """
+    ds_name = _check(ds_name)
+    name = os.path.basename(str(h5 or default_h5(ds_name)))
+    match = re.fullmatch(r"mdcath_spinet_(\d+)_(\d+)\.h5", name)
+    if ds_name != "mdcath" or match is None:
+        return ds_name
+    temperature, replica = match.groups()
+    return "mdcath{}".format(temperature) + ("" if replica == "0" else "_r{}".format(replica))
 
 
 def id_column(ds_name):

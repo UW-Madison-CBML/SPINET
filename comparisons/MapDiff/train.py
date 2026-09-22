@@ -130,7 +130,8 @@ def main(cfg: DictConfig):
 
     if cfg.wandb.use:
         wandb_run = stats_utils.init_wandb(
-            cfg.wandb.key_file, cfg.wandb.entity, cfg.wandb.project, cfg.wandb.run_name,
+            cfg.wandb.key_file, cfg.wandb.entity, cfg.wandb.project,
+            cfg.wandb.run_name or f"MapDiff_{dataset_splits.dataset_tag(SPLIT_DATASETS[cfg.dataset.name])}",
             config=OmegaConf.to_container(cfg, resolve=True),
         )
         artifact = wandb.Artifact(name="scripts", type="model_file")

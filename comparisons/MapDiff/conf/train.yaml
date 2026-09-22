@@ -13,7 +13,7 @@ hydra:
   output_subdir: configs
 
 experiment:
-  name: MapDiff_ATLAS_random_frame
+  name: MapDiff_mdcath_450
 
 # Device placement. A requested index that does not exist on this machine falls
 # back to cuda:0 with a warning rather than crashing.

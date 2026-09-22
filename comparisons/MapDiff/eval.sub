@@ -30,6 +30,9 @@ DS_H5                   = $(ResearchDrive)/atlas_data.h5
 DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 
 executable              = eval.sh
+# The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
+# mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.
+environment             = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
 # Forwarded verbatim to `python eval_relaxed.py ...`. --checkpoint/--config point at
 # the files transferred in flat below (HTCondor flattens transferred paths, so
 # $(CHECKPOINT) lands in the job's scratch root). eval_relaxed.py defaults --index-csv

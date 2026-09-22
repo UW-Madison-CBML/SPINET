@@ -113,6 +113,9 @@ def config_from_ckpt(ckpt_path: Path) -> tuple:
             "fits cannot be recovered. Point --ckpt at a checkpoint saved by upstream's "
             "Lightning trainer.")
     cfg = OmegaConf.create(hparams["cfg"])
+    # Hydra saved this config in struct mode, and OmegaConf.create keeps that flag, which
+    # forbids deleting (or adding) keys. Unlock it so the unsupported keys below can be dropped.
+    OmegaConf.set_struct(cfg, False)
 
     model_cfg = cfg.model
     model_cfg._target_ = retarget(model_cfg._target_)
@@ -123,7 +126,7 @@ def config_from_ckpt(ckpt_path: Path) -> tuple:
         if key in features_cfg:
             logger.info(f"Dropping features.{key}={features_cfg[key]} -- "
                         f"{features_cfg._target_.rsplit('.', 1)[-1]} takes no such argument.")
-            features_cfg.pop(key)
+            del features_cfg[key]
 
     logger.info(f"{ckpt_path.name}: model {model_cfg._target_} "
                 f"node_in_dim={list(model_cfg.node_in_dim)} edge_in_dim={list(model_cfg.edge_in_dim)}; "
@@ -352,9 +355,10 @@ def main():
 
     traj_h5 = args.traj_h5 or Path(dataset_splits.default_h5(args.ds_name))
     index_csv = args.index_csv or Path(dataset_splits.default_index_csv(args.ds_name))
-    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{args.ds_name}")
+    ds_tag = dataset_splits.dataset_tag(args.ds_name, traj_h5)
+    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{ds_tag}")
     splits = [s.strip() for s in args.splits.split(",") if s.strip()]
-    run_name = args.run_name or f"DynamicMPNN_zeroshot_{args.ds_name}_{args.ckpt.stem}"
+    run_name = args.run_name or f"DynamicMPNN_zeroshot_{ds_tag}_{args.ckpt.stem}"
 
     run = None
     if not args.no_wandb:

@@ -31,8 +31,12 @@ case "${STRUCTURE_SOURCE}" in
     frame)   SOURCE_SUFFIX="_frame" ;;
     *) echo "STRUCTURE_SOURCE must be 'relaxed' or 'frame', got '${STRUCTURE_SOURCE}'" >&2; exit 1 ;;
 esac
-PROCESS_ROOT="./surffold_data/${DS_NAME}${SOURCE_SUFFIX}_process"
-MARGINAL_OUT="./surffold_data/train_marginal_x_${DS_NAME}${SOURCE_SUFFIX}.pt"
+# The dataset *build* (atlas, mdcath320, mdcath450, ...) read off $DS_H5_FILE by
+# lib/dataset_splits.py. Frame graphs come from the trajectory store, so each build gets its own
+# graph directory, and the W&B run is named after it.
+DS_TAG="$(python -c "import dataset_splits; print(dataset_splits.dataset_tag('${DS_NAME}'))")"
+PROCESS_ROOT="./surffold_data/${DS_TAG}${SOURCE_SUFFIX}_process"
+MARGINAL_OUT="./surffold_data/train_marginal_x_${DS_TAG}${SOURCE_SUFFIX}.pt"
 
 if [[ -f api_keys.txt ]]; then
     export HF_TOKEN=$(head -n 1 api_keys.txt)
@@ -53,8 +57,8 @@ fi
 echo ">>> overlaying dataset support + wandb wiring onto pristine MapDiff/"
 cp -r conf dataloader model data train.py trainer.py MapDiff/
 for f in api_keys.txt wandb_api.txt stats_utils.py relaxed_pdb.py traj_frames.py dataset_splits.py \
-         atlas_data.h5 atlas_cross_val_index.csv mdcath_spinet_320_0.h5 mdcath_320_0_topology_split.csv; do
-    [[ -f "$f" ]] && cp "$f" MapDiff/
+         atlas_data.h5 atlas_cross_val_index.csv "${DS_H5_FILE:-}" "${DS_CSV_FILE:-}"; do
+    [[ -n "$f" && -f "$f" ]] && cp "$f" MapDiff/
 done
 
 cd MapDiff
@@ -69,8 +73,10 @@ if [[ ! -d "${PROCESS_ROOT}/train" || ! -d "${PROCESS_ROOT}/test" ]]; then
 fi
 
 # Passed before "$@" so an explicit override on the command line still wins.
-echo ">>> running: python train.py dataset.process_root=${PROCESS_ROOT} dataset.marginal_train_dir=${MARGINAL_OUT} $*"
+RUN_NAME="MapDiff_${DS_TAG}_${STRUCTURE_SOURCE}"
+echo ">>> running: python train.py dataset.process_root=${PROCESS_ROOT} dataset.marginal_train_dir=${MARGINAL_OUT} wandb.run_name=${RUN_NAME} $*"
 exec python train.py \
     "dataset.process_root=${PROCESS_ROOT}" \
     "dataset.marginal_train_dir=${MARGINAL_OUT}" \
+    "wandb.run_name=${RUN_NAME}" \
     "$@"

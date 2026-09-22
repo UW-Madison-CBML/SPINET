@@ -575,8 +575,11 @@ def main():
 
     traj_h5 = args.traj_h5 or Path(dataset_splits.default_h5(args.ds_name))
     index_csv = args.index_csv or Path(dataset_splits.default_index_csv(args.ds_name))
-    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{args.ds_name}")
-    run_name = args.run_name or f"DynamicMPNN_{args.ds_name}"
+    # Keyed by the dataset build (mdcath320 vs mdcath450, ...), not just ds_name: the cached
+    # ensembles come from the trajectory store, so builds must not share a cache.
+    ds_tag = dataset_splits.dataset_tag(args.ds_name, traj_h5)
+    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{ds_tag}")
+    run_name = args.run_name or f"DynamicMPNN_{ds_tag}"
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))

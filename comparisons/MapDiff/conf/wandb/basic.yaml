@@ -1,5 +1,7 @@
 use: False
 entity: jenslundsgaard7-uw-madison
 project: SheafProtein
-run_name: MapDiff_atlas
+# null names the run MapDiff_<dataset build>, e.g. MapDiff_mdcath450 (train.py); train.sh
+# also appends the structure source. Set it to override.
+run_name: null
 key_file: ./wandb_api.txt

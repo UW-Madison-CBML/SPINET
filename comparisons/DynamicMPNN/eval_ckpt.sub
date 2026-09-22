@@ -54,6 +54,10 @@ endif
 
 shell = ./eval_ckpt.sh --ds-name $(DS_NAME) --ckpt $(CKPT) --splits val,test
 
+# The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
+# mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.
+environment = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
+
 log = logs/eval_ckpt_$(DS_NAME)_$(Cluster)_$(Process).log
 error = logs/eval_ckpt_$(DS_NAME)_$(Cluster)_$(Process).err
 output = logs/eval_ckpt_$(DS_NAME)_$(Cluster)_$(Process).out

@@ -39,9 +39,14 @@ docker_image            = cmikulski4/mapdiff:v5
 
 ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
-DS_NAME                 = atlas
-DS_H5                   = $(ResearchDrive)/atlas_data.h5
-DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
+#DS_NAME                 = atlas
+#DS_H5                   = $(ResearchDrive)/atlas_data.h5
+#DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
+
+DS_NAME                 = mdcath
+DS_H5                   = $(ResearchDrive)/mdcath_spinet_450_0.h5
+DS_CSV                  = $(ResearchDrive)/mdcath_450_0_topology_split.csv
+
 
 #DS_NAME                 = mdcath
 #DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
@@ -52,10 +57,12 @@ DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 # the featurization flag and dataset.process_root from this, so they cannot disagree.
 # Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
 #STRUCTURE_SOURCE        = frame
-STRUCTURE_SOURCE 	 = frame
+STRUCTURE_SOURCE 	 = relaxed
 
 executable              = train.sh
-environment             = "DS_NAME=$(DS_NAME) STRUCTURE_SOURCE=$(STRUCTURE_SOURCE)"
+# The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
+# mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.
+environment             = "DS_NAME=$(DS_NAME) STRUCTURE_SOURCE=$(STRUCTURE_SOURCE) DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
 # Forwarded verbatim to `python train.py ...` -- see conf/train.yaml. train.sh prepends the
 # dataset.process_root / dataset.marginal_train_dir that match $(STRUCTURE_SOURCE), so only
 # the run/wandb wiring needs setting here. Pass prior_model.path=<ckpt> to skip stage 1 and

@@ -28,15 +28,22 @@ docker_image            = cmikulski4/pifold:v5
 
 ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
-DS_NAME                 = ATLAS
-DS_H5                   = $(ResearchDrive)/atlas_data.h5
-DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
+# DS_NAME                 = ATLAS
+# DS_H5                   = $(ResearchDrive)/atlas_data.h5
+# DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 
-#DS_NAME                 = MDCATH
-#DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
+DS_NAME                 = MDCATH
+DS_H5                   = $(ResearchDrive)/mdcath_spinet_450_0.h5
+DS_CSV                  = $(ResearchDrive)/mdcath_450_0_topology_split.csv
+#
+# DS_NAME                 = MDCATH
+# DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
 #DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
 
 executable              = train.sh
+# The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
+# mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.
+environment             = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
 # --data_root ./ points API/relaxed_dataset.py at the job's scratch dir, where HTCondor
 # drops the split index and trajectory store flat. Everything here is forwarded straight
 # to main.py (see parser.py).
@@ -44,7 +51,7 @@ executable              = train.sh
 # $(STRUCTURE_SOURCE) picks what PiFold trains on: 'relaxed' (each protein's deposited RCSB
 # entry, the default) or 'frame' (one random frame of its MD trajectory, lib/traj_frames.py).
 # Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
-STRUCTURE_SOURCE        = frame
+STRUCTURE_SOURCE        = relaxed
 arguments               = --data_name $(DS_NAME) --data_root ./ --structure_source $(STRUCTURE_SOURCE) --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt
 
 # The pristine PiFold tarball, this folder's overlay, the API-key file (train.sh

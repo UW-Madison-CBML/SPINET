@@ -40,8 +40,8 @@ fi
 echo ">>> overlaying dataset support + wandb/scRMSD wiring onto pristine MapDiff/"
 cp -r conf dataloader model data MapDiff/
 for f in eval_relaxed.py *.pt config.yaml wandb_api.txt stats_utils.py scrmsd.py relaxed_pdb.py traj_frames.py dataset_splits.py \
-         atlas_data.h5 atlas_cross_val_index.csv mdcath_spinet_320_0.h5 mdcath_320_0_topology_split.csv; do
-    [[ -f "$f" ]] && cp "$f" MapDiff/
+         atlas_data.h5 atlas_cross_val_index.csv "${DS_H5_FILE:-}" "${DS_CSV_FILE:-}"; do
+    [[ -n "$f" && -f "$f" ]] && cp "$f" MapDiff/
 done
 
 echo ">>> running: python eval_relaxed.py $*"
