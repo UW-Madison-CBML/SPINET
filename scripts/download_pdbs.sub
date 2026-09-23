@@ -1,0 +1,27 @@
+#download_pdbs.sub
+docker_image = jenslundsgaard/sheaf_training:v3.2
+
+universe = docker
+file=atlas_pdbs
+#file=mdcath_pdbs
+
+shell = ./download_pdbs.sh $(file)
+
+log = logs/download_pdbs_$(Cluster)_$(Process).log
+error = logs/download_pdbs_$(Cluster)_$(Process).err
+output = logs/download_pdbs_$(Cluster)_$(Process).out
+when_to_transfer_output = ON_EXIT_OR_EVICT
+
+Requirements = (Target.HasCHTCStaging == true)
+
+transfer_input_files = download_pdbs.sh, download_pdbs.py, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file).txt
+transfer_output_files = $(file).tar.gz
+transfer_output_remaps = "$(file).tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file).tar.gz"
+
+
+
+request_cpus = 8
+request_memory = 64GB
+request_disk = 64GB
+
+queue 1

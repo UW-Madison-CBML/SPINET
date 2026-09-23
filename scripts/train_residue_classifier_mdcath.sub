@@ -1,5 +1,5 @@
 #train_residue_classifier_mdcath.sub
-temp = 450
+temp = 413
 
 universe = docker
 docker_image = jenslundsgaard/sheaf_training:v3.2

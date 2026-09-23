@@ -22,7 +22,8 @@ when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 #  && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
-transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(h5), pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt
+transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt
+#pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(h5), 
 
 
 request_cpus = 16
