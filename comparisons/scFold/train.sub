@@ -4,15 +4,15 @@ docker_image = jenslundsgaard/scfold:v1.4
 
 universe = docker
 
-h5 = atlas_data.h5
-index = atlas_cross_val_index.csv
+#h5 = atlas_data.h5
+#index = atlas_cross_val_index.csv
 
-#temp=320
-#index = mdcath_$(temp)_0_topology_split.csv
-#h5 = mdcath_spinet_$(temp)_0.h5
+temp=320
+index=mdcath_$(temp)_0_topology_split.csv
+h5=mdcath_spinet_$(temp)_0.h5
 
-shell = ./train.sh --h5-name $(h5) --index-name $(index)
-#shell = ./train.sh --h5-name $(h5) --index-name $(index) --use-pdbs
+#shell = ./train.sh --h5-name $(h5) --index-name $(index)
+shell = ./train.sh --h5-name $(h5) --index-name $(index) --use-pdbs
 
 #  queue number assigned to this set of jobs at the time of submission.
 log = train_$(Cluster)_$(Process).log

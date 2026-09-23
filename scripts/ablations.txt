@@ -1,3 +1,1 @@
---run-name node_only_all_atlas --other-model node_only_all
---run-name node_only_dihedrals_atlas --other-model node_only_dihedrals
---run-name node_only_positions_atlas --other-model node_only_positions
+--run-name get_sheaves --ablate-attention --resume our_model --epochs 0 --skip-test

@@ -1,3 +1,2 @@
---run-name node_only_all_mdcath --other-model node_only_all
---run-name node_only_dihedrals_mdcath --other-model node_only_dihedrals
---run-name node_only_positions_mdcath --other-model node_only_positions
+--run-name our_model_mdcath_450 --ablate-attention 
+--run-name no_sheaves_mdcath_450 --ablate-attention --ablate-sheaves

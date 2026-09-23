@@ -629,7 +629,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--cross-val', type=int, default=0)
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
-    parser.add_argument('--other-model', type=str, default="spinet", choices=["rgnn", "spinet", "node_only"])
+    parser.add_argument('--other-model', type=str, default="spinet")
     parser.add_argument('--cross-test', type=int, default=4)
     parser.add_argument('--skip-test', action="store_true")
     parser.add_argument('--temp', default=320, type=int)
