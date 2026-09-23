@@ -9,6 +9,7 @@ api_keys.txt
 *.cif
 *.pdb
 *.pyc
+*.cif
 #pytorch
 *.ckpt
 *.bin
@@ -26,3 +27,9 @@ comparisons/MapDiff/MapDiff.tar.gz
 *.yaml
 dynamicmpnn.modules.layers.*
 **/outputs/
+*.json
+evaluation/af3_pullback_workflow_v2/*.tar.gz
+evaluation/af3_pullback_workflow_v2/*__target
+evaluation/af3_pullback_workflow_v2/*.csv
+evaluation/af3_pullback_workflow_v2/af3_batch_*
+evaluation/af3_pullback_workflow_v2/af3.bin.zst
