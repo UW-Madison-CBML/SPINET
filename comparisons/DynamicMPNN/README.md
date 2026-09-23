@@ -141,6 +141,32 @@ caught the nanometre/Angstrom bug documented at `train.py`'s `NM_TO_ANGSTROM`
 (7.3% recovery, loss 116, before the conversion). A pretrained model scoring near
 chance on our `.pt` files is evidence about *our features*, not about the model.
 
+## Fine-tuning the released checkpoints
+
+`finetune.py` / `finetune.sh` / `finetune.sub` start from upstream's weights and keep
+training on our training split. This row sits between from-scratch and zero-shot:
+
+```
+condor_submit finetune.sub                                   # ATLAS, single_chain_k2.ckpt, lr 1e-4, 20 epochs
+condor_submit finetune.sub CKPT=DynamicMPNN/checkpoints/single_chain_k5.ckpt LR=3e-5 EPOCHS=40
+```
+
+The model, featuriser, pair adapter and batching fix all come from `eval_ckpt.py`, so
+everything in the zero-shot section above applies here too: it is the legacy pair model, and
+it sees k = 2. What's new is on the training side:
+
+* **Training pairs are re-featurised on every draw** (`ResamplingPairDataset`): a fresh random
+  pair from the pool, plus the featuriser's train-time coordinate noise, each time. Upstream
+  trained these weights with `in_memory: False`, which works the same way. `train.py`'s
+  `in_memory=True` would freeze both for the whole run. `--train-pair-selection tm_min`
+  always uses the most dissimilar pair instead.
+* **Val/test are featurised exactly as `eval_ckpt.py` does them** (`tm_min`, no noise). Val is
+  also scored once before the first update, logged at `epoch = -1`, so the fine-tuning curve
+  starts from the zero-shot number on the same proteins.
+* Saved weights carry upstream's `hyper_parameters['cfg']` layout, so
+  `eval_ckpt.py --ckpt weights/<run>.ckpt` rescores a fine-tuned run, and
+  `finetune.py --ckpt weights/<run>.ckpt` continues one.
+
 ## Sweeping *k*: how much does ensemble size actually buy?
 
 `sweep_k.py` / `sweep_k.sub` train one model per *k* over a shared conformer

@@ -407,13 +407,15 @@ def load_pretrained_weights(model: torch.nn.Module, ckpt_path: Path) -> None:
             f"{len(missing)} missing key(s) {sorted(missing)}, "
             f"{len(unexpected)} unexpected key(s) {sorted(unexpected)}. "
             "Reconcile the model config with the checkpoint's hyper_parameters, "
-            "or pass --from-scratch."
+            "or pass --from-scratch. (To fine-tune a released checkpoint, use finetune.py, "
+            "which builds the model from the checkpoint's own config.)"
         )
     logger.info(f"Loaded pretrained weights from {ckpt_path} ({len(stripped)} tensors)")
 
 
 def save_weights(model: torch.nn.Module, optimizer: torch.optim.Optimizer, save_path: Path,
-                 epoch: int, step: int, model_cfg, features_cfg, args) -> None:
+                 epoch: int, step: int, model_cfg, features_cfg, args,
+                 extra_hparams: dict = None) -> None:
     # Keys carry the same `GNN_model.` prefix as upstream's Lightning checkpoints, so a saved
     # run reloads through `load_pretrained_weights` via `--ckpt <path>` like any other.
     checkpoint = {
@@ -425,6 +427,7 @@ def save_weights(model: torch.nn.Module, optimizer: torch.optim.Optimizer, save_
             "model": OmegaConf.to_container(model_cfg, resolve=True),
             "features": OmegaConf.to_container(features_cfg, resolve=True),
             "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+            **(extra_hparams or {}),
         },
     }
     # Write-then-rename, so an eviction mid-save never leaves a truncated file behind.
@@ -633,6 +636,13 @@ def main():
         course_grain=args.course_grain,
         force_rebuild=args.force_rebuild,
     )
+    # build_processed_dataset only warns about ids with no trajectory group in the h5 and
+    # writes no .pt for them; PTFileDataset torch.loads every id it is given, so drop them here.
+    train_pdbs, val_pdbs, test_pdbs = (
+        [p for p in ids if (processed_dir / f"{p}.pt").exists()]
+        for ids in (train_pdbs, val_pdbs, test_pdbs))
+    logger.info(f"{args.ds_name}: {len(train_pdbs)} train / {len(val_pdbs)} val / "
+                f"{len(test_pdbs)} test proteins with a built ensemble")
 
     model_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "model" / "AR1_single_chain.yaml")
     features_cfg = OmegaConf.load(constants.HYDRA_CONFIG_PATH / "features" / "ca_bb_single_chain.yaml")

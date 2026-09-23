@@ -424,6 +424,10 @@ def main():
         course_grain=args.course_grain,
         force_rebuild=args.force_rebuild,
     )
+    # build_processed_dataset only warns about ids with no trajectory group in the h5 and
+    # writes no .pt for them; PTFileDataset torch.loads every id it is given, so drop them here.
+    scored_pdbs = {s: [p for p in ids if (processed_dir / f"{p}.pt").exists()]
+                   for s, ids in scored_pdbs.items()}
 
     model_cfg, features_cfg = config_from_ckpt(args.ckpt)
     model = hydra.utils.instantiate(model_cfg).to(DEVICE)
