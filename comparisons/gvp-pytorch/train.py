@@ -287,7 +287,7 @@ def main(index_path, use_pdbs=False):
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     crit = nn.CrossEntropyLoss()
     
-    epochs = 8
+    epochs = 100
     for epoch in range(epochs):
         model.train()
         total_loss = 0
