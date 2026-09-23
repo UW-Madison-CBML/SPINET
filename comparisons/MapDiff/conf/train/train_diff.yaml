@@ -3,6 +3,12 @@ lr: 5e-4
 weight_decay: 0
 scheduler: True
 
-train_epochs: 8
+train_epochs: 100
 batch_size: 8
 save_and_sample_every: 2
+
+# Early stopping on val median recovery. Patience is in epochs and is checked at each
+# validation (every `save_and_sample_every` epochs); null disables it. An improvement must
+# exceed `early_stopping_min_delta` to reset the counter and update the best checkpoint.
+early_stopping_patience: 10
+early_stopping_min_delta: 0.0

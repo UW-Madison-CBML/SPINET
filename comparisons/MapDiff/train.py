@@ -249,6 +249,8 @@ def main(cfg: DictConfig):
         save_and_sample_every=cfg.train.save_and_sample_every,
         ddim_steps=cfg.diffusion.ddim_steps, sample_method=cfg.diffusion.sample_method,
         ensemble_num=cfg.diffusion.ensemble_num,
+        early_stopping_patience=cfg.train.get('early_stopping_patience'),
+        early_stopping_min_delta=cfg.train.get('early_stopping_min_delta', 0.0),
     )
 
     if not skip_stage1:
