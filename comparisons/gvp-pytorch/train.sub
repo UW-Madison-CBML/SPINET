@@ -1,8 +1,14 @@
-docker_image = jenslundsgaard/sheaf_training:v3.1
+docker_image = jenslundsgaard/sheaf_training:v3.2
 universe = docker
 
+#index = atlas_cross_val_index.csv
+#pdbs_archive=atlas_pdbs.tar.gz
 
-shell = ./train.sh 
+temp=320
+index=mdcath_$(temp)_0_topology_split.csv
+pdbs_archive=mdcath_pdbs.tar.gz
+
+shell = ./train.sh $(index) $(pdb_archive)
 
 log = train_$(Cluster)_$(Process).log
 error = train_$(Cluster)_$(Process).err
@@ -12,8 +18,7 @@ should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 
-transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_data.h5, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/atlas_cross_val_index.csv, ../../api_keys.txt
-transfer_output_files = seq_pred_df_7.csv
+transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(pdbs_archive)
 
 request_cpus = 1
 request_memory = 64GB

@@ -138,7 +138,7 @@ def run_val(model, loader, run, val_name="val"):
     print(f"${val_t1_mean} \\pm {val_t1_std} $ & $ {val_t5_mean} \\pm {val_t5_std}$ & $  {val_t10_mean} \\pm {val_t10_std} $ & $ {val_ppl_mean} \\pm {val_ppl_std} $")
    
 
-def main(index_path, use_pdbs=False):
+def main(index_path, pdbs_archive, use_pdbs=False):
     
     wandb.login(key=os.getenv("WANDB_KEY"))
     run = wandb.init(
@@ -310,9 +310,9 @@ def main(index_path, use_pdbs=False):
         run_val(model, val_loader, run) 
 
 
-    run_val(model, test_loader, run, val_name="test"):
+    run_val(model, test_loader, run, val_name="test")
 
 
 if __name__ == '__main__':
-    main(False) #  don't use pdbs
+    main(sys.argv[1], sys.argv[2], False) #  don't use pdbs
 
