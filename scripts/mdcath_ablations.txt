@@ -1,1 +1,2 @@
---run-name no_sheaves_mdcath_413 --ablate-attention --ablate-sheaves
+--run-name no_sheaves_mdcath_extra_epochs --ablate-attention --ablate-sheaves --epochs 20
+--run-name our_model_mdcath_extra_epochs --ablate-attention --epochs 20

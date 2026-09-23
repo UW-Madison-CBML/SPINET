@@ -18,51 +18,29 @@ import json
 
 BACKBONE_ATOMS = ["CA", "N", "C", "O"] # this is the GT order of backbone atoms in a coordinates array
 RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.cif"
-import zlib
-def pick_frame(num_frames, protein_id, seed, frame_index=None):
-    if frame_index is not None:
-        if not -num_frames <= frame_index < num_frames:
-            raise IndexError("frame_index {} out of range for {} ({} frames)".format(
-                frame_index, protein_id, num_frames))
-        return int(frame_index % num_frames)
-    rng = np.random.default_rng([int(seed), zlib.crc32(protein_id.encode())])
-    return int(rng.integers(num_frames))
+RESIDUE_ALIASES = {"HSD": "HIS", "HSE": "HIS", "HSP": "HIS", "HID": "HIS", "HIE": "HIS", "HIP": "HIS", "ASH": "ASP", "GLH": "GLU","LYN": "LYS", "CYM": "CYS", "CYX": "CYS", "MSE": "MET"}
 
-def download_pdb(pdb_id: str, timeout: int = 10) -> str:
-    max_tries = 3
-    backoff = 1
-    for _ in range(max_tries):
-        try:
-            if not isinstance(pdb_id, str) or not re.fullmatch(r"[0-9A-Za-z]{4}", pdb_id):
-                raise ValueError(f"Invalid PDB ID '{pdb_id}'. Must be 4 alphanumeric characters.")
+import torch
+import torch.utils.data as data
+from Bio.PDB.MMCIFParser import MMCIFParser
+from Bio.SeqUtils import seq1
 
-            url = RCSB_URL.format(pdb_id=pdb_id.upper())
 
-            try:
-                with urllib.request.urlopen(url, timeout=timeout) as response:
-                    if response.status != 200:
-                        raise urllib.error.HTTPError(url, response.status, "HTTP error", response.headers, None)
-                    data = response.read()
-            except urllib.error.HTTPError as e:
-                raise urllib.error.HTTPError(e.url, e.code, f"Failed to download PDB file: {e.reason}", e.headers, e.fp)
-            except urllib.error.URLError as e:
-                raise urllib.error.URLError(f"Network error while downloading PDB file: {e.reason}")
+def cache_path(pdb_id: str, cache_dir=os.path.join("..","pdbs")) -> str:
+    return os.path.join(cache_dir, f"{pdb_id.upper()}.cif")
 
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                raise ValueError("Downloaded file is not valid UTF-8 text.")
+def read_cached_cif(pdb_id: str, cache_dir=os.path.join("..","pdbs")) -> str:
+    path = cache_path(pdb_id, cache_dir)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"No cached .cif for '{pdb_id}' at {path}. "
+            f"Run download_cifs.py first to populate the cache."
+        )
+    with open(path, "r") as f:
+        return f.read()
 
-            if not text.strip():
-                raise ValueError(f"PDB file for ID '{pdb_id}' is empty.")
 
-            return text
-        except ValueError:
-            sleep(backoff)
-            backoff *= 2
-    raise ValueError("reached max backoff")
-
-def extract_backbone(pdb_text: str, pdb_chain_id: str) -> torch.Tensor:
+def extract_backbone(pdb_text: str, pdb_chain_id: str):
     try:
         pdb_id, chain_id = pdb_chain_id.split("_", 1)
     except ValueError:
@@ -73,9 +51,9 @@ def extract_backbone(pdb_text: str, pdb_chain_id: str) -> torch.Tensor:
 
     coords = []
     model = next(structure.get_models())
-
+   
     if chain_id not in model:
-        return torch.empty((0, len(BACKBONE_ATOMS), 3), dtype=torch.float32)
+        raise ValueError("bad chain id")
 
     chain = model[chain_id]
     seq = ""
@@ -85,17 +63,25 @@ def extract_backbone(pdb_text: str, pdb_chain_id: str) -> torch.Tensor:
 
         if not all(atom_name in residue for atom_name in BACKBONE_ATOMS):
             continue
-        seq += seq1(residue.get_resname())
+        seq += seq1(residue.get_resname()).upper()
         atom_coords = [residue[atom_name].coord for atom_name in BACKBONE_ATOMS]
         coords.append(atom_coords)
 
     if not coords:
-        return torch.empty((0, len(BACKBONE_ATOMS), 3), dtype=torch.float32)
+        raise ValueError("bad coords")
 
-    return torch.tensor(coords, dtype=torch.float32), seq
+    atom_dict = {
+        'name': (pdb_chain_id, -1),
+        'seq': seq,
+        'coords': coords
+    }
+
+    return atom_dict
+
+
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def run_val(model, ):
+def run_val(model, loader, run, val_name="val"):
     model.eval()
 
     val_acc_top_1 = []
@@ -108,7 +94,7 @@ def run_val(model, ):
     idxs = []
     names = []
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in loader:
             batch = batch.to(DEVICE)
             nodes = (batch.node_s, batch.node_v)
             edges = (batch.edge_s, batch.edge_v)
@@ -140,6 +126,7 @@ def run_val(model, ):
                 seqs.append("".join([val_dataset.num_to_letter[pred] for pred in seq_preds]))
 
     seq_pred_df = pd.DataFrame({"seq":seqs, "idx":idxs, "name":names})
+    run.log({"seq_pred":wandb.Table(dataframe=seq_pred_df)})
     seq_pred_df.to_csv(os.path.join("..", f"seq_pred_df_{epoch}.csv"))
        
     val_perps = np.exp(val_losses)   
@@ -151,13 +138,8 @@ def run_val(model, ):
     print(f"${val_t1_mean} \\pm {val_t1_std} $ & $ {val_t5_mean} \\pm {val_t5_std}$ & $  {val_t10_mean} \\pm {val_t10_std} $ & $ {val_ppl_mean} \\pm {val_ppl_std} $")
    
 
-def main(use_pdbs=False, majority_voting=False):
-    use_atlas = True
-    h5_path = "atlas_data.h5"
-    use_pdbs = True
-    h5_path = osp.join("..",h5_path)
-    temp = 320
-
+def main(index_path, use_pdbs=False):
+    
     wandb.login(key=os.getenv("WANDB_KEY"))
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
@@ -167,41 +149,94 @@ def main(use_pdbs=False, majority_voting=False):
             "use_atlas":use_atlas
         },
     )
-    if(h5_path == "atlas_data.h5"):
-        split_df = pd.read_csv(osp.join("..", "atlas_cross_val_index.csv"))
+    if(index_path == "atlas_cross_val_index.csv"):
+        split_df = pd.read_csv(osp.join("..", index_path))
         val_mask = split_df["cross_val"] == 0 # change to whatever cross val sets you want
         test_mask = split_df["cross_val"] == 4
 
-        train_indices = split_df[(~val_mask) & (~test_mask)]["random_indices"].to_list()
-        val_indices = split_df[val_mask]["random_indices"].to_list()
-        test_indices = split_df[test_mask]["random_indices"].to_list()
+        #train_indices = split_df[(~val_mask) & (~test_mask)]["random_indices"].to_list()
+        #val_indices = split_df[val_mask]["random_indices"].to_list()
+        #test_indices = split_df[test_mask]["random_indices"].to_list()
 
         val_groups = split_df[val_mask]["pdb"].to_list()
         train_groups = split_df[(~val_mask) & (~test_mask)]["pdb"].to_list()
         test_groups = split_df[test_mask]["pdb"].to_list()
     else:
-        h5_path = osp.join("..", f"mdcath_spinet_{temp}_0.h5")
         index = pd.read_csv(osp.join("..",f"mdcath_{temp}_0_topology_split.csv"))
-        index = index.rename(columns={"domain":"pdb"})
 
-        train_groups = index[index["split"] == "train"]["pdb"].tolist()
-        test_groups = index[index["split"] == "test"]["pdb"].tolist()
-        val_groups = index[index["split"] == "validation"]["pdb"].tolist()
+        train_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in  index[index["split"] == "train"]["domain"].tolist()]
+        test_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in index[index["split"] == "test"]["domain"].tolist()]
+        val_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in index[index["split"] == "validation"]["domain"].tolist()]
 
-        pdb_to_size = {}
-        def visit(name, obj):
-            if isinstance(obj, h5py.Group) and "coordinates" in obj:
-                pdb_to_size[name.split("/")[0]] = obj["coordinates"].shape[1]
-        with h5py.File(h5_path, "r") as f:
-            f.visititems(visit)
-        index["random_indices"] = [pick_frame(pdb_to_size[pdb_id], pdb_id, 0) for pdb_id in index["pdb"].to_list()]
+        #pdb_to_size = {}
+        #def visit(name, obj):
+        #    if isinstance(obj, h5py.Group) and "coordinates" in obj:
+        #        pdb_to_size[name.split("/")[0]] = obj["coordinates"].shape[1]
+        #with h5py.File(h5_path, "r") as f:
+        #    f.visititems(visit)
+        #index["random_indices"] = [pick_frame(pdb_to_size[pdb_id], pdb_id, 0) for pdb_id in index["pdb"].to_list()]
 
 
     
-    if use_pdbs:
-        # TODO manualy download RCSB structures, and use the above func to train on them
-        train_raw = [] 
-        val_raw = [] 
+    train_raw = [] 
+    val_raw = [] 
+    test_raw = [] 
+
+    train_unique_ids = sorted({pdb[:4] for pdb in train_groups})
+    train_cif_text = {}
+    for pid in tqdm(train_unique_ids, desc="reading cache"):
+        try:
+            train_cif_text[pid] = read_cached_cif(pid, cache_dir)
+        except FileNotFoundError as e:
+            print(e)
+    for pdb in tqdm(train_groups, desc="parsing"):
+        pid = pdb[:4]
+        if pid not in cif_text:
+            continue  # missing from cache, already logged
+        try:
+            train_raw.append(extract_backbone(cif_text[pid], pdb))
+        except ValueError as e:
+            print(f"Skipping {pdb}: {e}")
+
+
+
+
+
+    val_unique_ids = sorted({pdb[:4] for pdb in val_groups})
+    val_cif_text = {}
+    for pid in tqdm(val_unique_ids, desc="reading cache"):
+        try:
+            val_cif_text[pid] = read_cached_cif(pid, cache_dir)
+        except FileNotFoundError as e:
+            print(e)
+    for pdb in tqdm(val_groups, desc="parsing"):
+        pid = pdb[:4]
+        if pid not in cif_text:
+            continue  # missing from cache, already logged
+        try:
+            val_raw.append(extract_backbone(cif_text[pid], pdb))
+        except ValueError as e:
+            print(f"Skipping {pdb}: {e}")
+
+
+
+    test_unique_ids = sorted({pdb[:4] for pdb in test_groups})
+    test_cif_text = {}
+    for pid in tqdm(test_unique_ids, desc="reading cache"):
+        try:
+            test_cif_text[pid] = read_cached_cif(pid, cache_dir)
+        except FileNotFoundError as e:
+            print(e)
+    for pdb in tqdm(test_groups, desc="parsing"):
+        pid = pdb[:4]
+        if pid not in cif_text:
+            continue  # missing from cache, already logged
+        try:
+            test_raw.append(extract_backbone(cif_text[pid], pdb))
+        except ValueError as e:
+            print(f"Skipping {pdb}: {e}")
+
+    """
 
     else:
         train_raw = []
@@ -222,7 +257,8 @@ def main(use_pdbs=False, majority_voting=False):
                     val_raw.append(atom_dict)
         with h5py.File(h5_path, "r") as f:
             f.visititems(visit) 
-            
+    """      
+
     train_node_counts = [len(s['seq']) for s in train_raw]
     val_node_counts = [len(s['seq']) for s in val_raw]
     test_node_counts = [len(s['seq']) for s in test_raw]
@@ -271,9 +307,10 @@ def main(use_pdbs=False, majority_voting=False):
             total_loss += loss.item()
 
        
-   
+        run_val(model, val_loader, run) 
 
 
+    run_val(model, test_loader, run, val_name="test"):
 
 
 if __name__ == '__main__':

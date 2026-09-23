@@ -19,7 +19,6 @@ transfer_output_files = $(file).tar.gz
 transfer_output_remaps = "$(file).tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file).tar.gz"
 
 
-
 request_cpus = 8
 request_memory = 64GB
 request_disk = 64GB
