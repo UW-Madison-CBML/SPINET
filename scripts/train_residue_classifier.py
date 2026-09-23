@@ -626,7 +626,7 @@ if __name__ == "__main__":
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="arbitrary", choices=['low_rank', 'orthogonal', 'arbitrary'])
     parser.add_argument('--resume', type=str, default="")
-    parser.add_argument('--epochs', type=int, default=8)
+    parser.add_argument('--epochs', type=int, default=25) # or till convergence
     parser.add_argument('--cross-val', type=int, default=0)
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
     parser.add_argument('--other-model', type=str, default="spinet")

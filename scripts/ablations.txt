@@ -1,2 +1,2 @@
---run-name our_model_extra_epochs --ablate-attention --epochs 20 
---run-name no_sheaves_extra_epochs --ablate-attention --ablate-sheaves --epochs 20 
+--run-name our_model --ablate-attention
+--run-name no_sheaves --ablate-attention --ablate-sheaves

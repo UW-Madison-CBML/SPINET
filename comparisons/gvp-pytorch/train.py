@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
 import h5py
+import wandb
 import os
 import os.path as osp
 import torch
 from Bio.PDB import PDBParser
 from torch_geometric.loader import DataLoader
-import gvp.data  
+import gvp.data
 from Bio.SeqUtils import seq1
 import torch.nn as nn
 import gvp.models
@@ -15,6 +16,7 @@ import sys
 sys.path.append("..")
 from stats_utils import get_confusion_matrix, top_k_acc
 import json
+import io
 
 BACKBONE_ATOMS = ["CA", "N", "C", "O"] # this is the GT order of backbone atoms in a coordinates array
 RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.cif"
@@ -51,7 +53,7 @@ def extract_backbone(pdb_text: str, pdb_chain_id: str):
 
     coords = []
     model = next(structure.get_models())
-   
+
     if chain_id not in model:
         raise ValueError("bad chain id")
 
@@ -81,7 +83,7 @@ def extract_backbone(pdb_text: str, pdb_chain_id: str):
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def run_val(model, loader, run, val_name="val"):
+def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
     model.eval()
 
     val_acc_top_1 = []
@@ -99,16 +101,16 @@ def run_val(model, loader, run, val_name="val"):
             nodes = (batch.node_s, batch.node_v)
             edges = (batch.edge_s, batch.edge_v)
             logits = model(nodes, batch.edge_index, edges, batch.seq)
-            
+
             if batch.mask.any().item():
                 print("mask is on for val; may cause issue with downstream residue sizes")
-            num_proteins_in_batch = batch.batch.max().item() + 1        
+            num_proteins_in_batch = batch.batch.max().item() + 1
             for p_idx in range(num_proteins_in_batch):
                 protein_mask = (batch.batch == p_idx) & batch.mask
-                
+
                 if not protein_mask.any():
                     continue
-                    
+
                 masked_logits = logits[protein_mask]
                 masked_seq = batch.seq[protein_mask]
                 loss = crit(masked_logits, masked_seq).item()
@@ -119,34 +121,34 @@ def run_val(model, loader, run, val_name="val"):
                 val_acc_top_10.append(top_k_acc(masked_logits, masked_seq, 10))
 
 
-                name, idx = batch.name[p_idx] 
+                name, idx = batch.name[p_idx]
                 names.append(name)
                 idxs.append(idx)
                 seq_preds = masked_logits.argmax(dim=-1).cpu().tolist()
-                seqs.append("".join([val_dataset.num_to_letter[pred] for pred in seq_preds]))
+                seqs.append("".join([dataset.num_to_letter[pred] for pred in seq_preds]))
 
     seq_pred_df = pd.DataFrame({"seq":seqs, "idx":idxs, "name":names})
     run.log({"seq_pred":wandb.Table(dataframe=seq_pred_df)})
     seq_pred_df.to_csv(os.path.join("..", f"seq_pred_df_{epoch}.csv"))
-       
-    val_perps = np.exp(val_losses)   
+
+    val_perps = np.exp(val_losses)
     val_ppl_mean, val_ppl_std = np.mean(val_perps), np.std(val_perps)
     val_t1_mean, val_t1_std = np.mean(val_acc_top_1), np.std(val_acc_top_1)
     val_t5_mean, val_t5_std = np.mean(val_acc_top_5), np.std(val_acc_top_5)
     val_t10_mean, val_t10_std = np.mean(val_acc_top_10), np.std(val_acc_top_10)
-    
+
     print(f"${val_t1_mean} \\pm {val_t1_std} $ & $ {val_t5_mean} \\pm {val_t5_std}$ & $  {val_t10_mean} \\pm {val_t10_std} $ & $ {val_ppl_mean} \\pm {val_ppl_std} $")
-   
+
 
 def main(index_path, pdbs_archive, use_pdbs=False):
-    
+
     wandb.login(key=os.getenv("WANDB_KEY"))
     run = wandb.init(
         entity="jenslundsgaard7-uw-madison",
         project="SheafProtein",
         name="gvp",
         config={
-            "use_atlas":use_atlas
+            "index_path":index_path
         },
     )
     if(index_path == "atlas_cross_val_index.csv"):
@@ -162,7 +164,7 @@ def main(index_path, pdbs_archive, use_pdbs=False):
         train_groups = split_df[(~val_mask) & (~test_mask)]["pdb"].to_list()
         test_groups = split_df[test_mask]["pdb"].to_list()
     else:
-        index = pd.read_csv(osp.join("..",f"mdcath_{temp}_0_topology_split.csv"))
+        index = pd.read_csv(osp.join("..",index_path))
 
         train_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in  index[index["split"] == "train"]["domain"].tolist()]
         test_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in index[index["split"] == "test"]["domain"].tolist()]
@@ -177,24 +179,24 @@ def main(index_path, pdbs_archive, use_pdbs=False):
         #index["random_indices"] = [pick_frame(pdb_to_size[pdb_id], pdb_id, 0) for pdb_id in index["pdb"].to_list()]
 
 
-    
-    train_raw = [] 
-    val_raw = [] 
-    test_raw = [] 
+
+    train_raw = []
+    val_raw = []
+    test_raw = []
 
     train_unique_ids = sorted({pdb[:4] for pdb in train_groups})
     train_cif_text = {}
     for pid in tqdm(train_unique_ids, desc="reading cache"):
         try:
-            train_cif_text[pid] = read_cached_cif(pid, cache_dir)
+            train_cif_text[pid] = read_cached_cif(pid)
         except FileNotFoundError as e:
             print(e)
     for pdb in tqdm(train_groups, desc="parsing"):
         pid = pdb[:4]
-        if pid not in cif_text:
+        if pid not in train_cif_text:
             continue  # missing from cache, already logged
         try:
-            train_raw.append(extract_backbone(cif_text[pid], pdb))
+            train_raw.append(extract_backbone(train_cif_text[pid], pdb))
         except ValueError as e:
             print(f"Skipping {pdb}: {e}")
 
@@ -206,15 +208,15 @@ def main(index_path, pdbs_archive, use_pdbs=False):
     val_cif_text = {}
     for pid in tqdm(val_unique_ids, desc="reading cache"):
         try:
-            val_cif_text[pid] = read_cached_cif(pid, cache_dir)
+            val_cif_text[pid] = read_cached_cif(pid)
         except FileNotFoundError as e:
             print(e)
     for pdb in tqdm(val_groups, desc="parsing"):
         pid = pdb[:4]
-        if pid not in cif_text:
+        if pid not in val_cif_text:
             continue  # missing from cache, already logged
         try:
-            val_raw.append(extract_backbone(cif_text[pid], pdb))
+            val_raw.append(extract_backbone(val_cif_text[pid], pdb))
         except ValueError as e:
             print(f"Skipping {pdb}: {e}")
 
@@ -224,15 +226,15 @@ def main(index_path, pdbs_archive, use_pdbs=False):
     test_cif_text = {}
     for pid in tqdm(test_unique_ids, desc="reading cache"):
         try:
-            test_cif_text[pid] = read_cached_cif(pid, cache_dir)
+            test_cif_text[pid] = read_cached_cif(pid)
         except FileNotFoundError as e:
             print(e)
     for pdb in tqdm(test_groups, desc="parsing"):
         pid = pdb[:4]
-        if pid not in cif_text:
+        if pid not in test_cif_text:
             continue  # missing from cache, already logged
         try:
-            test_raw.append(extract_backbone(cif_text[pid], pdb))
+            test_raw.append(extract_backbone(test_cif_text[pid], pdb))
         except ValueError as e:
             print(f"Skipping {pdb}: {e}")
 
@@ -256,25 +258,25 @@ def main(index_path, pdbs_archive, use_pdbs=False):
                 else:
                     val_raw.append(atom_dict)
         with h5py.File(h5_path, "r") as f:
-            f.visititems(visit) 
-    """      
+            f.visititems(visit)
+    """
 
     train_node_counts = [len(s['seq']) for s in train_raw]
     val_node_counts = [len(s['seq']) for s in val_raw]
     test_node_counts = [len(s['seq']) for s in test_raw]
-    
+
     train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=3000)
     val_sampler = gvp.data.BatchSampler(val_node_counts, max_nodes=3000)
     test_sampler = gvp.data.BatchSampler(test_node_counts, max_nodes=3000)
-    
+
     train_dataset = gvp.data.ProteinGraphDataset(train_raw)
     val_dataset = gvp.data.ProteinGraphDataset(val_raw)
     test_dataset = gvp.data.ProteinGraphDataset(test_raw)
-    
+
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_sampler=val_sampler, num_workers=16)
     test_loader = DataLoader(test_dataset, batch_sampler=test_sampler, num_workers=16)
-    
+
     model = gvp.models.CPDModel(
         node_in_dim=(6, 3), node_h_dim=(100, 16),
         edge_in_dim=(32, 1), edge_h_dim=(32, 1)
@@ -283,10 +285,10 @@ def main(index_path, pdbs_archive, use_pdbs=False):
     # Credit: Tomerikoo and Fabio Perez on StackOverflow
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(pytorch_total_params)
-    
+
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     crit = nn.CrossEntropyLoss()
-    
+
     epochs = 100
     for epoch in range(epochs):
         model.train()
@@ -297,20 +299,20 @@ def main(index_path, pdbs_archive, use_pdbs=False):
             nodes = (batch.node_s, batch.node_v)
             edges = (batch.edge_s, batch.edge_v)
             logits = model(nodes, batch.edge_index, edges, batch.seq)
-           
+
             masked_logits = logits[batch.mask]
             masked_seq = batch.seq[batch.mask]
             loss = crit(masked_logits, masked_seq)
-            
+
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
 
-       
-        run_val(model, val_loader, run) 
+
+        run_val(model, val_loader, run, epoch, crit, val_dataset)
 
 
-    run_val(model, test_loader, run, val_name="test")
+    run_val(model, test_loader, run, epoch, crit, test_dataset, val_name="test")
 
 
 if __name__ == '__main__':
