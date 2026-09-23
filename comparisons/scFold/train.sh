@@ -6,6 +6,6 @@ export WANDB_KEY=$WANDB_KEY
 
 cd ScFold/
 
-python3 main.py --epoch 8
+python3 main.py --epoch 8 "$@"
 
 tar -czvf ../plots.tar.gz plots/
