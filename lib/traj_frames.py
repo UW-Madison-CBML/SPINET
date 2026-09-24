@@ -24,10 +24,13 @@ Differences a frame record carries, all of them intrinsic to MD rather than to t
 * **No cropping.** The trajectory's residue list *is* the reference `relaxed_pdb` crops a
   deposited chain down to, so a frame already spans exactly the simulated residues (for
   mdCATH, exactly the domain). ``reference_index`` is therefore the identity.
-* **Units.** `scripts/load_dynamics.py` writes `traj.xyz` straight out of mdtraj, which is
-  in NANOMETRES. Deposited structures are in Angstroms, so frames are converted here --
-  without it every distance feature in both models would land in the lowest RBF bin (the
-  same bug that cost DynamicMPNN ~28 points of recovery; see comparisons/DynamicMPNN/train.py).
+* **Units.** The stores do not agree: ATLAS (`scripts/load_dynamics.py` writes `traj.xyz`
+  straight out of mdtraj) is in NANOMETRES, while the mdCATH store is already in Angstroms.
+  Deposited structures are in Angstroms, so each frame's units are read off its own CA-CA
+  spacing (`detect_coord_scale`) and converted when needed. Getting it wrong either way is
+  silent: nm pushes every distance feature into the lowest RBF bin (the bug that cost
+  DynamicMPNN ~28 points of recovery), and scaling an Angstrom store by 10 pushes them all
+  into the top bin (see comparisons/DynamicMPNN/train.py, which does the same detection).
 
 Frame choice is random but *deterministic*: the per-protein RNG is seeded from
 ``(seed, protein_id)``, so a rerun, a resumed job and a second model all draw the same frame
@@ -51,9 +54,15 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from relaxed_pdb import BACKBONE_ATOMS, RESIDUE_ALIASES, three_to_one
 
-# mdtraj writes nanometres; every model in this repo expects Angstroms. See the module
-# docstring, and comparisons/DynamicMPNN/train.py's NM_TO_ANGSTROM for the same conversion.
+# ATLAS is in nanometres (mdtraj), mdCATH in Angstroms; every model in this repo expects
+# Angstroms. See the module docstring, and comparisons/DynamicMPNN/train.py's
+# detect_coord_scale, which this mirrors.
 NM_TO_ANGSTROM = 10.0
+
+# A backbone CA-CA virtual bond is ~3.80 A / 0.380 nm in every folded protein, so measuring it
+# identifies a frame's units.
+CA_CA_ANGSTROM = 3.80
+CA_CA_TOLERANCE = 0.30
 
 # The two datasets every trajectory group must carry to be usable here. Matches
 # `lib.residue_classifier_dataset.ResidueClassifierDataset.REQUIRED_DATASETS`, minus the
@@ -108,6 +117,24 @@ def pick_frame(num_frames, protein_id, seed, frame_index=None):
         return int(frame_index % num_frames)
     rng = np.random.default_rng([int(seed), zlib.crc32(protein_id.encode())])
     return int(rng.integers(num_frames))
+
+
+def detect_coord_scale(frame_coords):
+    """Factor converting one frame's ``(R, num_atoms, 3)`` coordinates to Angstroms.
+
+    Returns 1.0 for Angstroms and NM_TO_ANGSTROM for nanometres, and raises if the median
+    consecutive CA-CA distance matches neither -- both wrong guesses corrupt features silently.
+    """
+    ca = np.asarray(frame_coords[:, BACKBONE_ATOMS.index("CA"), :], dtype=np.float64)
+    if ca.shape[0] < 2:
+        raise ValueError("cannot detect coordinate units from a single-residue chain")
+    spacing = float(np.median(np.linalg.norm(np.diff(ca, axis=0), axis=1)))
+    for scale in (1.0, NM_TO_ANGSTROM):
+        if abs(spacing * scale - CA_CA_ANGSTROM) <= CA_CA_TOLERANCE:
+            return scale
+    raise ValueError(
+        "median consecutive CA-CA distance is {:.4f}, neither {} A nor {} nm; refusing to "
+        "guess the coordinate units".format(spacing, CA_CA_ANGSTROM, CA_CA_ANGSTROM / NM_TO_ANGSTROM))
 
 
 def _build_residues(resnames, coords, protein_id, chain_id="A"):
@@ -179,13 +206,14 @@ def load_frame_structures(protein_ids, traj_h5_path, seed=0, frame_index=None, v
                 continue
 
             try:
-                coords_ds = h5_file[group_name + "/coordinates"]  # R, T, num_atoms, 3 (nm)
+                coords_ds = h5_file[group_name + "/coordinates"]  # R, T, num_atoms, 3 (nm or A)
                 num_frames = coords_ds.shape[1]
                 if num_frames == 0:
                     raise ValueError("trajectory has no frames")
 
                 chosen = pick_frame(num_frames, protein_id, seed, frame_index)
-                coords = np.asarray(coords_ds[:, chosen], dtype=np.float32) * NM_TO_ANGSTROM
+                coords = np.asarray(coords_ds[:, chosen], dtype=np.float32)
+                coords = coords * np.float32(detect_coord_scale(coords))
 
                 raw_residues = h5_file[group_name + "/residues"][:]
                 if len(raw_residues) != coords.shape[0]:

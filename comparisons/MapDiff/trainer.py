@@ -74,6 +74,8 @@ class MapDiffTrainer:
             ensemble_num=50,
             ddim_steps=50,
             sample_method='ddim',
+            early_stopping_patience=None,
+            early_stopping_min_delta=0.0,
     ):
         self.config = config
         self.device = device
@@ -116,6 +118,11 @@ class MapDiffTrainer:
         self.epoch = 0
         self.best_val_recovery, self.best_val_perplexity = 0, float('inf')
         self.best_model = None
+        # Early stopping on val median recovery, with patience counted in epochs (validation only
+        # runs every `save_and_sample_every` epochs, so patience is effectively rounded up to that).
+        # `None` disables it.
+        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_min_delta = early_stopping_min_delta
 
         self.train_table = PrettyTable(["# Epoch", "# Step", "Train_loss"])
         self.val_table = PrettyTable(["# Epoch", "# Step", "Recovery", "Perplexity"])
@@ -312,7 +319,7 @@ class MapDiffTrainer:
                     'val_median_recovery': median_recovery, 'val_mean_recovery': mean_recovery,
                 })
 
-            if median_recovery > self.best_val_recovery:
+            if median_recovery > self.best_val_recovery + self.early_stopping_min_delta:
                 self.best_model = copy.deepcopy(self.model)
                 self.best_val_step = self.step
                 self.best_val_epoch = self.epoch
@@ -352,9 +359,11 @@ class MapDiffTrainer:
                     epoch_total_loss = 0
                     torch.cuda.empty_cache()
 
+                pbar.update(1)
                 if self.step != 0 and self.step % (self.save_and_sample_every * self.iter_one_epoch) == 0:
                     self._run_validation()
-                pbar.update(1)
+                    if self._should_stop_early():
+                        break
 
         print('Stage 2 (diffusion) training complete')
         if self.wandb_run:
@@ -362,7 +371,20 @@ class MapDiffTrainer:
                                  'best_val_perplexity': self.best_val_perplexity,
                                  'best_val_epoch': self.best_val_epoch})
         self.save(self.best_val_epoch, self.best_val_step, mode='best')
-        self.save(self.epoch, self.train_num_steps, mode='last')
+        self.save(self.epoch, self.step, mode='last')
+
+    def _should_stop_early(self):
+        if self.early_stopping_patience is None:
+            return False
+        epochs_since_best = self.epoch - self.best_val_epoch
+        if epochs_since_best < self.early_stopping_patience:
+            return False
+        print(f'Early stopping at epoch {self.epoch}: val median recovery has not improved by more than '
+              f'{self.early_stopping_min_delta} in {epochs_since_best} epochs '
+              f'(best {self.best_val_recovery:.4f} at epoch {self.best_val_epoch})')
+        if self.wandb_run:
+            self.wandb_run.log({'early_stopped_epoch': self.epoch, 'epoch': self.epoch})
+        return True
 
     def test(self):
         model = self.best_model if self.best_model is not None else self.model

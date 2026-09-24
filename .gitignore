@@ -24,6 +24,7 @@ comparisons/gvp-pytorch/gvp-pytorch.tar.gz
 comparisons/scFold/ScFold.tar.gz
 comparisons/DynamicMPNN/DynamicMPNN.tar.gz
 comparisons/MapDiff/MapDiff.tar.gz
+comparisons/PiFold/PiFold.tar.gz
 *.yaml
 dynamicmpnn.modules.layers.*
 **/outputs/
