@@ -3,7 +3,7 @@
 docker_image = jenslundsgaard/sheaf_training:v3.2
 
 universe = docker
-file = atlas_laplacians.h5
+file = mdcath_laplacians.h5
 shell = ./interpret_sheaves.sh $(file)
 
 #  queue number assigned to this set of jobs at the time of submission.

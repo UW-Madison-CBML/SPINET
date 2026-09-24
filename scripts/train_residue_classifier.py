@@ -239,17 +239,12 @@ def interpret_sheaves(loader, model, run, device, rng, h5_filename):
     top_eig = []
     least_eig = []
     traj_ids = []
-    seen_pdbs = set()
     with h5py.File(h5_filename, "w") as h5_file:
         with torch.no_grad():
             for batch in tqdm(loader, desc=f"loading sheaves", leave=False):
                 
                 data = batch.to_data_list()[0].to(device)
                 traj_id = data.traj_id.split("/")[0] if isinstance(data.traj_id, str) else data.traj_id[0].split("/")[0]
-                if(traj_id in seen_pdbs):
-                    continue
-                else:
-                    seen_pdbs.add(traj_id)
 
 
                 data = data.sort() 
@@ -629,7 +624,7 @@ if __name__ == "__main__":
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="arbitrary", choices=['low_rank', 'orthogonal', 'arbitrary'])
     parser.add_argument('--resume', type=str, default="")
-    parser.add_argument('--epochs', type=int, default=50) # or till convergence
+    parser.add_argument('--epochs', type=int, default=20) # or till convergence
     parser.add_argument('--cross-val', type=int, default=0)
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
     parser.add_argument('--other-model', type=str, default="spinet")

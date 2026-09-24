@@ -354,15 +354,15 @@ class InitDynamicsEmbedding(MessagePassing):
         self.register_buffer("not_frame_origin_mask", torch.tensor([atom != self.frame_origin for atom in self.atoms], dtype=torch.bool))
 
         if not self.ablate_sheaves:
-            self.sheaf_learner = nn.Sequential(nn.Linear(2*self.input_dim + self.edge_dim, 2*self.input_dim + self.edge_dim), nn.ReLU(), nn.Linear(2*self.input_dim + self.edge_dim, self.stalk_dim**2))
+            self.sheaf_learner = nn.Sequential(nn.Linear(2*self.input_dim + self.edge_dim, 2*self.input_dim + self.edge_dim), nn.Dropout(0.2), nn.ReLU(), nn.Linear(2*self.input_dim + self.edge_dim, self.stalk_dim**2))
 
         self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
         self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
 
-        self.mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
+        self.mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.Dropout(0.2), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
 
-        self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True)
-        self.temp_mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim,self.hidden_dim))
+        self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True, dropout=0.2)
+        self.temp_mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.Dropout(0.2), nn.ReLU(), nn.Linear(self.hidden_dim,self.hidden_dim))
 
 
     def forward(self, x, pos, frame_maps, edge_index, edge_attr):
@@ -385,11 +385,11 @@ class InitDynamicsEmbedding(MessagePassing):
         else:
             maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(edge_attr.shape[0], edge_attr.shape[1], -1, -1)
         # reshape from h to c * d
-        x_stalk = self.project_nodes(x).view(x.shape[0], x.shape[1], self.num_channels, self.stalk_dim) # stalk dim to c,d
-        edge_stalk = self.project_edges(edge_attr).view(edge_attr.shape[0], edge_attr.shape[1], self.num_channels, self.stalk_dim)
+        x_stalk = self.project_nodes(x).view(x.shape[0], x.shape[1], self.num_channels, self.stalk_dim) # stalk dim to c,d # h_{i,t}^{(0)}
+        edge_stalk = self.project_edges(edge_attr).view(edge_attr.shape[0], edge_attr.shape[1], self.num_channels, self.stalk_dim) # g_{ij,t}
 
         # pass messages
-        agg = self.propagate(edge_index, x=x_stalk, maps=maps, edge_attr=edge_stalk, reverse_edge_indices=reverse_edge_indices)
+        agg = self.propagate(edge_index, x=x_stalk, maps=maps, edge_attr=edge_stalk, reverse_edge_indices=reverse_edge_indices) # h_{i,t}^{(1)}
 
         # flatten
         agg_flat = self.temp_mlp(agg.view(x.shape[0],x.shape[1], self.hidden_dim))

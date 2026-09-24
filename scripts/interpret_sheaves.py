@@ -1,4 +1,5 @@
 import numpy as np
+from itertools import product
 import h5py
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -11,22 +12,19 @@ LAPLACIAN_TYPES = ["first_sheaf", "last_sheaf", "shuffled_first_sheaf", "shuffle
 def get_top_eigs(h5_file, group_name):
     mat_test1 = h5_file[group_name]["first_sheaf"][:]
     mat_test2 = h5_file[group_name]["graph"][:]
-    assert np.allclose(mat_test1, mat_test1.T)
-    assert np.allclose(mat_test2, mat_test2.T)
-
-    eigvals = {ds_name: np.linalg.eigvalsh(h5_file[group_name][ds_name][:]).real for ds_name in LAPLACIAN_TYPES}
+    laplacians = {ds_name: h5_file[group_name][ds_name][:] for ds_name in LAPLACIAN_TYPES}
+    for laplacian in laplacians.values():
+        assert np.allclose(laplacian, laplacian.T)
+    eigvals = {key: np.linalg.eigvalsh(item).real for key, item in laplacians.items()}
 
     # we just need the real components here, sheaf laplacian is real positive semi-definite
     #eigvals = {name: item.eigenvalues.real for name, item in eigs.items()}
     #eigvecs = {name: item.eigenvectors.real for name, item in eigs.items()}
     indices = {name: np.argsort(item) for name, item in eigvals.items()}
-    top_dict = {f"top_{n}":[] for n in range(num_top)}
-    bottom_dict = {f"bottom_{n}":[] for n in range(num_top)}
-    for ds_name in LAPLACIAN_TYPES:
-        for n in range(num_top):
-            top_dict[f"top_{n}"].append(eigvals[ds_name][indices[ds_name][-(n+1)]])
-            bottom_dict[f"bottom_{n}"].append(eigvals[ds_name][indices[ds_name][n]])
-    df = pd.DataFrame(top_dict | bottom_dict | {"laplacian_type":LAPLACIAN_TYPES}).reset_index()
+    df = pd.DataFrame()
+    for ds_name,n in product(LAPLACIAN_TYPES, range(num_top)):
+        df[f"{ds_name}_top_{n}"] = [eigvals[ds_name][indices[ds_name][-(n+1)]]]
+        df[f"{ds_name}_bottom_{n}"] = [eigvals[ds_name][indices[ds_name][n]]]
     df["pdb_id"] = group_name
     return df
 
@@ -51,9 +49,7 @@ if __name__ == "__main__":
                     print(f"Worker generated an exception: {e}")
 
     out_df = pd.concat(eig_dfs, axis=0, ignore_index=True)
-    out_df.set_index(["pdb_id", "laplacian_type"], inplace=True)
+    out_df.set_index("pdb_id", inplace=True)
     out_df.to_csv("eigval_df.csv")
-
-
 
 
