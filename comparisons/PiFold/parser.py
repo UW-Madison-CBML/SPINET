@@ -83,7 +83,8 @@ def create_parser():
     parser.add_argument('--epoch', default=100, type=int, help='end epoch')
     parser.add_argument('--log_step', default=1, type=int)
     parser.add_argument('--lr', default=0.001, type=float, help='Learning rate')
-    parser.add_argument('--patience', default=100, type=int)
+    parser.add_argument('--patience', default=10, type=int,
+                        help='Epochs without a new best val perplexity before stopping')
 
     # ProDesign parameters
     parser.add_argument('--updating_edges', default=4, type=int)

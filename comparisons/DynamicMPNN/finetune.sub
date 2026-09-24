@@ -5,7 +5,10 @@
 #   * The model is built from the checkpoint's own config (the legacy pair model), not
 #     train.py's yaml, and -- as in eval_ckpt.sub -- every released checkpoint sees k=2.
 #   * Val is scored once before the first update, so the first point of the val curve is the
-#     zero-shot number on the same val set; test is scored once, after the last epoch.
+#     zero-shot number on the same val set; test is scored once, with the best val epoch's
+#     weights.
+#   * The paper's regime: Adam at lr 1e-3, 32 proteins per optimizer step (2 per pass x 16
+#     accumulated), early-stopped on val perplexity (patience 10); EPOCHS is only a cap.
 #
 # ATLAS is the default. For mdCATH, or another starting checkpoint / lr:
 #
@@ -22,13 +25,13 @@ universe = docker
 
 ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
-# DS_NAME = mdcath
-# DS_H5 = $(ResearchDrive)/mdcath_spinet_320_0.h5
-# DS_CSV = $(ResearchDrive)/mdcath_320_0_topology_split.csv
-
 DS_NAME = mdcath
-DS_H5 = $(ResearchDrive)/mdcath_spinet_450_0.h5
-DS_CSV = $(ResearchDrive)/mdcath_450_0_top_split.csv
+DS_H5 = $(ResearchDrive)/mdcath_spinet_320_0.h5
+DS_CSV = $(ResearchDrive)/mdcath_320_0_topology_split.csv
+
+# DS_NAME = mdcath
+# DS_H5 = $(ResearchDrive)/mdcath_spinet_450_0.h5
+# DS_CSV = $(ResearchDrive)/mdcath_450_0_top_split.csv
 
 if ! defined DS_NAME
   DS_NAME = atlas
@@ -47,13 +50,13 @@ if ! defined CKPT
   CKPT = DynamicMPNN/checkpoints/single_chain_k2.ckpt
 endif
 if ! defined LR
-  LR = 1e-4
+  LR = 1e-3
 endif
 if ! defined EPOCHS
-  EPOCHS = 20
+  EPOCHS = 200
 endif
 
-shell = ./finetune.sh --ds-name $(DS_NAME) --ckpt $(CKPT) --lr $(LR) --epochs $(EPOCHS)
+shell = ./finetune.sh --ds-name $(DS_NAME) --ckpt $(CKPT) --lr $(LR) --epochs $(EPOCHS) --train-pair-selection tm_min
 
 # The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
 # mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.

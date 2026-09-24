@@ -8,14 +8,20 @@ or `--ds-name mdcath` — matching `scripts/train_residue_classifier.py`. Splits
 mdCATH's topology split's `train`/`validation`/`test` rows are three disjoint splits.
 
 `--val-fold` (default 0) selects the ATLAS validation fold and `--test-fold` (default 4) the
-test fold; the other three train. Validation is scored every epoch, and the test split is
-scored once after the last epoch -- there is no early stopping or best-epoch restore here, so
-the tested weights are the trained weights and the test split never fed back into them.
+test fold; the other three train. Validation is scored every epoch and training early-stops
+on val perplexity (`--early-stopping-patience`, default 10); the test split is scored once,
+with the lowest-val-perplexity epoch's weights (also saved as `weights/<run>_<id>_best.ckpt`),
+so the test split never fed back into the weights or the choice of epoch. MapDiff and PiFold
+select the same way, so every comparison row shares one protocol. Training proteins are
+re-featurised on every draw (`ResamplingDataset`): a fresh draw of *k* conformers from the
+pool plus the featuriser's train-time coordinate noise, as upstream's `in_memory: False`
+trained. Val/test are featurised once, without noise.
 `--max-length` (default `lib/dataset_splits.MAX_LENGTH`) drops the same long proteins
 MapDiff and PiFold drop, and `--seed` (default `lib/dataset_splits.SEED`) seeds `random` and
 `np.random` as well as torch -- the featurizer picks which *k* of each protein's saved
-conformer pool to use with `random.sample`, once, at dataset-construction time, so leaving
-those unseeded would change the validation set itself from run to run. Each run logs
+conformer pool to use with `random.sample`, and for val/test that happens once, at
+dataset-construction time, so leaving those unseeded would change the validation set itself
+from run to run. Each run logs
 `split_counts`, `val_split_ids` and `test_split_ids` to its W&B summary, as MapDiff and
 PiFold do, so the three models' held-out sets can be diffed rather than assumed identical.
 
@@ -147,19 +153,23 @@ chance on our `.pt` files is evidence about *our features*, not about the model.
 training on our training split. This row sits between from-scratch and zero-shot:
 
 ```
-condor_submit finetune.sub                                   # ATLAS, single_chain_k2.ckpt, lr 1e-4, 20 epochs
-condor_submit finetune.sub CKPT=DynamicMPNN/checkpoints/single_chain_k5.ckpt LR=3e-5 EPOCHS=40
+condor_submit finetune.sub                                   # ATLAS, single_chain_k2.ckpt, lr 1e-3, early-stopped
+condor_submit finetune.sub CKPT=DynamicMPNN/checkpoints/single_chain_k5.ckpt LR=1e-4
 ```
 
 The model, featuriser, pair adapter and batching fix all come from `eval_ckpt.py`, so
 everything in the zero-shot section above applies here too: it is the legacy pair model, and
 it sees k = 2. What's new is on the training side:
 
-* **Training pairs are re-featurised on every draw** (`ResamplingPairDataset`): a fresh random
-  pair from the pool, plus the featuriser's train-time coordinate noise, each time. Upstream
-  trained these weights with `in_memory: False`, which works the same way. `train.py`'s
-  `in_memory=True` would freeze both for the whole run. `--train-pair-selection tm_min`
-  always uses the most dissimilar pair instead.
+* **Training pairs are re-featurised on every draw** (`ResamplingDataset`, as in `train.py`):
+  a fresh random pair from the pool, plus the featuriser's train-time coordinate noise, each
+  time. Upstream trained these weights with `in_memory: False`, which works the same way.
+  `--train-pair-selection tm_min` always uses the most dissimilar pair instead.
+* **The paper's optimisation regime**: Adam at lr 1e-3 and 32 proteins per optimizer step
+  (2 per forward pass, gradients accumulated over 16; `--effective-batch-size`).
+* **Model selection as in `train.py`**: early stopping on val perplexity (patience 10, at most
+  `--epochs` 200), best val epoch restored for test. The zero-shot epoch -1 is a candidate,
+  so if no update beats it, test scores the released weights.
 * **Val/test are featurised exactly as `eval_ckpt.py` does them** (`tm_min`, no noise). Val is
   also scored once before the first update, logged at `epoch = -1`, so the fine-tuning curve
   starts from the zero-shot number on the same proteins.

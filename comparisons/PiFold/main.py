@@ -9,7 +9,9 @@ Same train/valid/test loop as upstream, plus the two things this comparison need
 ATLAS and mdCATH are trained and evaluated separately -- one run each (`--data_name ATLAS`
 or `MDCATH`) -- matching scripts/train_residue_classifier.py's `--ds-name`. The 'test' split
 (ATLAS `cross_val` fold `--test_fold`, mdCATH's `test` rows) is held out from training and
-from early stopping; `valid` is what the recorder selects on.
+from early stopping; `valid` is what the recorder selects on: its per-protein mean
+perplexity (`val_perp_mean`) with patience 10 (`--patience`), the protocol every comparison
+model shares. Test is scored once, after training, with the best val epoch's weights.
 """
 import logging
 import json
@@ -150,13 +152,18 @@ class Exp:
                 with torch.no_grad():
                     valid_loss, valid_perplexity = self.valid()
                     self._log({'valid_loss': valid_loss, 'valid_perplexity': valid_perplexity, 'epoch': epoch})
-
-                    # self._save(name=str(epoch))
-                    self.test(epoch=epoch)
+                    val_metrics = self.residue_metrics(self.valid_loader.dataset, self.valid_loader.featurizer,
+                                                       epoch=epoch, split_name='val')
+                    self._log(val_metrics)
 
                 print_log('Epoch: {0}, Steps: {1} | Train Loss: {2:.4f} Train Perp: {3:.4f} Valid Loss: {4:.4f} Valid Perp: {5:.4f}\n'.format(epoch + 1, len(self.train_loader), train_loss, train_perplexity, valid_loss, valid_perplexity))
 
-                recorder(valid_loss, self.method.model, self.path)
+                # Selected on the per-protein mean val perplexity (`val_perp_mean`), the
+                # protocol every comparison model shares (comparisons/DynamicMPNN/train.py's
+                # EarlyStopping) -- not on `valid_loss`, which pools every residue of the split
+                # into one cross-entropy. The recorder minimises whatever it is handed and saves
+                # the best weights, which `main` restores before the one test pass.
+                recorder(val_metrics['val_perp_mean'], self.method.model, self.path)
                 if recorder.early_stop:
                     print("Early stopping")
                     logging.info("Early stopping")
@@ -192,8 +199,8 @@ class Exp:
         return test_perplexity, test_recovery
 
     @torch.no_grad()
-    def residue_metrics(self, dataset, featurizer, epoch=None):
-        """One per-protein pass over the held-out split producing exactly the metric set
+    def residue_metrics(self, dataset, featurizer, epoch=None, split_name='test'):
+        """One per-protein pass over a held-out split producing exactly the metric set
         scripts/train_residue_classifier.py's `run_val` logs.
 
         Everything is accumulated by `lib.stats_utils.ResidueMetrics` -- per-protein
@@ -207,7 +214,7 @@ class Exp:
         # is an NLL, not a cross-entropy over logits -- pass it explicitly rather than letting
         # ResidueMetrics re-softmax an already-normalised distribution.
         nll = torch.nn.NLLLoss()
-        accumulator = ResidueMetrics(three_letter_codes(ALPHABET), val_name='test')
+        accumulator = ResidueMetrics(three_letter_codes(ALPHABET), val_name=split_name)
 
         for entry in tqdm(dataset, desc='designing held-out split'):
             protein = featurizer([entry])
@@ -223,7 +230,8 @@ class Exp:
 
         num_params = sum(p.numel() for p in self.method.model.parameters() if p.requires_grad)
         print_log(accumulator.summary_line(num_params))
-        return accumulator.to_log_dict(cm_title='Test Amino Acid Confusion Matrix', epoch=epoch)
+        return accumulator.to_log_dict(
+            cm_title='{} Amino Acid Confusion Matrix'.format(split_name.capitalize()), epoch=epoch)
 
 
 if __name__ == '__main__':
