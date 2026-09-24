@@ -1,13 +1,18 @@
 # Stage-1 hyperparameters: mask-prior IPA pretraining (MapDiffTrainer.fit_prior).
-# Matches upstream conf/train/train_mask_ipa.yaml, with train_epochs trimmed
-# down to match the diffusion stage's quick-iteration default (conf/train/train_diff.yaml).
+# Matches the paper's set-up (Adam, one-cycle schedule peaking at lr 5e-4, batch size 8, 200
+# pretraining epochs) and upstream's mask_ipa_pretrain.py. As upstream does, this stage has
+# no validation and no early stopping: it trains all `train_epochs`, and the last weights are
+# what the diffusion stage is built on (upstream's `prior_model.path` points at its `_last_`
+# checkpoint). Model selection happens in stage 2 only.
 lr: 5e-4
 weight_decay: 0
 scheduler: True
 
-train_epochs: 8
+train_epochs: 200
 batch_size: 8
-clip_grad_norm: 1.0
+# 5.0, not upstream's config value of 1.0: their trainer ignores the config and hard-codes
+# clip_grad_norm_(..., 5.0) (trainer/mask_ipa_trainer.py), so 5.0 is what their runs used.
+clip_grad_norm: 5.0
 save_epochs: 50
 
 candi_rate: 0.6

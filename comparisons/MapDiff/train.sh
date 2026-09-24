@@ -61,6 +61,15 @@ for f in api_keys.txt wandb_api.txt stats_utils.py relaxed_pdb.py traj_frames.py
     [[ -n "$f" && -f "$f" ]] && cp "$f" MapDiff/
 done
 
+# mdCATH's relaxed structures are the CATH domain files themselves (lib/relaxed_pdb.py's
+# load_cath_structures, --cath-dir). Extracted into its own directory since the archive's
+# internal layout is matched loosely (any nesting, case or extension).
+if [[ -f mdcath_pdbs.tar.gz && ! -d MapDiff/pdbs ]]; then
+    echo ">>> extracting mdcath_pdbs.tar.gz (CATH domain structures)"
+    mkdir -p MapDiff/pdbs
+    tar -xf mdcath_pdbs.tar.gz -C MapDiff/pdbs
+fi
+
 cd MapDiff
 # `test/` is checked too, not just `train/`: a scratch dir featurized before the test split
 # existed has train/ and validation/ but no test/, and generate_graph_relaxed.py skips any
@@ -68,7 +77,7 @@ cd MapDiff
 if [[ ! -d "${PROCESS_ROOT}/train" || ! -d "${PROCESS_ROOT}/test" ]]; then
     echo ">>> featurizing ${DS_NAME} ${STRUCTURE_SOURCE} structures into MapDiff graphs (runs DSSP once per protein)"
     python data/generate_graph_relaxed.py --ds-name "${DS_NAME}" \
-        --structure-source "${STRUCTURE_SOURCE}" \
+        --structure-source "${STRUCTURE_SOURCE}" --cath-dir ./pdbs \
         --save-root "${PROCESS_ROOT}" --marginal-out "${MARGINAL_OUT}"
 fi
 

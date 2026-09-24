@@ -77,6 +77,7 @@ from train import (
     REPO_ROOT,
     PdbTrackingFeaturiser,
     build_processed_dataset,
+    check_pool_sizes,
     filter_by_length,
     load_pretrained_weights,
     run_validation,
@@ -180,60 +181,6 @@ def batch_size_for_k(k: int, conf_budget: int, proteins_per_step: int, override)
     batch_size = override if override else max(1, min(proteins_per_step, conf_budget // k))
     grad_accum = max(1, -(-proteins_per_step // batch_size))  # ceil, so >= proteins_per_step
     return batch_size, grad_accum
-
-
-def check_pool_sizes(processed_dir: Path, pdb_ids: list, max_k: int, course_grain=None) -> None:
-    """Fail before training if any protein's saved pool is smaller than the largest k.
-
-    `ProteinGraphFeaturiserSingleChain.get_entries` handles `n < k` by duplicating conformers
-    at random, which is silent: the run completes, the assert on `len(confs_list) == k`
-    passes, and the model is simply fed the same frame more than once. Across a sweep that
-    reads as the recovery curve saturating, so it has to be an error here rather than a
-    warning nobody sees. A pool comes up short when the trajectory has fewer coarse-grained
-    frames than max_k (`farthest_point_sample` clamps to what exists), i.e. when
-    --course-grain is too aggressive for a short trajectory.
-    """
-    short = {}
-    for pdb_id in pdb_ids:
-        path = processed_dir / f"{pdb_id}.pt"
-        if not path.exists():  # build_processed_dataset already warned and skipped it
-            continue
-        n = len(torch.load(path, weights_only=False).cluster_members)
-        if n < max_k:
-            short[pdb_id] = n
-    if short:
-        worst = min(short.values())
-        raise RuntimeError(
-            f"{len(short)} protein(s) have a conformer pool smaller than the largest k "
-            f"({max_k}); the smallest is {worst}. The featurizer would pad these by "
-            f"duplicating frames, which looks like the recovery curve flattening. "
-            f"Offenders: {dict(sorted(short.items(), key=lambda kv: kv[1])[:10])}"
-            f"{' ...' if len(short) > 10 else ''}. {_pool_remedy(worst, max_k, course_grain)}"
-        )
-
-
-def _pool_remedy(worst: int, max_k: int, course_grain) -> str:
-    """The actionable half of check_pool_sizes' error.
-
-    Capping --k-grid at `worst` is the literal fix but almost never the right one: when a
-    whole dataset comes up short it is because --course-grain was tuned for a different
-    store's trajectory length, and the fix is to subsample less aggressively rather than to
-    abandon the top of the grid. `worst` frames survived at the current stride, so the
-    trajectory holds roughly `worst * course_grain` frames and a stride of
-    `worst * course_grain // max_k` puts max_k of them back in reach.
-    """
-    if not course_grain:
-        return (f"Lower --course-grain so more frames survive subsampling (then "
-                f"--force-rebuild), or lower the top of --k-grid to {worst}.")
-    suggested = max(1, (worst * course_grain) // max_k)
-    if suggested >= course_grain:
-        return (f"The shortest trajectory has only ~{worst * course_grain} frames, so k={max_k} "
-                f"is out of reach at any stride; lower the top of --k-grid to {worst} or drop "
-                f"these proteins.")
-    return (f"--course-grain is {course_grain}, tuned for a longer-trajectory store; the "
-            f"shortest trajectory here holds only ~{worst * course_grain} frames. Rerun with "
-            f"--course-grain {suggested} --force-rebuild to fit k={max_k}, or lower the top of "
-            f"--k-grid to {worst}.")
 
 
 def build_datasets(pdb_lists: dict, features_cfg, processed_dir: Path) -> tuple:

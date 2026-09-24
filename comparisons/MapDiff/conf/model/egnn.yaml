@@ -2,7 +2,9 @@ name: egnn
 input_feat_dim: 31 # dim of input node features
 edge_attr_dim: 93 # dim of input edge features
 hidden_dim: 128
-drop_out: 0.1
+# The paper: "The dropout rate is set to 0.2 in both EGCL and IPA layers" (upstream's
+# shipped config says 0.1).
+drop_out: 0.2
 depth: 6
 
 update_edge: True

@@ -49,6 +49,9 @@ def create_parser():
                               "whole deposited chains uncropped.")
     parser.add_argument('--pdb_cache', default='', type=str,
                          help='Where downloaded RCSB entries are cached (default: <data_root>/pdb_cache)')
+    parser.add_argument('--cath_dir', default='', type=str,
+                         help='MDCATH relaxed only: directory holding the extracted CATH domain files '
+                              '(mdcath_pdbs.tar.gz), used whole with no cropping (default: <data_root>/pdbs)')
     parser.add_argument('--structure_source', default='relaxed', choices=['relaxed', 'frame'],
                          help="What each protein's coordinates come from: its deposited RCSB entry "
                               "('relaxed', the default) or one frame of its MD trajectory ('frame')")

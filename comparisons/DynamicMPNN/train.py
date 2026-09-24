@@ -23,6 +23,8 @@ Pipeline (see README.md for the full reasoning):
        epoch's weights, and is never trained on.
      * Each training draw is re-featurised (`ResamplingDataset`): a fresh draw of k conformers
        from the pool and fresh coordinate noise, as upstream's `in_memory: False` trained.
+     * The paper's optimizer batch of 32 proteins per step, reached by gradient accumulation
+       over `--batch-size` forward passes (`--effective-batch-size`), as in finetune.py.
      * Running the other ATLAS folds is a matter of repeating the job with --val-fold 1..3.
 
 ATLAS and mdCATH are trained and evaluated separately -- one run each (`--ds-name`) --
@@ -235,10 +237,18 @@ def farthest_point_sample(dissimilarity: torch.Tensor, pool_size: int) -> list:
 
 def residues_to_type_ids(raw_residues: np.ndarray) -> torch.Tensor:
     """3-letter residue codes (bytes, from the hdf5 `residues` dataset) -> DynamicMPNN's
-    BASE_AMINO_ACIDS integer vocabulary (20 = gap, 21 = unknown/non-standard)."""
+    BASE_AMINO_ACIDS integer vocabulary (20 = gap, 21 = unknown/non-standard).
+
+    Force-field residue names (CHARMM's HSD/HSE/HSP, AMBER's HIE/CYX, ...) are first mapped
+    to their standard residue with the sheaf dataset's own RESIDUE_ALIASES, so both models
+    see the same labels. This matters beyond the labels: DynamicMPNN's featuriser
+    (`eliminate_gaps`) DELETES every position typed 20 or 21, so an unaliased HSD would drop
+    every histidine from the protein and shorten the designed sequence."""
+    aliases = ResidueClassifierDataset.RESIDUE_ALIASES
     ids = []
     for raw in raw_residues:
         code3 = raw.decode().strip()[:3].upper()
+        code3 = aliases.get(code3, code3)
         one_letter = STANDARD_AMINO_ACID_MAPPING_3_TO_1.get(code3)
         if one_letter is not None and one_letter in BASE_AMINO_ACIDS:
             ids.append(BASE_AMINO_ACIDS.index(one_letter))
@@ -356,6 +366,60 @@ def build_processed_dataset(
             f"{flat_trajectories} -- these are an easy win for any model, keep in mind when "
             "comparing recovery numbers."
         )
+
+
+def check_pool_sizes(processed_dir: Path, pdb_ids: list, max_k: int, course_grain=None) -> None:
+    """Fail before training if any protein's saved pool is smaller than the largest k.
+
+    `ProteinGraphFeaturiserSingleChain.get_entries` handles `n < k` by duplicating conformers
+    at random, which is silent: the run completes, the assert on `len(confs_list) == k`
+    passes, and the model is simply fed the same frame more than once. In a single run that
+    quietly shrinks the ensemble below --k; across a sweep it reads as the recovery curve
+    saturating. Either way it has to be an error here rather than a warning nobody sees. A pool comes up short when the trajectory has fewer coarse-grained
+    frames than max_k (`farthest_point_sample` clamps to what exists), i.e. when
+    --course-grain is too aggressive for a short trajectory.
+    """
+    short = {}
+    for pdb_id in pdb_ids:
+        path = processed_dir / f"{pdb_id}.pt"
+        if not path.exists():  # build_processed_dataset already warned and skipped it
+            continue
+        n = len(torch.load(path, weights_only=False).cluster_members)
+        if n < max_k:
+            short[pdb_id] = n
+    if short:
+        worst = min(short.values())
+        raise RuntimeError(
+            f"{len(short)} protein(s) have a conformer pool smaller than the largest k "
+            f"({max_k}); the smallest is {worst}. The featurizer would pad these by "
+            f"duplicating frames, which looks like the recovery curve flattening. "
+            f"Offenders: {dict(sorted(short.items(), key=lambda kv: kv[1])[:10])}"
+            f"{' ...' if len(short) > 10 else ''}. {_pool_remedy(worst, max_k, course_grain)}"
+        )
+
+
+def _pool_remedy(worst: int, max_k: int, course_grain) -> str:
+    """The actionable half of check_pool_sizes' error.
+
+    Capping k (--k, or the top of sweep_k.py's --k-grid) at `worst` is the literal fix but almost never the right one: when a
+    whole dataset comes up short it is because --course-grain was tuned for a different
+    store's trajectory length, and the fix is to subsample less aggressively rather than to
+    abandon the larger k. `worst` frames survived at the current stride, so the
+    trajectory holds roughly `worst * course_grain` frames and a stride of
+    `worst * course_grain // max_k` puts max_k of them back in reach.
+    """
+    if not course_grain:
+        return (f"Lower --course-grain so more frames survive subsampling (then "
+                f"--force-rebuild), or lower k to {worst}.")
+    suggested = max(1, (worst * course_grain) // max_k)
+    if suggested >= course_grain:
+        return (f"The shortest trajectory has only ~{worst * course_grain} frames, so k={max_k} "
+                f"is out of reach at any stride; lower k to {worst} "
+                f"or drop these proteins.")
+    return (f"--course-grain is {course_grain}, tuned for a longer-trajectory store; the "
+            f"shortest trajectory here holds only ~{worst * course_grain} frames. Rerun with "
+            f"--course-grain {suggested} --force-rebuild to fit k={max_k}, or lower k to "
+            f"{worst}.")
 
 
 def filter_by_length(pdb_ids: list, traj_h5_path: Path, max_length: int) -> list:
@@ -637,9 +701,15 @@ def parse_args():
                         help="time subsampling for the pairwise-TM matrix (default: "
                              f"{DEFAULT_COURSE_GRAIN}, keyed on --ds-name)")
     parser.add_argument("--force-rebuild", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--epochs", type=int, default=8,
-                        help="Upper bound on epochs; early stopping normally ends the run first")
+    parser.add_argument("--batch-size", type=int, default=2,
+                        help="Proteins per forward pass -- upstream's per-GPU batch. Activation "
+                             "memory scales with k * batch-size, so lower this for large --k")
+    parser.add_argument("--effective-batch-size", type=int, default=32,
+                        help="Proteins per optimizer step (the paper's batch size); reached by "
+                             "accumulating gradients over effective/--batch-size forward passes")
+    parser.add_argument("--epochs", type=int, default=200,
+                        help="Upper bound on epochs (upstream's trainer max_epochs); early "
+                             "stopping normally ends the run well before it")
     parser.add_argument("--early-stopping-patience", type=int, default=10,
                         help="Stop once val perplexity has not improved on its best for this many "
                              "epochs; 0 disables stopping (the best epoch is still restored)")
@@ -656,6 +726,13 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.effective_batch_size % args.batch_size:
+        raise ValueError(f"--effective-batch-size {args.effective_batch_size} is not a multiple "
+                         f"of --batch-size {args.batch_size}")
+    accum_steps = args.effective_batch_size // args.batch_size
+    if args.pool_size < args.k:
+        raise ValueError(f"--pool-size {args.pool_size} < --k {args.k}: the featurizer would "
+                         f"pad every ensemble with duplicated frames (see check_pool_sizes)")
     # Per-dataset default (see DEFAULT_COURSE_GRAIN): ATLAS's 1001-frame trajectories and
     # mdCATH's 130..501-frame ones cannot share one subsampling stride.
     if args.course_grain is None:
@@ -695,6 +772,7 @@ def main():
             "pool_size": args.pool_size,
             "course_grain": args.course_grain,
             "batch_size": args.batch_size,
+            "effective_batch_size": args.effective_batch_size,
             "epochs": args.epochs,
             "early_stopping_patience": args.early_stopping_patience,
             "lr": args.lr,
@@ -732,6 +810,8 @@ def main():
         course_grain=args.course_grain,
         force_rebuild=args.force_rebuild,
     )
+    # A pool shorter than k is padded with duplicated frames, silently -- fail instead.
+    check_pool_sizes(processed_dir, train_pdbs + val_pdbs + test_pdbs, args.k, args.course_grain)
     # build_processed_dataset only warns about ids with no trajectory group in the h5 and
     # writes no .pt for them; PTFileDataset torch.loads every id it is given, so drop them here.
     train_pdbs, val_pdbs, test_pdbs = (
@@ -813,11 +893,23 @@ def main():
     run.summary["val_split_ids"] = list(val_pdb_order)
     run.summary["test_split_ids"] = list(test_pdb_order)
 
+    # Upstream's own loader: `drop_last=True`, `batch_size` proteins per forward pass (their
+    # per-GPU batch). The paper's batch of 32 is what their DDP ranks summed to per optimizer
+    # step; on one GPU the same step is `accum_steps` forward passes with the gradient averaged
+    # over them -- the same regime finetune.py trains under.
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
+        train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True,
         num_workers=args.num_workers, collate_fn=safe_collate,
         persistent_workers=args.num_workers > 0,
     )
+    if len(train_loader) == 0:
+        raise RuntimeError(f"{len(train_dataset)} training proteins is less than one "
+                           f"--batch-size {args.batch_size} batch.")
+    steps_per_epoch = -(-len(train_loader) // accum_steps)
+    logger.info(f"{len(train_loader)} forward passes of {args.batch_size} per epoch, accumulated "
+                f"{accum_steps} at a time -> {steps_per_epoch} optimizer steps of up to "
+                f"{args.effective_batch_size} proteins")
+    run.summary["steps_per_epoch"] = steps_per_epoch
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, collate_fn=safe_collate,
@@ -844,21 +936,28 @@ def main():
     for epoch in range(args.epochs):
         model.train()
 
-        total_loss = 0.0
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch} Train"):
+        total_loss, window_loss = 0.0, 0.0
+        optimizer.zero_grad()
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} Train")):
             batch = batch.to(DEVICE)
-            optimizer.zero_grad()
+            # The epoch's last window can be short; average over the passes it actually has.
+            window_start = batch_idx - batch_idx % accum_steps
+            window_size = min(accum_steps, len(train_loader) - window_start)
 
             logits, valid_mask = model(batch)
             loss = crit(logits[valid_mask], batch.seq[valid_mask])
-
-            loss.backward()
-            optimizer.step()
+            (loss / window_size).backward()
             total_loss += loss.item()
-            step += 1
-            run.log({"train_loss": loss.item(), "epoch": epoch, "step": step})
+            window_loss += loss.item() / window_size
 
-        logger.info(f"Epoch {epoch}: train loss {total_loss / max(len(train_loader), 1):.4f}")
+            if batch_idx - window_start + 1 == window_size:
+                optimizer.step()
+                optimizer.zero_grad()
+                step += 1
+                run.log({"train_loss": window_loss, "epoch": epoch, "step": step})
+                window_loss = 0.0
+
+        logger.info(f"Epoch {epoch}: train loss {total_loss / len(train_loader):.4f}")
 
         metrics = run_validation(model, val_loader, crit, val_pdb_order, epoch, run,
                                   num_params=pytorch_total_params)

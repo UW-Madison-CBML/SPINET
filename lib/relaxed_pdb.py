@@ -400,3 +400,70 @@ def load_relaxed_structures(protein_ids, cache_dir="./pdb_cache", reference_seqs
     if verbose and failures:
         print("relaxed PDB loading: {}/{} protein ids unavailable".format(len(failures), len(protein_ids)))
     return records, failures
+
+
+# CATH domain structures
+# ----------------------
+# For mdCATH, "the relaxed structure" is the CATH domain file the simulation was started from,
+# not a crop of the full deposited RCSB chain. The domain files come pre-cut (the
+# `mdcath_pdbs.tar.gz` archive on the research drive, see lib/cath_data_example.py), so they
+# are loaded as-is: no RCSB download, no alignment, no cropping.
+
+CATH_ARCHIVE = "mdcath_pdbs.tar.gz"
+DEFAULT_CATH_DIR = "pdbs"
+_CATH_EXTENSIONS = ("", ".pdb", ".ent")
+
+
+def index_cath_dir(cath_dir):
+    """``{lowercased domain id: path}`` for every domain file under ``cath_dir``.
+
+    The archive's naming (case, extension, nesting) is matched loosely: a file named
+    ``12ASA00``, ``12asA00`` or ``12asA00.pdb`` anywhere under ``cath_dir`` all serve the domain
+    ``12asA00``.
+    """
+    index = {}
+    for root, _, files in os.walk(cath_dir):
+        for filename in files:
+            stem, ext = os.path.splitext(filename)
+            if ext.lower() not in _CATH_EXTENSIONS:
+                stem = filename
+            index.setdefault(stem.lower(), os.path.join(root, filename))
+    return index
+
+
+def load_cath_structures(protein_ids, cath_dir=DEFAULT_CATH_DIR, verbose=True):
+    """Load CATH domain structures for mdCATH domain ids (``12asA00``), uncropped.
+
+    Same ``(records, failures)`` contract as `load_relaxed_structures`, so callers can swap one
+    for the other. The chain is read from the domain id's 5th character; a domain file holds a
+    single chain, so `load_chain_backbone`'s first-protein-chain fallback covers a mismatch.
+    """
+    if not os.path.isdir(cath_dir):
+        raise FileNotFoundError("no CATH domain directory at {} (extract {} there)".format(
+            cath_dir, CATH_ARCHIVE))
+    protein_ids = list(dict.fromkeys(protein_ids))
+    index = index_cath_dir(cath_dir)
+
+    records, failures = {}, {}
+    iterator = protein_ids
+    if verbose:
+        from tqdm import tqdm
+        iterator = tqdm(protein_ids, desc="parsing CATH domains")
+    for protein_id in iterator:
+        path = index.get(protein_id.strip().lower())
+        if path is None:
+            failures[protein_id] = "no CATH domain file under {}".format(cath_dir)
+            continue
+        pdb_id, chain_id = parse_structure_id(protein_id)
+        try:
+            record = load_chain_backbone(path, pdb_id, chain_id)
+        except Exception as exc:  # noqa: BLE001
+            failures[protein_id] = str(exc)
+            continue
+        record["protein_id"] = protein_id
+        records[protein_id] = record
+
+    if verbose:
+        print("CATH domains: loaded {}/{} from {} ({} files indexed)".format(
+            len(records), len(protein_ids), cath_dir, len(index)))
+    return records, failures

@@ -2,10 +2,11 @@
 
 MapDiff is a static-structure inverse-folding model, so by default it is trained and
 evaluated on the deposited PDB entry for each protein in our datasets rather than on a frame
-pulled out of the MD trajectory. `lib/relaxed_pdb.py` downloads the entry from RCSB, picks
-the chain the dataset id names, and crops it to the residues the trajectory covers (using the
-trajectory's own residue list as the reference sequence), so MapDiff scores the same residues
-as every other model in the comparison. DynamicMPNN deliberately still trains on MD
+pulled out of the MD trajectory. For ATLAS, `lib/relaxed_pdb.py` downloads the entry from
+RCSB, picks the chain the dataset id names, and crops it to the residues the trajectory covers
+(using the trajectory's own residue list as the reference sequence). For mdCATH the structure
+is the CATH domain file itself (`relaxed_pdb.load_cath_structures`, read from the extracted
+`mdcath_pdbs.tar.gz` in `--cath-dir`), used whole: no download and no cropping. DynamicMPNN deliberately still trains on MD
 ensembles -- that ensemble input is the thing being benchmarked.
 
 `--structure-source frame` switches the input to one random frame per protein's trajectory
@@ -107,6 +108,9 @@ def create_parser():
                          help="ATLAS only: cross_val fold held out as the test split (never trained on)")
     parser.add_argument('--pdb-cache', default='./pdb_cache',
                          help="Where downloaded RCSB entries are cached")
+    parser.add_argument('--cath-dir', default=relaxed_pdb.DEFAULT_CATH_DIR,
+                         help="mdcath with --structure-source relaxed only: directory holding the "
+                              "extracted CATH domain files (mdcath_pdbs.tar.gz), used uncropped")
     parser.add_argument('--save-root', default=None,
                          help="Where to write the processed per-protein graph .pt files "
                               "(default: ./surffold_data/<ds_name>_process/)")
@@ -193,10 +197,13 @@ def main():
         records, failures = traj_frames.load_frame_structures(
             all_ids, traj_h5, seed=args.frame_seed, frame_index=args.frame_index)
         print(f'Loaded {len(records)} trajectory frames from {traj_h5}, {len(failures)} unavailable')
+    elif args.ds_name == 'mdcath':
+        # The CATH domain files, whole -- no RCSB download, no cropping.
+        records, failures = relaxed_pdb.load_cath_structures(all_ids, args.cath_dir)
+        print(f'Loaded {len(records)} CATH domain structures, {len(failures)} unavailable')
     else:
         # Crop each deposited chain to the residues the trajectory covers, so MapDiff scores the
-        # same residue set as the sheaf model. For mdCATH this is also what reduces a deposited
-        # chain to the single CATH *domain* the dataset id names.
+        # same residue set as the sheaf model.
         reference_seqs = {}
         if traj_h5:
             reference_seqs = relaxed_pdb.reference_seqs_from_h5(traj_h5, all_ids)
