@@ -5,7 +5,7 @@ universe = docker
 #pdbs_archive=atlas_pdbs.tar.gz
 
 temp=320
-index=mdcath_$(temp)_0_topology_split.csv
+index=mdcath_$(temp)_0_top_split.csv
 pdbs_archive=mdcath_pdbs.tar.gz
 
 shell = ./train.sh $(index) $(pdb_archive)

@@ -4,12 +4,12 @@ docker_image = jenslundsgaard/scfold:v1.4
 
 universe = docker
 
-#index = atlas_cross_val_index.csv
-#pdbs_archive=atlas_pdbs.tar.gz
+index = atlas_cross_val_index.csv
+pdbs_archive=atlas_pdbs.tar.gz
 
-temp=320
-index=mdcath_$(temp)_0_topology_split.csv
-pdbs_archive=mdcath_pdbs.tar.gz
+#temp=320
+#index=mdcath_$(temp)_0_topology_split.csv
+#pdbs_archive=mdcath_pdbs.tar.gz
 
 shell = ./train.sh --index-name $(index) --use-pdbs
 

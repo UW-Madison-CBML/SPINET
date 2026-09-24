@@ -1,2 +1,2 @@
---run-name our_model --ablate-attention
 --run-name no_sheaves --ablate-attention --ablate-sheaves
+--run-name our_model --ablate-attention

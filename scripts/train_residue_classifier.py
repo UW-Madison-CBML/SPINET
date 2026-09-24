@@ -318,15 +318,14 @@ def interpret_sheaves(loader, model, run, device, rng, h5_filename):
 # move validation code to it's own function
 def train_residue_classifier(args_dict):
     # hyperparameters
-    epsilon = 5.0 # in Angstroms
     learning_rate = 1e-3
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
-    num_nodes = 2000 # GRU's can't do more than a batch of 2**16
-    hidden_dim = 64
+    num_nodes = 3000 # GRU's can't do more than a batch of 2**16
+    hidden_dim = 128
     stalk_dim = 8
-    num_blocks = 4
+    num_blocks = 6
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
@@ -360,8 +359,8 @@ def train_residue_classifier(args_dict):
     api = HfApi()
 
     torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
 
+    epsilon = (0.75 if ds_name=="atlas" else 7.5) # in Angstroms, atlas is in NM i.e. 10A
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
 
@@ -587,20 +586,23 @@ def train_residue_classifier(args_dict):
         # push to hub
 
         #model.save_pretrained(local_dir, safe_serialization=False) # TODO fix this is bugged
-        torch.save(model.state_dict(), os.path.join(local_dir, "pytorch_model.bin"))
+        try:
+            torch.save(model.state_dict(), os.path.join(local_dir, "pytorch_model.bin"))
 
-        if hasattr(model, "config") and model.config is not None:
-            config_path = os.path.join(local_dir, "config.json")
-            with open(config_path, "w") as f:
-                if hasattr(model.config, "to_dict"):
-                    json.dump(model.config.to_dict(), f, indent=2)
-                else:
-                    json.dump(model.config, f, indent=2)
-        api.upload_folder(
-            folder_path=local_dir,
-            repo_id=f"JensLundsgaard/{run_name}",
-            repo_type="model"
-        )
+            if hasattr(model, "config") and model.config is not None:
+                config_path = os.path.join(local_dir, "config.json")
+                with open(config_path, "w") as f:
+                    if hasattr(model.config, "to_dict"):
+                        json.dump(model.config.to_dict(), f, indent=2)
+                    else:
+                        json.dump(model.config, f, indent=2)
+            api.upload_folder(
+                folder_path=local_dir,
+                repo_id=f"JensLundsgaard/{run_name}",
+                repo_type="model"
+            )
+        except Exception as e:
+            print("skipping push to hub:", e)
         
         # Validation Check
         run_val(run, model, val_loader, val_dataset, epoch, DEVICE, crit, esmfold_tokenizer, esmfold_model, val_name="val", test_val=test_val)
@@ -626,7 +628,7 @@ if __name__ == "__main__":
     parser.add_argument('--ablate-attention', action="store_true")
     parser.add_argument('--restriction-map-type', type=str, default="arbitrary", choices=['low_rank', 'orthogonal', 'arbitrary'])
     parser.add_argument('--resume', type=str, default="")
-    parser.add_argument('--epochs', type=int, default=25) # or till convergence
+    parser.add_argument('--epochs', type=int, default=50) # or till convergence
     parser.add_argument('--cross-val', type=int, default=0)
     parser.add_argument('--ds-name', type=str, default="atlas", choices=["atlas", "mdcath"])
     parser.add_argument('--other-model', type=str, default="spinet")
