@@ -116,11 +116,14 @@ class MapDiffTrainer:
         self.best_val_epoch = 0
         self.step = 0
         self.epoch = 0
+        # `best_val_perplexity` is the per-protein mean val perplexity (ResidueMetrics'
+        # `val_perp_mean`); `best_val_recovery` is just the median recovery at that epoch.
         self.best_val_recovery, self.best_val_perplexity = 0, float('inf')
         self.best_model = None
-        # Early stopping on val median recovery, with patience counted in epochs (validation only
-        # runs every `save_and_sample_every` epochs, so patience is effectively rounded up to that).
-        # `None` disables it.
+        # Early stopping on val perplexity -- the protocol every comparison model shares (see
+        # comparisons/DynamicMPNN/train.py's EarlyStopping) -- with patience counted in epochs
+        # (validation only runs every `save_and_sample_every` epochs, so patience is effectively
+        # rounded up to that). `None` disables it; the best val epoch is still what test scores.
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_min_delta = early_stopping_min_delta
 
@@ -319,12 +322,16 @@ class MapDiffTrainer:
                     'val_median_recovery': median_recovery, 'val_mean_recovery': mean_recovery,
                 })
 
-            if median_recovery > self.best_val_recovery + self.early_stopping_min_delta:
+            # Selected on the per-protein mean perplexity -- `val_perp_mean` in the dict logged
+            # above, the same number DynamicMPNN and PiFold select on -- not on `perplexity`,
+            # which pools every residue of the split into one cross-entropy.
+            val_perp_mean = torch.exp(torch.tensor(metrics.losses)).mean().item()
+            if val_perp_mean < self.best_val_perplexity - self.early_stopping_min_delta:
                 self.best_model = copy.deepcopy(self.model)
                 self.best_val_step = self.step
                 self.best_val_epoch = self.epoch
                 self.best_val_recovery = median_recovery
-                self.best_val_perplexity = perplexity
+                self.best_val_perplexity = val_perp_mean
 
     def train(self):
         """Stage 2: denoising diffusion training, seeded by (and jointly
@@ -368,7 +375,7 @@ class MapDiffTrainer:
         print('Stage 2 (diffusion) training complete')
         if self.wandb_run:
             self.wandb_run.log({'best_val_median_recovery': self.best_val_recovery,
-                                 'best_val_perplexity': self.best_val_perplexity,
+                                 'best_val_perp_mean': self.best_val_perplexity,
                                  'best_val_epoch': self.best_val_epoch})
         self.save(self.best_val_epoch, self.best_val_step, mode='best')
         self.save(self.epoch, self.step, mode='last')
@@ -379,9 +386,9 @@ class MapDiffTrainer:
         epochs_since_best = self.epoch - self.best_val_epoch
         if epochs_since_best < self.early_stopping_patience:
             return False
-        print(f'Early stopping at epoch {self.epoch}: val median recovery has not improved by more than '
+        print(f'Early stopping at epoch {self.epoch}: val perplexity has not improved by more than '
               f'{self.early_stopping_min_delta} in {epochs_since_best} epochs '
-              f'(best {self.best_val_recovery:.4f} at epoch {self.best_val_epoch})')
+              f'(best {self.best_val_perplexity:.4f} at epoch {self.best_val_epoch})')
         if self.wandb_run:
             self.wandb_run.log({'early_stopped_epoch': self.epoch, 'epoch': self.epoch})
         return True

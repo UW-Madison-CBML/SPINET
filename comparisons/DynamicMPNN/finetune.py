@@ -20,7 +20,7 @@ What fine-tuning adds on top of that is the training side, matched to how upstre
 these weights (the checkpoint's own `cfg`: Adam, label smoothing 0.05, GAP ignored,
 `in_memory: False`):
 
-* **Training samples are re-featurised on every draw** (`ResamplingPairDataset`). Upstream
+* **Training samples are re-featurised on every draw** (train.py's `ResamplingDataset`). Upstream
   trained with `in_memory: False`, so each step saw a fresh conformer pair and fresh
   `noise_scale` coordinate noise. train.py's `in_memory=True` featurises once and freezes both
   for every epoch -- harmless for a from-scratch model that never knew otherwise, but it would
@@ -30,7 +30,12 @@ these weights (the checkpoint's own `cfg`: Adam, label smoothing 0.05, GAP ignor
 * **Held-out splits are featurised exactly as eval_ckpt.py does** (`tm_min` pair, no noise,
   frozen), so epoch 0 of the validation curve here reproduces the zero-shot number and every
   later point is directly the fine-tuning gain.
-* The lr defaults to 1e-4, a tenth of upstream's from-scratch 1e-3.
+* **The paper's optimisation regime**: Adam at lr 1e-3, no scheduler, and a batch of 32
+  proteins per optimizer step. Upstream reached 32 with 2 proteins per GPU across DDP ranks;
+  here it is 2 per forward pass, gradients accumulated over 16 (`--effective-batch-size`).
+* **Early stopping on val perplexity** (train.py's `EarlyStopping`, patience 10, max 200
+  epochs), the protocol every comparison model shares. The best val epoch -- the zero-shot
+  epoch -1 included -- is restored before test.
 
 The saved checkpoint carries the same `hyper_parameters['cfg']` layout upstream's do, so
 eval_ckpt.py can rescore a fine-tuned run with ``--ckpt weights/<run>.ckpt``, and it reloads
@@ -68,6 +73,8 @@ from train import (  # noqa: E402
     DEVICE,
     GAP_TOKEN,
     REPO_ROOT,
+    EarlyStopping,
+    ResamplingDataset,
     build_processed_dataset,
     filter_by_length,
     load_pretrained_weights,
@@ -89,48 +96,6 @@ from dynamicmpnn.datamodules.sampler import safe_collate  # noqa: E402
 from dynamicmpnn.types import DISTANCE_EPS  # noqa: E402
 
 
-class ResamplingPairDataset(torch.utils.data.Dataset):
-    """Training split that re-featurises each protein on every `__getitem__`.
-
-    The raw conformer pools are small, so they are held in memory; only the featurisation --
-    which pair of the pool, and the featuriser's own train-time coordinate noise -- is redone
-    per draw, as upstream's `in_memory: False` training did.
-
-    Proteins the featuriser rejects are dropped once, up front: `safe_collate` hard-errors on
-    a `None` sample, so one must never reach the loader. A rejection is a property of the
-    protein (too short / no valid coordinates), not of which pair was drawn, so a protein that
-    survives the up-front pass survives later draws too; if one ever does not, it falls back to
-    its up-front featurisation rather than taking down the job.
-    """
-
-    def __init__(self, pdb_codes, features_cfg, processed_dir, pair_selection):
-        self.adapter = LegacyPairAdapter(
-            hydra.utils.instantiate(features_cfg, split="train", device="cpu",
-                                    distance_eps=DISTANCE_EPS),
-            selection=pair_selection,
-        )
-        self.proteins, self.fallback, self.pdb_codes = [], [], []
-        for pdb_code in tqdm(pdb_codes, desc="Loading train ensembles"):
-            path = processed_dir / f"{pdb_code}.pt"
-            if not path.exists():
-                continue  # build_processed_dataset already warned about it
-            protein = torch.load(path, weights_only=False)
-            featurised = self.adapter(protein, pdb_code=pdb_code)
-            if featurised is None:
-                logger.warning(f"Skipping train protein {pdb_code}: featuriser rejected it.")
-                continue
-            self.proteins.append(protein)
-            self.fallback.append(featurised)
-            self.pdb_codes.append(pdb_code)
-
-    def __len__(self):
-        return len(self.proteins)
-
-    def __getitem__(self, idx):
-        featurised = self.adapter(self.proteins[idx], pdb_code=self.pdb_codes[idx])
-        return featurised if featurised is not None else self.fallback[idx]
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -148,7 +113,7 @@ def parse_args():
                         help="ATLAS only: cross_val fold used as the validation split")
     parser.add_argument("--test-fold", type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
                         help="ATLAS only: cross_val fold held out as the test split -- never "
-                             "trained on, scored once after the last epoch")
+                             "trained on, scored once, with the best val epoch's weights")
     parser.add_argument("--processed-dir", type=Path, default=None,
                         help="Where the .pt conformer ensembles live (default: ./processed_data_<ds>, "
                              "shared with train.py and eval_ckpt.py)")
@@ -167,10 +132,19 @@ def parse_args():
     parser.add_argument("--pair-selection", type=str, default="tm_min", choices=("tm_min", "random"),
                         help="Which 2 of the pool val/test score; tm_min matches eval_ckpt.py")
     parser.add_argument("--force-rebuild", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=2, help="upstream trained at 2")
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=1e-4,
-                        help="Adam lr; upstream trained these weights from scratch at 1e-3")
+    parser.add_argument("--batch-size", type=int, default=2,
+                        help="Proteins per forward pass -- upstream's per-GPU batch")
+    parser.add_argument("--effective-batch-size", type=int, default=32,
+                        help="Proteins per optimizer step (the paper's batch size); reached by "
+                             "accumulating gradients over effective/--batch-size forward passes")
+    parser.add_argument("--epochs", type=int, default=200,
+                        help="Upper bound on epochs (upstream's trainer max_epochs); early "
+                             "stopping normally ends the run well before it")
+    parser.add_argument("--early-stopping-patience", type=int, default=10,
+                        help="Stop once val perplexity has not improved on its best for this many "
+                             "epochs; 0 disables stopping (the best epoch is still restored)")
+    parser.add_argument("--lr", type=float, default=1e-3,
+                        help="Adam lr; the paper's 1e-3, which upstream trained these weights at")
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=dataset_splits.SEED)
@@ -184,6 +158,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.effective_batch_size % args.batch_size:
+        raise ValueError(f"--effective-batch-size {args.effective_batch_size} is not a multiple "
+                         f"of --batch-size {args.batch_size}")
+    accum_steps = args.effective_batch_size // args.batch_size
     if args.course_grain is None:
         args.course_grain = DEFAULT_COURSE_GRAIN[args.ds_name]
         logger.info(f"--course-grain defaulted to {args.course_grain} for {args.ds_name}")
@@ -219,7 +197,9 @@ def main():
             "pool_size": args.pool_size,
             "course_grain": args.course_grain,
             "batch_size": args.batch_size,
+            "effective_batch_size": args.effective_batch_size,
             "epochs": args.epochs,
+            "early_stopping_patience": args.early_stopping_patience,
             "lr": args.lr,
             "weight_decay": args.weight_decay,
             "seed": args.seed,
@@ -279,8 +259,13 @@ def main():
     model = DecoderNodeBatching(model).to(DEVICE)
     run.log({"params": num_params})
 
-    train_dataset = ResamplingPairDataset(train_pdbs, features_cfg, processed_dir,
-                                          args.train_pair_selection)
+    train_dataset = ResamplingDataset(
+        train_pdbs,
+        LegacyPairAdapter(hydra.utils.instantiate(features_cfg, split="train", device="cpu",
+                                                  distance_eps=DISTANCE_EPS),
+                          selection=args.train_pair_selection),
+        processed_dir,
+    )
     if len(train_dataset) == 0:
         raise RuntimeError("No training protein survived featurisation.")
     check_feature_dims(train_dataset[0], model_cfg)
@@ -301,11 +286,23 @@ def main():
     run.summary["val_split_ids"] = list(val_pdb_order)
     run.summary["test_split_ids"] = list(test_pdb_order)
 
+    # Upstream's own loader: `drop_last=True`, `batch_size` proteins per forward pass (their
+    # per-GPU batch). The paper's batch of 32 is what their DDP ranks summed to per optimizer
+    # step; on one GPU the same step is `accum_steps` forward passes with the gradient averaged
+    # over them, which is what DDP's gradient all-reduce computes across ranks.
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
+        train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True,
         num_workers=args.num_workers, collate_fn=safe_collate,
         persistent_workers=args.num_workers > 0,
     )
+    if len(train_loader) == 0:
+        raise RuntimeError(f"{len(train_dataset)} training proteins is less than one "
+                           f"--batch-size {args.batch_size} batch.")
+    steps_per_epoch = -(-len(train_loader) // accum_steps)
+    logger.info(f"{len(train_loader)} forward passes of {args.batch_size} per epoch, accumulated "
+                f"{accum_steps} at a time -> {steps_per_epoch} optimizer steps of up to "
+                f"{args.effective_batch_size} proteins")
+    run.summary["steps_per_epoch"] = steps_per_epoch
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # Upstream's own task config for these weights: label smoothing 0.05, GAP (20) ignored.
@@ -313,36 +310,64 @@ def main():
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
     save_path = args.save_dir / f"{run_name}_{run.id}.ckpt"
+    best_path = args.save_dir / f"{run_name}_{run.id}_best.ckpt"
     run.summary["weights_path"] = save_path.name
+    run.summary["best_weights_path"] = best_path.name
     # Upstream's `hyper_parameters['cfg']` layout, so eval_ckpt.py's `config_from_ckpt` (and
     # this script's --ckpt) can rebuild the model from the saved file alone.
     ckpt_cfg = {"model": OmegaConf.to_container(model_cfg, resolve=True),
                 "features": OmegaConf.to_container(features_cfg, resolve=True)}
 
-    # Logged at epoch -1: the pretrained weights before any update, i.e. the zero-shot number
-    # on this exact val set, as the origin of the fine-tuning curve.
-    if not args.no_initial_eval:
-        run_validation(model, val_loader, crit, val_pdb_order, -1, run, num_params=num_params)
+    # Model selection is the protocol every comparison model shares (train.py's
+    # EarlyStopping): best per-protein val perplexity, patience 10, best weights restored for
+    # test. It stands in for the paper's "until validation sequence recovery plateaued or began
+    # to decline", which upstream judged by eye -- the released runs carry no EarlyStopping
+    # callback, only a per-epoch ModelCheckpoint on `val/sequence_recovery`.
+    stopper = EarlyStopping(args.early_stopping_patience)
+
+    def record(metrics, epoch):
+        # `.model` unwraps DecoderNodeBatching, so the kept keys match upstream's `GNN_model.*`.
+        if stopper.update(model.model, metrics["val_perp_mean"], epoch):
+            # On disk as well, so an evicted job still brings home its best weights.
+            save_weights(model.model, optimizer, best_path, epoch, step, model_cfg, features_cfg,
+                         args, extra_hparams={"cfg": ckpt_cfg})
+            run.log({"best_val_perp_mean": stopper.best_perplexity,
+                     "best_val_epoch": stopper.best_epoch, "epoch": epoch})
 
     step = 0
+    # Logged at epoch -1: the pretrained weights before any update, i.e. the zero-shot number
+    # on this exact val set, as the origin of the fine-tuning curve. It is also the first
+    # candidate for best: if no epoch beats it, test is scored on the released weights.
+    if not args.no_initial_eval:
+        record(run_validation(model, val_loader, crit, val_pdb_order, -1, run,
+                              num_params=num_params), -1)
+
+    stopped_epoch = args.epochs - 1
     for epoch in range(args.epochs):
         model.train()
 
-        total_loss = 0.0
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch} Train"):
+        total_loss, window_loss = 0.0, 0.0
+        optimizer.zero_grad()
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} Train")):
             batch = batch.to(DEVICE)
-            optimizer.zero_grad()
+            # The epoch's last window can be short; average over the passes it actually has.
+            window_start = batch_idx - batch_idx % accum_steps
+            window_size = min(accum_steps, len(train_loader) - window_start)
 
             logits, valid_mask = model(batch)
             loss = crit(logits[valid_mask], batch.seq[valid_mask])
-
-            loss.backward()
-            optimizer.step()
+            (loss / window_size).backward()
             total_loss += loss.item()
-            step += 1
-            run.log({"train_loss": loss.item(), "epoch": epoch, "step": step})
+            window_loss += loss.item() / window_size
 
-        logger.info(f"Epoch {epoch}: train loss {total_loss / max(len(train_loader), 1):.4f}")
+            if batch_idx - window_start + 1 == window_size:
+                optimizer.step()
+                optimizer.zero_grad()
+                step += 1
+                run.log({"train_loss": window_loss, "epoch": epoch, "step": step})
+                window_loss = 0.0
+
+        logger.info(f"Epoch {epoch}: train loss {total_loss / len(train_loader):.4f}")
 
         metrics = run_validation(model, val_loader, crit, val_pdb_order, epoch, run,
                                  num_params=num_params)
@@ -354,11 +379,20 @@ def main():
         save_weights(model.model, optimizer, save_path, epoch, step, model_cfg, features_cfg,
                      args, extra_hparams={"cfg": ckpt_cfg})
         logger.info(f"Saved epoch {epoch} weights to {save_path}")
+        record(metrics, epoch)
+        if stopper.should_stop(epoch):
+            run.log({"early_stopped_epoch": epoch, "epoch": epoch})
+            stopped_epoch = epoch
+            break
 
-    # Scored exactly once with the final weights -- no early stopping or best-epoch restore,
-    # same protocol as train.py, so the test split never influenced the weights it scores.
+    run.summary.update({"best_val_perp_mean": stopper.best_perplexity,
+                        "best_val_epoch": stopper.best_epoch, "stopped_epoch": stopped_epoch})
+
+    # Test is scored exactly once, with the weights val selected -- the test split never
+    # influenced either the weights or the choice of epoch.
+    stopper.restore(model.model)
     logger.info(f"Scoring the held-out test split ({len(test_pdb_order)} proteins)")
-    test_metrics = run_validation(model, test_loader, crit, test_pdb_order, args.epochs - 1, run,
+    test_metrics = run_validation(model, test_loader, crit, test_pdb_order, stopper.best_epoch, run,
                                   num_params=num_params, split_name="test")
     for topk in (1, 5, 10):
         print(f"Test Top-{topk} Recovery: {test_metrics[f'test_top{topk}_acc_mean']:.4f} "

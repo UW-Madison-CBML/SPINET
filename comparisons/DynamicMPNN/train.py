@@ -18,8 +18,11 @@ Pipeline (see README.md for the full reasoning):
      and tests on fold `--test-fold` (4), training on the remaining three; mdCATH uses its
      topology split's train/validation/test rows, one apiece. These are the same three splits
      scripts/train_residue_classifier.py and comparisons/{MapDiff,PiFold} cut.
-     * Validation is scored every epoch; the **test** split is scored once, after the last
-       epoch, and is never trained on.
+     * Validation is scored every epoch, and training early-stops on val perplexity
+       (patience 10, `EarlyStopping`); the **test** split is scored once, with the best val
+       epoch's weights, and is never trained on.
+     * Each training draw is re-featurised (`ResamplingDataset`): a fresh draw of k conformers
+       from the pool and fresh coordinate noise, as upstream's `in_memory: False` trained.
      * Running the other ATLAS folds is a matter of repeating the job with --val-fold 1..3.
 
 ATLAS and mdCATH are trained and evaluated separately -- one run each (`--ds-name`) --
@@ -459,6 +462,93 @@ class PdbTrackingFeaturiser:
 
 
 
+class ResamplingDataset(torch.utils.data.Dataset):
+    """Training split that re-featurises each protein on every `__getitem__`.
+
+    The raw conformer pools are small, so they are held in memory; only the featurisation --
+    which conformers of the pool, and the featuriser's own train-time coordinate noise
+    (`noise_scale`, applied when `split == "train"`) -- is redone per draw, as upstream's
+    `in_memory: False` training did. `PTFileDataset(in_memory=True)` instead featurises once,
+    freezing both the conformer draw and the noise for every epoch.
+
+    `featuriser` is anything called as `featuriser(protein, pdb_code=...)`: the k-conformer
+    featuriser train.py builds, or finetune.py's `LegacyPairAdapter`.
+
+    Proteins the featuriser rejects are dropped once, up front: `safe_collate` hard-errors on
+    a `None` sample, so one must never reach the loader. A rejection is a property of the
+    protein (too short / no valid coordinates), not of which conformers were drawn, so a
+    protein that survives the up-front pass survives later draws too; if one ever does not, it
+    falls back to its up-front featurisation rather than taking down the job.
+    """
+
+    def __init__(self, pdb_codes, featuriser, processed_dir):
+        self.featuriser = featuriser
+        self.proteins, self.fallback, self.pdb_codes = [], [], []
+        for pdb_code in tqdm(pdb_codes, desc="Loading train ensembles"):
+            path = processed_dir / f"{pdb_code}.pt"
+            if not path.exists():
+                continue  # build_processed_dataset already warned about it
+            protein = torch.load(path, weights_only=False)
+            featurised = self.featuriser(protein, pdb_code=pdb_code)
+            if featurised is None:
+                logger.warning(f"Skipping train protein {pdb_code}: featuriser rejected it.")
+                continue
+            self.proteins.append(protein)
+            self.fallback.append(featurised)
+            self.pdb_codes.append(pdb_code)
+
+    def __len__(self):
+        return len(self.proteins)
+
+    def __getitem__(self, idx):
+        featurised = self.featuriser(self.proteins[idx], pdb_code=self.pdb_codes[idx])
+        return featurised if featurised is not None else self.fallback[idx]
+
+
+class EarlyStopping:
+    """Early stopping on val perplexity, with the best epoch's weights kept for test.
+
+    The protocol every comparison model shares (comparisons/{MapDiff,PiFold} do the same):
+    validate every epoch, keep the weights of the lowest per-protein val perplexity
+    (`val_perp_mean`, lib.stats_utils.ResidueMetrics), stop once `patience` epochs pass
+    without beating it, and score test once with the kept weights -- so the test split
+    never influences either the weights or the choice of epoch. `patience` 0 disables the
+    stopping but still selects the best epoch.
+    """
+
+    def __init__(self, patience: int = 10):
+        self.patience = patience
+        self.best_perplexity, self.best_epoch, self.best_state = float("inf"), None, None
+
+    def update(self, model: torch.nn.Module, perplexity: float, epoch: int) -> bool:
+        """Record this epoch's val perplexity; True if it is a new best (weights kept)."""
+        if not perplexity < self.best_perplexity:  # also rejects NaN
+            return False
+        self.best_perplexity, self.best_epoch = perplexity, epoch
+        self.best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        logger.info(f"New best val perplexity {perplexity:.4f} at epoch {epoch}")
+        return True
+
+    def should_stop(self, epoch: int) -> bool:
+        if self.patience <= 0 or self.best_epoch is None:
+            return False
+        epochs_since_best = epoch - self.best_epoch
+        if epochs_since_best < self.patience:
+            return False
+        logger.info(f"Early stopping at epoch {epoch}: val perplexity has not improved in "
+                    f"{epochs_since_best} epochs (best {self.best_perplexity:.4f} at epoch "
+                    f"{self.best_epoch})")
+        return True
+
+    def restore(self, model: torch.nn.Module) -> None:
+        if self.best_state is None:
+            logger.warning("No finite val perplexity was ever recorded; testing the final weights.")
+            return
+        model.load_state_dict(self.best_state)
+        logger.info(f"Restored the best val epoch ({self.best_epoch}, perplexity "
+                    f"{self.best_perplexity:.4f})")
+
+
 def run_validation(model, val_loader, crit, val_pdb_order,
                    epoch, run, num_params=0, split_name="val"):
     """Score one held-out split and log scripts/train_residue_classifier.py's metric set.
@@ -535,7 +625,7 @@ def parse_args():
                               "mdCATH ignores it -- its split column is categorical.")
     parser.add_argument("--test-fold", type=int, default=dataset_splits.DEFAULT_TEST_FOLD,
                          help="ATLAS only: cross_val fold held out as the test split -- never trained "
-                              "on, scored once after the last epoch. mdCATH ignores it.")
+                              "on, scored once with the best val epoch's weights. mdCATH ignores it.")
     parser.add_argument("--processed-dir", type=Path, default=None,
                          help="Where the .pt conformer ensembles live (default: ./processed_data_<ds>)")
     parser.add_argument("--max-length", type=int, default=dataset_splits.MAX_LENGTH,
@@ -548,7 +638,11 @@ def parse_args():
                              f"{DEFAULT_COURSE_GRAIN}, keyed on --ds-name)")
     parser.add_argument("--force-rebuild", action="store_true")
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--epochs", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=8,
+                        help="Upper bound on epochs; early stopping normally ends the run first")
+    parser.add_argument("--early-stopping-patience", type=int, default=10,
+                        help="Stop once val perplexity has not improved on its best for this many "
+                             "epochs; 0 disables stopping (the best epoch is still restored)")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=dataset_splits.SEED)
@@ -569,9 +663,10 @@ def main():
         logger.info(f"--course-grain defaulted to {args.course_grain} for {args.ds_name}")
     # `random` and `np.random`, not just torch: DynamicMPNN's featurizer picks which k of each
     # protein's saved conformer pool to use with `random.sample` / `np.random.choice`
-    # (ProteinGraphFeaturiserSingleChain.get_entries). Because the datasets below are built
-    # with in_memory=True, that draw happens once and then holds for every epoch -- so leaving
-    # these unseeded would mean the *validation set itself* differed between runs.
+    # (ProteinGraphFeaturiserSingleChain.get_entries). The val/test datasets below are built
+    # with in_memory=True, so their draw happens once and then holds for every epoch -- leaving
+    # these unseeded would mean the *validation set itself* differed between runs. (The
+    # training draws are redone every epoch; DataLoader seeds each worker from the torch seed.)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -601,6 +696,7 @@ def main():
             "course_grain": args.course_grain,
             "batch_size": args.batch_size,
             "epochs": args.epochs,
+            "early_stopping_patience": args.early_stopping_patience,
             "lr": args.lr,
             "seed": args.seed,
             "from_scratch": args.from_scratch,
@@ -670,15 +766,17 @@ def main():
         else:
             logger.warning(f"No checkpoint found at {ckpt_path}, training from scratch instead.")
 
-    # in_memory=True pre-filters proteins the featurizer rejects (too short / no valid coords);
-    # PTFileDataset's on-disk path can hand `None` to safe_collate otherwise, which hard-errors.
-    train_dataset = PTFileDataset(
-        pdb_codes=train_pdbs,
-        cfg_features=hydra.utils.instantiate(features_cfg, split="train", device="cpu", distance_eps=DISTANCE_EPS),
-        processed_dir=processed_dir,
-        split="train",
-        in_memory=True,
+    # Re-featurised on every draw: a fresh TM-weighted draw of k conformers from the pool and
+    # fresh train-time coordinate noise each time a protein comes up, as upstream trained.
+    # Val/test below stay in_memory=True -- featurised once (seeded), no noise -- so every
+    # epoch is scored on the same inputs.
+    train_dataset = ResamplingDataset(
+        train_pdbs,
+        hydra.utils.instantiate(features_cfg, split="train", device="cpu", distance_eps=DISTANCE_EPS),
+        processed_dir,
     )
+    if len(train_dataset) == 0:
+        raise RuntimeError("No training protein survived featurisation.")
     # Wrapped in PdbTrackingFeaturiser so run_validation can label each batch's samples with
     # the pdb_code they came from.
     val_tracker = PdbTrackingFeaturiser(
@@ -718,6 +816,7 @@ def main():
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, collate_fn=safe_collate,
+        persistent_workers=args.num_workers > 0,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
@@ -735,8 +834,12 @@ def main():
     # every job's weights/ back into the same submit-side directory.
     args.save_dir.mkdir(parents=True, exist_ok=True)
     save_path = args.save_dir / f"{run_name}_{run.id}.ckpt"
+    best_path = args.save_dir / f"{run_name}_{run.id}_best.ckpt"
     run.summary["weights_path"] = save_path.name
+    run.summary["best_weights_path"] = best_path.name
 
+    stopper = EarlyStopping(args.early_stopping_patience)
+    stopped_epoch = args.epochs - 1
     step = 0
     for epoch in range(args.epochs):
         model.train()
@@ -764,16 +867,27 @@ def main():
         print(f"Top-5 Recovery: {metrics['val_top5_acc_mean']:.4f} \\pm {metrics['val_top5_acc_std']:.4f}")
         print(f"Top-10 Recovery: {metrics['val_top10_acc_mean']:.4f} \\pm {metrics['val_top10_acc_std']:.4f}")
 
-        # Overwritten every epoch, so an evicted job still brings home its latest weights. After
-        # the last epoch this file holds exactly the weights the test split is scored on.
+        # Overwritten every epoch, so an evicted job still brings home its latest weights.
         save_weights(model, optimizer, save_path, epoch, step, model_cfg, features_cfg, args)
         logger.info(f"Saved epoch {epoch} weights to {save_path}")
+        if stopper.update(model, metrics["val_perp_mean"], epoch):
+            # On disk as well, so an evicted job still brings home its best weights.
+            save_weights(model, optimizer, best_path, epoch, step, model_cfg, features_cfg, args)
+            run.log({"best_val_perp_mean": stopper.best_perplexity,
+                     "best_val_epoch": stopper.best_epoch, "epoch": epoch})
+        if stopper.should_stop(epoch):
+            run.log({"early_stopped_epoch": epoch, "epoch": epoch})
+            stopped_epoch = epoch
+            break
 
-    # The test split is scored exactly once, with the final weights. There is no checkpoint
-    # selection here (no early stopping, no best-epoch restore), so "final" and "selected" are
-    # the same model -- nothing the test split influenced.
+    run.summary.update({"best_val_perp_mean": stopper.best_perplexity,
+                        "best_val_epoch": stopper.best_epoch, "stopped_epoch": stopped_epoch})
+
+    # The test split is scored exactly once, with the best val epoch's weights (see
+    # EarlyStopping) -- nothing the test split influenced.
+    stopper.restore(model)
     logger.info(f"Scoring the held-out test split ({len(test_pdb_order)} proteins)")
-    test_metrics = run_validation(model, test_loader, crit, test_pdb_order, args.epochs - 1, run,
+    test_metrics = run_validation(model, test_loader, crit, test_pdb_order, stopper.best_epoch, run,
                                    num_params=pytorch_total_params, split_name="test")
     print(f"Test Perplexity: {test_metrics['test_perp_mean']:.4f} \\pm {test_metrics['test_perp_std']:.4f}")
     print(f"Test Top-1 Recovery: {test_metrics['test_top1_acc_mean']:.4f} \\pm {test_metrics['test_top1_acc_std']:.4f}")
