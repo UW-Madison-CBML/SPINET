@@ -414,7 +414,7 @@ class InitDynamicsEmbedding(MessagePassing):
 
 
 class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves = False, ablate_edge_features = False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True, use_masking=True):
+    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves = False, ablate_edge_features = False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True, use_masking=True, node_slice=None):
         super(NodeSheafClassifier, self).__init__()
 
         assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
@@ -437,6 +437,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         self.frame_origin = frame_origin
         self.atom_indices = {atom: slice(3*i,3*(i+1)) for i, atom in enumerate(atoms)}
         #TODO add atoms and frame origin to config
+        self.node_slice = node_slice
 
 
         if(config != None):
@@ -472,7 +473,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.use_attention = config.use_attention
                 self.use_masking = config.use_masking
 
-        self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves, ablate_edge_features=self.ablate_edge_features)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(15 if self.node_slice is None else len(list(range(15))[self.node_slice]), 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves, ablate_edge_features=self.ablate_edge_features)
 
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
 
@@ -486,7 +487,8 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         )
 
     def forward(self, data, return_sheaf=False):
-
+        if self.node_slice is not None:
+            data.x = data.x[:,:,self.node_slice]
         data.x = self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
 
         # run sheaf attention

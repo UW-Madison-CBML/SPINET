@@ -455,10 +455,10 @@ def train_residue_classifier(args_dict):
     num_classes = len(ResidueClassifierDataset.AMINO_ACIDS)
 
     print([f"{key}, {item.shape}" for key, item in next(iter(train_loader)).to_data_list()[0].items() if hasattr(item,"shape")])
-
+    node_slice_dict = {"": None, "dihedrals": slice(9,15), "positions": slice(0,9)}
     # set up new diffusion model # TODO fix all this
     # ---------------------------------------------
-    if other_model == "spinet":
+    if other_model.startswith("spinet"):
         model = NodeSheafClassifier(
             atoms=BACKBONE_ATOMS,
             frame_origin="CA",
@@ -472,7 +472,8 @@ def train_residue_classifier(args_dict):
             num_timesteps=num_timesteps,
             restriction_map_type=restriction_map_type,
             use_attention=use_attention,
-            use_masking=use_masking
+            use_masking=use_masking,
+            node_slice=(node_slice_dict[other_model[7:]] if len(other_model) >= 8 else None)
         ).to(DEVICE)
         #model = torch.jit.trace(model, Data(x = torch.rand(100, 128, 15, generator=torch_rng), edge_index = torch.randint(100, (2,200), generator=torch_rng), edge_attr=torch.randint(2, (200, 1), generator=torch_rng).to(float), y=torch.randint(20, (100,), generator=torch_rng), pos= torch.rand(100, 128, 4, 3, generator=torch_rng), frame_maps=torch.rand(100, 128, 3, 3, generator=torch_rng), node_mask= torch.zeros(100), lengths= torch.tensor([128])))
 

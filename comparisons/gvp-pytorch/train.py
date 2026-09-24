@@ -65,7 +65,7 @@ def extract_backbone(pdb_text: str, pdb_chain_id: str):
 
         if not all(atom_name in residue for atom_name in BACKBONE_ATOMS):
             continue
-        seq += seq1(residue.get_resname()).upper()
+        seq += seq1(residue_aliases.get(residue.get_resname(), residue.get_resname())).upper()
         atom_coords = [residue[atom_name].coord for atom_name in BACKBONE_ATOMS]
         coords.append(atom_coords)
 
