@@ -1,4 +1,1 @@
---run-name our_model_dihedrals_mdcath --other-model spinet_dihedrals --ablate-attention
---run-name our_model_positions_mdcath --other-model spinet_positions --ablate-attention
---run-name no_sheaves_dihedrals_mdcath --other-model spinet_dihedrals --ablate-attention --ablate-sheaves
---run-name no_sheaves_positions_mdcath --other-model spinet_positions --ablate-attention --ablate-sheaves
+--run-name our_model_mdcath_379 --ablate-attention 
