@@ -373,20 +373,6 @@ def load_relaxed_structures(protein_ids, cache_dir="./pdb_cache", reference_seqs
         print("relaxed PDB loading: {}/{} protein ids unavailable".format(len(failures), len(protein_ids)))
     return records, failures
 
-    if not coords:
-        raise ValueError("bad_seq")
-
-    if any(seq_char not in letter_to_num.keys() for seq_char in seq):
-        raise ValueError("bad_seq")
-    atom_dict = {
-        'name': (pdb_chain_id, -1),
-        'seq': seq,
-        'coords': np.array(coords)
-    }
-
-    return atom_dict
-
-
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
@@ -544,9 +530,9 @@ def main(index_path, h5_path, use_pdbs=False):
 
 
 
-    train_raw = load_raw_split(train_groups, h5_path, cache_dir=cache_dir)
-    val_raw   = load_raw_split(val_groups,   h5_path, cache_dir=cache_dir)
-    test_raw  = load_raw_split(test_groups,  h5_path, cache_dir=cache_dir)
+    train_raw = load_raw_split(train_groups, h5_path)
+    val_raw   = load_raw_split(val_groups,   h5_path)
+    test_raw  = load_raw_split(test_groups,  h5_path)
 
 
     """
