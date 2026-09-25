@@ -4,6 +4,7 @@ import h5py
 import wandb
 import os
 import os.path as osp
+import torch.nn.functional as F
 import torch
 from Bio.PDB import PDBParser
 from torch_geometric.loader import DataLoader

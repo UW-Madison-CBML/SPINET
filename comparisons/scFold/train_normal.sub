@@ -1,0 +1,26 @@
+# train_normal.sub
+
+docker_image = jenslundsgaard/scfold:v1.5
+
+universe = docker
+
+shell = ./train_normal.sh --data_name CATH
+
+log = train_normal_$(Cluster)_$(Process).log
+error = train_normal_$(Cluster)_$(Process).err
+output = train_normal_$(Cluster)_$(Process).out
+
+when_to_transfer_output = ON_EXIT_OR_EVICT
+Requirements = (Target.HasCHTCStaging == true)
+
+transfer_input_files = train_normal.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/chain_set_0.jsonl, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/chain_set_splits_0.json
+
+transfer_output_files = scfold.pth 
+transfer_output_remaps = "scfold.pth = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(h5);"
+
+request_cpus = 16
+request_memory = 128GB
+request_disk = 128GB
+request_gpus = 1
+
+queue 1

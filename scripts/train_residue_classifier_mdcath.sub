@@ -1,5 +1,5 @@
 #train_residue_classifier_mdcath.sub
-temp = 413
+temp = 379
 
 universe = docker
 docker_image = jenslundsgaard/sheaf_training:v3.2
@@ -14,7 +14,7 @@ should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 
 ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
-transfer_input_files = train_residue_classifier.py, load_dynamics.py, ../lib/, ../../api_keys.txt, $(ResearchDrive)/mdcath_$(temp)_0_topo_split.csv, $(ResearchDrive)/mdcath_spinet_$(temp)_0.h5
+transfer_input_files = train_residue_classifier.py, load_dynamics.py, ../lib/, ../../api_keys.txt, $(ResearchDrive)/mdcath_$(temp)_0_topo_split.csv, $(ResearchDrive)/mdcath_spinet_$(temp)_0_v2.h5
 transfer_output_files = mdcath_laplacians.h5
 transfer_output_remaps = "mdcath_laplacians.h5 = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/mdcath_laplacians.h5"
 
