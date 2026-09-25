@@ -377,7 +377,7 @@ def train_residue_classifier(args_dict):
     # mdCATH
     else:
         h5_path = os.path.abspath(f"mdcath_spinet_{temp}_0.h5")
-        index = pd.read_csv(os.path.abspath(f"mdcath_{temp}_0_top_split.csv"))
+        index = pd.read_csv(os.path.abspath(f"mdcath_{temp}_0_topo_split.csv"))
 
         train_pdbs = index[index["split"] == "train"]["domain"].tolist()
         test_pdbs = index[index["split"] == "test"]["domain"].tolist()

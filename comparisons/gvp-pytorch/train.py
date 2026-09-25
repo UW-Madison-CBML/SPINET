@@ -75,12 +75,7 @@ def parse_structure_id(protein_id):
 
 
 def fetch_structure_file(pdb_id, cache_dir, attempts=6):
-    """Download ``<pdb_id>`` from RCSB into ``cache_dir``, returning the local path.
-
-    Prefers the legacy ``.pdb`` format (what Biopython's PDBParser and DSSP are happiest
-    with) and falls back to ``.cif`` for entries too large to be distributed as PDB.
-    Already-downloaded files are reused, so re-running featurization is free.
-    """
+    
     os.makedirs(cache_dir, exist_ok=True)
     for ext in ("pdb", "cif"):
         cached = os.path.join(cache_dir, "{}.{}".format(pdb_id.upper(), ext))
@@ -374,6 +369,14 @@ def load_relaxed_structures(protein_ids, cache_dir="./pdb_cache", reference_seqs
     return records, failures
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def get_confusion_matrix(gt_indices, pred_indices, num_classes):
+    """Compute confusion matrix over 1D array of pred and target."""
+    gt_one_hot = F.one_hot(gt_indices, num_classes=num_classes).float()
+    pred_one_hot = F.one_hot(pred_indices, num_classes=num_classes).float()
+
+    confusion_mat = torch.einsum("bi, bj->ij", gt_one_hot, pred_one_hot)
+    return confusion_mat
+
 
 def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
     model.eval()
@@ -383,7 +386,11 @@ def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
     val_acc_top_10 = []
 
     val_losses = []
-
+    num_classes = len(dataset.num_to_letter.keys())
+    global_confusion_mat = torch.zeros((num_classes, num_classes))
+    f1s = {acid:[] for acid in dataset.letter_to_num.keys()}
+    precisions = {acid:[] for acid in dataset.letter_to_num.keys()}
+    recalls = {acid:[] for acid in dataset.letter_to_num.keys()}
     seqs = []
     idxs = []
     names = []
@@ -393,6 +400,20 @@ def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
             nodes = (batch.node_s, batch.node_v)
             edges = (batch.edge_s, batch.edge_v)
             logits = model(nodes, batch.edge_index, edges, batch.seq)
+
+            batch_conf_mat = get_confusion_matrix(batch.seq.cpu(), logits.argmax(dim=-1).cpu(), num_classes)
+            global_confusion_mat += batch_conf_mat
+
+            diag = batch_conf_mat.diag()
+            recall = torch.nan_to_num(diag / batch_conf_mat.sum(dim=1), 0.0)
+            precision = torch.nan_to_num(diag / batch_conf_mat.sum(dim=0), 0.0)
+            f1 = torch.nan_to_num(2 * (precision * recall) / (precision + recall), 0.0)
+
+
+            for k, amino_acid in enumerate(dataset.letter_to_num.keys()):
+                 precisions[amino_acid].append(precision[k].item())
+                 recalls[amino_acid].append(recall[k].item())
+                 f1s[amino_acid].append(f1[k].item())
 
             if batch.mask.any().item():
                 print("mask is on for val; may cause issue with downstream residue sizes")
@@ -418,9 +439,19 @@ def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
                 idxs.append(idx)
                 seq_preds = masked_logits.argmax(dim=-1).cpu().tolist()
                 seqs.append("".join([dataset.num_to_letter[pred] for pred in seq_preds]))
-
+    prf_dict = {}
+    precisions = {key: torch.tensor(value) for key, value in precisions.items()}  # each value: (num_batches,), one entry per batch this amino acid appeared in
+    recalls = {key: torch.tensor(value) for key, value in recalls.items()}        # each value: (num_batches,)
+    f1s = {key: torch.tensor(value) for key, value in f1s.items()}               # each value: (num_batches,)
+    for k, amino_acid in enumerate(dataset.letter_to_num.keys()):
+        prf_dict[f"{val_name}_{amino_acid}_f1_mean"] = f1s[amino_acid].mean().item()
+        prf_dict[f"{val_name}_{amino_acid}_precision_mean"] = precisions[amino_acid].mean().item()
+        prf_dict[f"{val_name}_{amino_acid}_recall_mean"] = recalls[amino_acid].mean().item()
+        prf_dict[f"{val_name}_{amino_acid}_f1_std"] = f1s[amino_acid].std().item()
+        prf_dict[f"{val_name}_{amino_acid}_precision_std"] = precisions[amino_acid].std().item()
+        prf_dict[f"{val_name}_{amino_acid}_recall_std"] = recalls[amino_acid].std().item()
     seq_pred_df = pd.DataFrame({"seq":seqs, "idx":idxs, "name":names})
-    run.log({"seq_pred":wandb.Table(dataframe=seq_pred_df)})
+    run.log({"seq_pred":wandb.Table(dataframe=seq_pred_df)} | prf_dict)
     seq_pred_df.to_csv(os.path.join("..", f"seq_pred_df_{epoch}.csv"))
 
     val_perps = np.exp(val_losses)
