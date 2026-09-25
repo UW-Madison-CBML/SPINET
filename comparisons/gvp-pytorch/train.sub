@@ -6,9 +6,10 @@ universe = docker
 
 temp=320
 index=mdcath_$(temp)_0_top_split.csv
-pdbs_archive=mdcath_pdbs.tar.gz
+h5=mdcath_spinet_320_0.h5
 
-shell = ./train.sh $(index) $(pdb_archive)
+
+shell = ./train.sh $(index) $(h5)
 
 log = train_$(Cluster)_$(Process).log
 error = train_$(Cluster)_$(Process).err
@@ -18,7 +19,7 @@ should_transfer_files = YES
 when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 
-transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(pdbs_archive)
+transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(h5)
 
 request_cpus = 1
 request_memory = 64GB

@@ -516,9 +516,9 @@ def main(index_path, h5_path, use_pdbs=False):
     else:
         index = pd.read_csv(osp.join("..",index_path))
 
-        train_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in  index[index["split"] == "train"]["domain"].tolist()]
-        test_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in index[index["split"] == "test"]["domain"].tolist()]
-        val_groups = [pdb_id[:4] + "_" + pdb_id[4:5] for pdb_id in index[index["split"] == "validation"]["domain"].tolist()]
+        train_groups = index[index["split"] == "train"]["domain"].tolist()
+        test_groups = index[index["split"] == "test"]["domain"].tolist()
+        val_groups = index[index["split"] == "validation"]["domain"].tolist()
 
         #pdb_to_size = {}
         #def visit(name, obj):
