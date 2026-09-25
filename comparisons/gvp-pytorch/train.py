@@ -435,7 +435,6 @@ import os
 
 import numpy as np
 
-from relaxed_structures import load_relaxed_structures, reference_seqs_from_h5
 
 
 def load_raw_split(group_ids, h5_path, cache_dir=os.path.join("..", "cif_cache"),
