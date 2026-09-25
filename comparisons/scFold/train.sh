@@ -2,10 +2,6 @@
 
 tar -xvf ScFold.tar.gz
 
-tar -xvf mdcath_pdbs_1.tar.gz
-
-#tar -xvf atlas_pdbs.tar.gz
-
 
 WANDB_KEY=$(tail -n 1 api_keys.txt)
 export WANDB_KEY=$WANDB_KEY

@@ -1,17 +1,19 @@
 # train.sub
 
-docker_image = jenslundsgaard/scfold:v1.4
+docker_image = jenslundsgaard/scfold:v1.5
 
 universe = docker
 
 #index = atlas_cross_val_index.csv
 #pdbs_archive=atlas_pdbs.tar.gz
+#h5=atlas_data.h5
 
 temp=320
 index=mdcath_$(temp)_0_top_split.csv
-pdbs_archive=mdcath_pdbs_1.tar.gz
+pdbs_archive=mdcath_pdbs_2.tar.gz
+h5=mdcath_spinet_$(temp)_0.h5
 
-shell = ./train.sh --index-name $(index) --use-pdbs
+shell = ./train.sh --index-name $(index) --h5-name $(h5) --use-pdbs
 
 #  queue number assigned to this set of jobs at the time of submission.
 log = train_$(Cluster)_$(Process).log
@@ -22,7 +24,7 @@ when_to_transfer_output = ON_EXIT_OR_EVICT
 Requirements = (Target.HasCHTCStaging == true)
 #  && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
-transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(pdbs_archive)
+transfer_input_files = train.sh, ScFold.tar.gz, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(h5)
 #pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(h5), 
 
 
