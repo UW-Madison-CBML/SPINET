@@ -22,7 +22,7 @@ Requirements = (Target.HasCHTCStaging == true)
 transfer_input_files = train.sh, train.py, gvp-pytorch.tar.gz, , ../../lib/stats_utils.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(index), ../../../api_keys.txt, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(h5)
 
 request_cpus = 1
-request_memory = 64GB
+request_memory = 128GB
 request_disk = 256GB
 request_gpus = 1
 
