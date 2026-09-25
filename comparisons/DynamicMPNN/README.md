@@ -12,7 +12,10 @@ test fold; the other three train. Validation is scored every epoch and training 
 on val perplexity (`--early-stopping-patience`, default 10); the test split is scored once,
 with the lowest-val-perplexity epoch's weights (also saved as `weights/<run>_<id>_best.ckpt`),
 so the test split never fed back into the weights or the choice of epoch. MapDiff and PiFold
-select the same way, so every comparison row shares one protocol. Training proteins are
+select the same way, so every *baseline* row shares one protocol. The sheaf model
+(`scripts/train_residue_classifier.py`) does not: it trains a fixed 50 epochs and scores test
+on the final weights, so best-val-epoch selection is an advantage the baselines get and it does
+not -- state that alongside the table. Training proteins are
 re-featurised on every draw (`ResamplingDataset`): a fresh draw of *k* conformers from the
 pool plus the featuriser's train-time coordinate noise, as upstream's `in_memory: False`
 trained. Val/test are featurised once, without noise.
@@ -29,6 +32,32 @@ PiFold do, so the three models' held-out sets can be diffed rather than assumed 
 protein's relaxed (deposited) PDB entry. DynamicMPNN is **not**: it consumes an ensemble of
 conformers sampled from the trajectory, and that ensemble input is exactly the thing being
 benchmarked, so Steps 1–3 below still read the MD store.
+
+## From-scratch training regime (`train.sub`)
+
+| | ours | upstream (`single_chain_k_conf` / released checkpoint `cfg`) |
+|---|---|---|
+| architecture | `AR1_single_chain` + `ca_bb_single_chain`, as shipped | same |
+| *k* | **2**, drawn at random from a TM-farthest-point pool of 10 | 3 (experiment config) |
+| optimizer | Adam, lr 1e-3, no scheduler | same |
+| batch | 2 proteins per pass x 16 accumulated = 32 per step | 2 per GPU across DDP ranks; the paper's 32 |
+| loss | CE, label smoothing 0.05, GAP ignored | same |
+| stopping | early stop on val perplexity, patience 10, cap 200 epochs, best epoch restored | cap 200 epochs; best epoch kept by val recovery |
+| precision | fp32 | bf16-mixed |
+
+*k* = 2 follows the authors' own argument that MD trajectories are too smooth: frames drawn
+from one simulation are structurally close, so a larger k mostly adds near-duplicates rather
+than new conformational information. It is also the k the released checkpoints see (their
+pair featuriser always takes 2 frames), so the from-scratch, fine-tuned and zero-shot rows
+all consume the same ensemble size, and the pool of 10 is the one `finetune.py` and
+`eval_ckpt.py` draw from. Note that the ATLAS k sweep (`sweep_k.sub`) found val perplexity
+still falling with k (9.73 at k = 2, 8.16 at k = 10, 7.99 at k = 20), so k = 2 is a
+principled choice, not the sweep's best point -- report it that way. mdCATH runs at the same k.
+`check_pool_sizes` fails the job if any protein has fewer than k distinct frames, rather than
+letting the featuriser pad with duplicates. 2 proteins per forward pass with gradient
+accumulation (`--effective-batch-size`, default 32) gives the paper's optimizer batch -- the
+same regime `finetune.sub` uses. At ~800 ATLAS training proteins that is ~25 optimizer steps
+per epoch, hence the 200-epoch cap.
 
 ## Metrics logged (a la `scripts/train_residue_classifier.py`)
 
@@ -153,8 +182,8 @@ chance on our `.pt` files is evidence about *our features*, not about the model.
 training on our training split. This row sits between from-scratch and zero-shot:
 
 ```
-condor_submit finetune.sub                                   # ATLAS, single_chain_k2.ckpt, lr 1e-3, early-stopped
-condor_submit finetune.sub CKPT=DynamicMPNN/checkpoints/single_chain_k5.ckpt LR=1e-4
+condor_submit finetune.sub                                   # ATLAS, single_chain_k2.ckpt, lr 1e-4, early-stopped
+condor_submit finetune.sub CKPT=DynamicMPNN/checkpoints/single_chain_k5.ckpt LR=1e-3
 ```
 
 The model, featuriser, pair adapter and batching fix all come from `eval_ckpt.py`, so
@@ -165,8 +194,9 @@ it sees k = 2. What's new is on the training side:
   a fresh random pair from the pool, plus the featuriser's train-time coordinate noise, each
   time. Upstream trained these weights with `in_memory: False`, which works the same way.
   `--train-pair-selection tm_min` always uses the most dissimilar pair instead.
-* **The paper's optimisation regime**: Adam at lr 1e-3 and 32 proteins per optimizer step
-  (2 per forward pass, gradients accumulated over 16; `--effective-batch-size`).
+* **The paper's batch, a fine-tuning lr**: Adam, 32 proteins per optimizer step (2 per
+  forward pass, gradients accumulated over 16; `--effective-batch-size`), at lr 1e-4 -- a
+  tenth of the paper's from-scratch 1e-3, which is our choice, not theirs.
 * **Model selection as in `train.py`**: early stopping on val perplexity (patience 10, at most
   `--epochs` 200), best val epoch restored for test. The zero-shot epoch -1 is a candidate,
   so if no update beats it, test scores the released weights.

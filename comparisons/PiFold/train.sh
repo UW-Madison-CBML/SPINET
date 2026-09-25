@@ -52,6 +52,15 @@ for f in wandb_api.txt relaxed_pdb.py traj_frames.py dataset_splits.py stats_uti
     [[ -n "$f" && -f "$f" ]] && cp "$f" PiFold/
 done
 
+# mdCATH's relaxed structures are the CATH domain files themselves (lib/relaxed_pdb.py's
+# load_cath_structures), read from --data_root's pdbs/. Extracted into its own directory
+# since the archive's internal layout is matched loosely (any nesting, case or extension).
+if [[ -f mdcath_pdbs.tar.gz && ! -d PiFold/pdbs ]]; then
+    echo ">>> extracting mdcath_pdbs.tar.gz (CATH domain structures)"
+    mkdir -p PiFold/pdbs
+    tar -xf mdcath_pdbs.tar.gz -C PiFold/pdbs
+fi
+
 cd PiFold
 mkdir -p results
 

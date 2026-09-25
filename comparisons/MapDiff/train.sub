@@ -13,8 +13,9 @@
 #   2. Set docker_image below to that image.
 #
 # Dataset: MapDiff is a static-structure model, so it trains and evaluates on each
-# protein's *relaxed* (deposited) PDB entry, downloaded from RCSB by lib/relaxed_pdb.py
-# and cropped to the residues its MD trajectory covers. train.sh runs
+# protein's *relaxed* structure: for ATLAS the deposited PDB entry, downloaded from RCSB by
+# lib/relaxed_pdb.py and cropped to the residues its MD trajectory covers; for mdCATH the
+# CATH domain file itself (CATH_PDBS below), used whole with no cropping. train.sh runs
 # data/generate_graph_relaxed.py to featurize those structures into MapDiff graphs
 # before training starts. The trajectory store is transferred in only to supply those
 # reference residue sequences; the split index csv gives the partition.
@@ -39,18 +40,19 @@ docker_image            = cmikulski4/mapdiff:v5
 
 ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
-#DS_NAME                 = atlas
-#DS_H5                   = $(ResearchDrive)/atlas_data.h5
-#DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
+# DS_NAME                 = mdcath
+# DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
+# DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
+
+DS_NAME                 = atlas
+DS_H5                   = $(ResearchDrive)/atlas_data.h5
+DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 
 #DS_NAME                 = mdcath
 # DS_H5                   = $(ResearchDrive)/mdcath_spinet_450_0.h5
 # DS_CSV                  = $(ResearchDrive)/mdcath_450_0_top_split.csv
 
 
-DS_NAME                 = mdcath
-DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
-DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
 
 # What MapDiff trains on: 'relaxed' (each protein's deposited RCSB entry, the default) or
 # 'frame' (one random frame of its MD trajectory, lib/traj_frames.py). train.sh derives both
@@ -58,6 +60,9 @@ DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
 # Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
 #STRUCTURE_SOURCE        = frame
 STRUCTURE_SOURCE 	 = frame
+
+# CATH domain structures for mdCATH's relaxed source (train.sh extracts them into pdbs/).
+CATH_PDBS               = $(ResearchDrive)/mdcath_pdbs.tar.gz
 
 executable              = train.sh
 # The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
@@ -73,7 +78,7 @@ arguments               = dataset=$(DS_NAME) wandb.use=True wandb.key_file=./wan
 # API-key file (train.sh splits the W&B key out of it into wandb_api.txt),
 # lib/{stats_utils,relaxed_pdb,traj_frames,dataset_splits}.py (shared across all models --
 # see ../../lib), and the dataset's trajectory store + split index.
-transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(DS_H5), $(DS_CSV)
+transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(DS_H5), $(DS_CSV), $(CATH_PDBS)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT

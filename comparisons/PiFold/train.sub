@@ -8,10 +8,10 @@
 #      and parser.py on top of it at run time, so upstream is never modified.)
 #
 # Dataset: PiFold is a static-structure model, so it trains and evaluates on each
-# protein's *relaxed* (deposited) PDB entry, downloaded from RCSB by lib/relaxed_pdb.py
-# and cropped to the residues its MD trajectory covers (API/relaxed_dataset.py). The
-# trajectory store is transferred in only to supply those reference residue sequences;
-# the split index csv gives the partition.
+# protein's *relaxed* structure (API/relaxed_dataset.py). For ATLAS that is the deposited PDB
+# entry, downloaded from RCSB by lib/relaxed_pdb.py and cropped to the residues its MD
+# trajectory covers. For mdCATH it is the CATH domain file itself, from CATH_PDBS below, used
+# whole with no cropping. The split index csv gives the partition.
 #
 # ATLAS and mdCATH are trained and evaluated SEPARATELY -- one job each, matching
 # scripts/train_residue_classifier.py's --ds-name. ATLAS is the default; for mdCATH:
@@ -40,6 +40,9 @@ DS_CSV                  = $(ResearchDrive)/mdcath_450_0_top_split.csv
 # DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
 #DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
 
+# CATH domain structures for mdCATH's relaxed source (train.sh extracts them into pdbs/).
+CATH_PDBS               = $(ResearchDrive)/mdcath_pdbs.tar.gz
+
 executable              = train.sh
 # The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
 # mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.
@@ -58,7 +61,7 @@ arguments               = --data_name $(DS_NAME) --data_root ./ --structure_sour
 # splits the W&B key out of it into wandb_api.txt), lib/{relaxed_pdb,traj_frames,dataset_splits,
 # stats_utils}.py (shared across all models -- see ../../lib), and the dataset's trajectory
 # store + split index.
-transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
+transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV), $(CATH_PDBS)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT

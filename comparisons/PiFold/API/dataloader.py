@@ -38,6 +38,7 @@ def load_data(data_name, method, batch_size, data_root, num_workers=8, **kwargs)
             index_csv=kwargs.get('index_csv') or None,
             traj_h5=kwargs.get('traj_h5') if kwargs.get('traj_h5') is not None else None,
             pdb_cache=kwargs.get('pdb_cache') or None,
+            cath_dir=kwargs.get('cath_dir') or None,
             val_fold=kwargs.get('val_fold', 0),
             test_fold=kwargs.get('test_fold', 4),
             structure_source=kwargs.get('structure_source', 'relaxed'),

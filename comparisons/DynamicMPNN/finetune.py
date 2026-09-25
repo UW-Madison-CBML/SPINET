@@ -30,9 +30,12 @@ these weights (the checkpoint's own `cfg`: Adam, label smoothing 0.05, GAP ignor
 * **Held-out splits are featurised exactly as eval_ckpt.py does** (`tm_min` pair, no noise,
   frozen), so epoch 0 of the validation curve here reproduces the zero-shot number and every
   later point is directly the fine-tuning gain.
-* **The paper's optimisation regime**: Adam at lr 1e-3, no scheduler, and a batch of 32
-  proteins per optimizer step. Upstream reached 32 with 2 proteins per GPU across DDP ranks;
-  here it is 2 per forward pass, gradients accumulated over 16 (`--effective-batch-size`).
+* **The paper's batch and optimizer, at a fine-tuning lr**: Adam, no scheduler, and a batch
+  of 32 proteins per optimizer step, but lr 1e-4 rather than the paper's 1e-3 -- 1e-3 is the
+  rate upstream trained these weights FROM SCRATCH at, and fine-tuning at it risks washing
+  out what the pretrained weights know. The deviation is ours, not the paper's. Upstream
+  reached 32 with 2 proteins per GPU across DDP ranks; here it is 2 per forward pass,
+  gradients accumulated over 16 (`--effective-batch-size`).
 * **Early stopping on val perplexity** (train.py's `EarlyStopping`, patience 10, max 200
   epochs), the protocol every comparison model shares. The best val epoch -- the zero-shot
   epoch -1 included -- is restored before test.
@@ -44,7 +47,7 @@ here with ``--ckpt`` to continue fine-tuning.
 Usage (both datasets are separate runs, as everywhere else in this comparison):
 
     ./finetune.sh --ds-name atlas
-    ./finetune.sh --ds-name atlas --ckpt DynamicMPNN/checkpoints/single_chain_k5.ckpt --lr 3e-5
+    ./finetune.sh --ds-name atlas --ckpt DynamicMPNN/checkpoints/single_chain_k5.ckpt --lr 1e-3
 """
 
 import argparse
@@ -143,8 +146,9 @@ def parse_args():
     parser.add_argument("--early-stopping-patience", type=int, default=10,
                         help="Stop once val perplexity has not improved on its best for this many "
                              "epochs; 0 disables stopping (the best epoch is still restored)")
-    parser.add_argument("--lr", type=float, default=1e-3,
-                        help="Adam lr; the paper's 1e-3, which upstream trained these weights at")
+    parser.add_argument("--lr", type=float, default=1e-4,
+                        help="Adam lr; a tenth of the paper's from-scratch 1e-3, so fine-tuning "
+                             "does not wash out the pretrained weights")
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=dataset_splits.SEED)
