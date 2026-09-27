@@ -1,2 +1,2 @@
-# sheaf_protein_dynamics
-Sheaf neural network protein dynamics
+## `SPINET`
+Sheaf neural network for protein inverse folding using molecular dynamics
