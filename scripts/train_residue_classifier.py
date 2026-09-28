@@ -313,7 +313,7 @@ def interpret_sheaves(loader, model, run, device, rng, h5_filename):
 # move validation code to it's own function
 def train_residue_classifier(args_dict):
     # hyperparameters
-    learning_rate = 1e-3
+    learning_rate = args_dict["lr"]
     epochs = args_dict['epochs']
     val_ratio = 0.15
     test_ratio = 0.15
@@ -631,6 +631,8 @@ if __name__ == "__main__":
     parser.add_argument('--cross-test', type=int, default=4)
     parser.add_argument('--skip-test', action="store_true")
     parser.add_argument('--temp', default=320, type=int)
+    parser.add_argument('--lr', default=1e-3, type=float)
+
 
     args = parser.parse_args()
     train_residue_classifier(vars(args))
