@@ -1,1 +1,1 @@
---run-name our_model --ablate-attention
+--run-name test_sheaves --ablate-attention --resume our_model_mdcath --epochs 0 --skip-test 
