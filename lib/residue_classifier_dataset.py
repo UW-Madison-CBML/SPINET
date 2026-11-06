@@ -50,7 +50,7 @@ class ResidueClassifierDataset(Dataset):
     # df should be loaded in with the pdb_id col added, and then validation set formed by splitting out along that column. Want to make a protein in the validation set has never been seen before
     # TODO plot histogram of epsilon
     
-    def __init__(self, h5_path, np_rng, groups:list|None=None, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None, step=32):
+    def __init__(self, h5_path, np_rng, groups:list|None=None, traj_len:None|int=200, variable_length:None|tuple[int,int]=None, epsilon:float=5.0, fixed_length:None|int=None, step=32, ablate_order=False):
         """
         self
         h5_path: the dataframe containing trajectory information 
@@ -65,6 +65,7 @@ class ResidueClassifierDataset(Dataset):
         self.epsilon = epsilon
         self.np_rng = np_rng
         self.step = step
+        self.ablate_order = ablate_order 
         
         assert (variable_length is None) == (fixed_length is not None), "the following does not hold: variable_length is None XOR fixed_length is None"
 
@@ -76,6 +77,10 @@ class ResidueClassifierDataset(Dataset):
         with h5py.File(self.h5_path, "r") as f:
             self.build_groups(f)
             self.index = self.build_dynamic_index(f)
+
+        if self.ablate_order:
+            self.temp_perms = [torch.from_numpy(self.np_rng.permutation(end-start)) for start, end, _ in self.index]
+
             
 
     def __len__(self):
@@ -86,6 +91,11 @@ class ResidueClassifierDataset(Dataset):
             self.h5_file = h5py.File(self.h5_path, "r", libver="latest", swmr=True)
             
         traj_idx, frame_index_start, frame_index_end = self.index[idx]
+        if self.ablate_order:
+            temp_perm = self.temp_perms[idx]
+        else:
+            temp_perm = None
+
         idxs = slice(frame_index_start, frame_index_end)
 
         group_name = self.groups[traj_idx]
@@ -105,7 +115,10 @@ class ResidueClassifierDataset(Dataset):
 
         edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
         edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1)[:,None].float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
-
+        if self.ablate_order:
+            features = features[:, temp_perm]
+            coordinates = coordinates[:, temp_perm]
+            frame_maps = coordinates[:, temp_perm]
         return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, lengths = torch.tensor(features.shape[1]).unsqueeze(0), index=torch.tensor(self.index[idx][1:]).unsqueeze(0))
 
     def build_groups(self, h5_file):

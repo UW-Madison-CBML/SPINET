@@ -98,7 +98,6 @@ def run_val(run, model, loader, dataset, epoch, device, crit, esmfold_tokenizer,
 
     with torch.no_grad():
         for batch in tqdm(loader if not test_val else itertools.islice(loader,100), desc=f"Epoch {epoch} {val_name}", leave=False):
-
             batch = batch.to(device)
             batch = batch.sort()
             out_batch = model(batch)                                    # out_batch.x: (N, num_classes) logits, N = total nodes (residues) across all B proteins in the batched graph
@@ -296,6 +295,7 @@ def train_residue_classifier(args_dict):
     nth_cross_test = args_dict["cross_test"]
     skip_test = args_dict["skip_test"]
     temp = args_dict["temp"]
+    ablate_order = args_dict["ablate_order"]
 
     assert nth_cross_val >= 0 and nth_cross_val < 5
     assert nth_cross_test >= 0 and nth_cross_test < 5
@@ -385,9 +385,9 @@ def train_residue_classifier(args_dict):
     run.log_artifact(artifact)
 
     # Initialize datasets
-    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
-    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
-    test_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=test_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None)
+    train_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=train_pdbs,  epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None, ablate_order=ablate_order)
+    val_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=val_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None, ablate_order=ablate_order)
+    test_dataset = ResidueClassifierDataset(h5_path, np_rng, groups=test_pdbs, epsilon=epsilon, fixed_length=num_timesteps, step=32, traj_len= 1000 if ds_name == "atlas" else None, ablate_order=ablate_order)
 
     # set up dataloaders
     train_loader = DataLoader(train_dataset, batch_sampler = ProteinSampler(train_dataset, num_nodes, rng=torch_rng), generator=torch_rng, num_workers=16, persistent_workers=True, worker_init_fn=ResidueClassifierDataset.worker_init_fn, collate_fn=lambda batch:train_dataset.graph_collate(batch), pin_memory=True)
@@ -495,8 +495,8 @@ def train_residue_classifier(args_dict):
                 if use_profiler:
                     torch.cuda.synchronize()
                 times1.append(time.perf_counter())
-                batch = batch.to(DEVICE)
 
+                batch = batch.to(DEVICE)
                 if use_profiler:
                     torch.cuda.synchronize()
 
@@ -588,6 +588,7 @@ if __name__ == "__main__":
     parser.add_argument('--skip-test', action="store_true")
     parser.add_argument('--temp', default=320, type=int)
     parser.add_argument('--lr', default=1e-3, type=float)
+    parser.add_argument("--ablate-order", action="store_true")
 
 
     args = parser.parse_args()
