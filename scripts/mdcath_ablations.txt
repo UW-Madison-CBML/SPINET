@@ -1,2 +1,1 @@
 --run-name no_order --ablate-attention --ablate-order
---run-name our_model_mdcath_450_2 --ablate-attention --lr 0.0001 --epochs 20 --ds-name mdcath --temp 450
