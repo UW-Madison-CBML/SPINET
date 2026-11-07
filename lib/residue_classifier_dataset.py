@@ -79,7 +79,7 @@ class ResidueClassifierDataset(Dataset):
             self.index = self.build_dynamic_index(f)
 
         if self.ablate_order:
-            self.temp_perms = [torch.from_numpy(self.np_rng.permutation(end-start)) for start, end, _ in self.index]
+            self.temp_perms = [torch.from_numpy(self.np_rng.permutation(end-start)) for _, start, end in self.index]
 
             
 
@@ -115,10 +115,11 @@ class ResidueClassifierDataset(Dataset):
 
         edge_index = edge_index_from_distmat(dists, epsilon=self.epsilon, k=32)
         edge_attr = (torch.abs(edge_index[0] - edge_index[1]) == 1)[:,None].float() # this way we don't have double edges. Not that double edges are necessarily bad but imposing this restriction helps sheaf Laplacian be more well-behaved
+
         if self.ablate_order:
             features = features.index_select(1, temp_perm)
             coordinates = coordinates.index_select(1, temp_perm)
-            frame_maps = coordinates.index_select(1, temp_perm)
+            frame_maps = frame_maps.index_select(1, temp_perm)
         return Data(x=features, y=y, pos=coordinates, frame_maps = frame_maps, edge_index=edge_index, edge_attr=edge_attr, node_mask=node_mask, traj_id=traj_id, lengths = torch.tensor(features.shape[1]).unsqueeze(0), index=torch.tensor(self.index[idx][1:]).unsqueeze(0))
 
     def build_groups(self, h5_file):

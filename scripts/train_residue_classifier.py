@@ -275,7 +275,7 @@ def train_residue_classifier(args_dict):
     num_nodes = 3000 # GRU's can't do more than a batch of 2**16
     hidden_dim = 128
     stalk_dim = 8
-    num_blocks = 6
+    num_blocks = 4
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
