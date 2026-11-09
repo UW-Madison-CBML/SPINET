@@ -24,8 +24,7 @@ request_memory = 128GB
 request_disk = 128GB
 request_gpus = 1
 
-requirements = (Target.HasCHTCStaging == true) 
-#&& (Machine == "bhaskargpu4000.chtc.wisc.edu")
+requirements = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
 # it is not possible to insert temp as a variable in the txt file you need to specify it here
 queue ablation from mdcath_ablations.txt

@@ -521,6 +521,9 @@ def load_raw_split(group_ids, h5_path, cache_dir=os.path.join("..", "cif_cache")
 
 
 def main(index_path, h5_path, use_pdbs=False):
+    step = 64
+
+
 
     wandb.login(key=os.getenv("WANDB_KEY"))
     run = wandb.init(
@@ -551,51 +554,58 @@ def main(index_path, h5_path, use_pdbs=False):
         test_groups = index[index["split"] == "test"]["domain"].tolist()
         val_groups = index[index["split"] == "validation"]["domain"].tolist()
 
-        #pdb_to_size = {}
-        #def visit(name, obj):
-        #    if isinstance(obj, h5py.Group) and "coordinates" in obj:
-        #        pdb_to_size[name.split("/")[0]] = obj["coordinates"].shape[1]
-        #with h5py.File(h5_path, "r") as f:
-        #    f.visititems(visit)
+        pdb_to_size = {}
+        def visit(name, obj):
+            if isinstance(obj, h5py.Group) and "coordinates" in obj:
+                pdb_to_size[name.split("/")[0]] = obj["coordinates"].shape[1]
+        with h5py.File(h5_path, "r") as f:
+            f.visititems(visit)
+
         #index["random_indices"] = [pick_frame(pdb_to_size[pdb_id], pdb_id, 0) for pdb_id in index["pdb"].to_list()]
+        index = index.rename(columns={"domain":"pdb"})
+        index["length"] = [pdb_to_size[pdb_id] for pdb_id in index["pdb"].to_list()]
 
 
-
+    """
     train_raw = load_raw_split(train_groups, h5_path)
     val_raw   = load_raw_split(val_groups,   h5_path)
     test_raw  = load_raw_split(test_groups,  h5_path)
-
-
     """
 
-    else:
-        train_raw = []
-        val_raw = []
-        test_raw = []
-        def visit(name, obj):
-            if isinstance(obj, h5py.Group) and all(ds in obj for ds in ["coordinates","residues"]):
-                pdb = name.split("/")[0]
-                idx = index[index["pdb"] == pdb].iloc[0]["random_indices"]
+    train_raw = []
+    val_raw = []
+    test_raw = []
+    def visit(name, obj):
+        if isinstance(obj, h5py.Group) and all(ds in obj for ds in ["coordinates","residues"]):
+            pdb = name.split("/")[0].strip()
+
+            #assert pdb in index["pdb"].to_list(), f"{pdb} not in column pdb, train: {pdb in train_groups}, test: {pdb in test_groups}, val: {pdb in val_groups}"
+
+            # if single random frame
+            # idx = index[index["pdb"] == pdb].iloc[0]["random_indices"]
+            length = obj["coordinates"].shape[1]
+            for idx in range(0, length, step):
                 atom_dict = {
                     'name': (name, idx),
-                    'seq': "".join([seq1(res.decode()[:3]) for res in obj["residues"][:]]),
+                    'seq': "".join([seq1(RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in obj["residues"][:]]),
                     'coords': obj["coordinates"][:, idx]
                 }
-                if(pdb in train_pdbs):
+                if(pdb in train_groups):
                     train_raw.append(atom_dict)
-                else:
+                elif(pdb in val_groups):
                     val_raw.append(atom_dict)
-        with h5py.File(h5_path, "r") as f:
-            f.visititems(visit)
-    """
+                else:
+                    test_raw.append(atom_dict)
+    with h5py.File(h5_path, "r") as f:
+        f.visititems(visit)
 
     train_node_counts = [len(s['seq']) for s in train_raw]
     val_node_counts = [len(s['seq']) for s in val_raw]
     test_node_counts = [len(s['seq']) for s in test_raw]
 
-    train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=3000)
-    val_sampler = gvp.data.BatchSampler(val_node_counts, max_nodes=3000)
-    test_sampler = gvp.data.BatchSampler(test_node_counts, max_nodes=3000)
+    train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=16000)
+    val_sampler = gvp.data.BatchSampler(val_node_counts, max_nodes=16000)
+    test_sampler = gvp.data.BatchSampler(test_node_counts, max_nodes=16000)
 
     train_dataset = gvp.data.ProteinGraphDataset(train_raw)
     val_dataset = gvp.data.ProteinGraphDataset(val_raw)

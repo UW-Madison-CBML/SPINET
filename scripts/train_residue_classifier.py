@@ -587,9 +587,8 @@ if __name__ == "__main__":
     parser.add_argument('--cross-test', type=int, default=4)
     parser.add_argument('--skip-test', action="store_true")
     parser.add_argument('--temp', default=320, type=int)
-    parser.add_argument('--lr', default=1e-3, type=float)
+    parser.add_argument('--lr', default=0.001, type=float)
     parser.add_argument("--ablate-order", action="store_true")
-
 
     args = parser.parse_args()
     train_residue_classifier(vars(args))

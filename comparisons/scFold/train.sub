@@ -9,11 +9,10 @@ universe = docker
 #h5=atlas_data.h5
 
 temp=320
-index=mdcath_$(temp)_0_top_split.csv
-pdbs_archive=mdcath_pdbs_2.tar.gz
-h5=mdcath_spinet_$(temp)_0.h5
+index=mdcath_$(temp)_0_topo_split.csv
+h5=mdcath_spinet_$(temp)_0_v2.h5
 
-shell = ./train.sh --index-name $(index) --h5-name $(h5) --use-pdbs
+shell = ./train.sh --index-name $(index) --h5-name $(h5) --batch_size 32
 
 #  queue number assigned to this set of jobs at the time of submission.
 log = train_$(Cluster)_$(Process).log

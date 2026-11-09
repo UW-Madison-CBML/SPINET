@@ -3,7 +3,7 @@ rm ScFold.tar.gz
 git clone https://github.com/JensLundsgaard/ScFold.git
 
 cd ScFold/
-git checkout main
+git checkout master
 
 cd ..
 #git clone https://github.com/jczhongcs/ScFold.git
