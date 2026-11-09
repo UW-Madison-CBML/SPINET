@@ -1,16 +1,18 @@
 """Evaluate a trained MapDiff (Prior_Diff) checkpoint on a dataset's held-out test split.
 
 Loads an EGNN+IPA Prior_Diff checkpoint produced by `train.py`, runs MC-DDIM inference over
-every protein in the held-out split one at a time, and computes per-protein perplexity,
-top-1/top-5/top-10 sequence recovery, and self-consistency RMSD (fold the predicted sequence
-with ESMFold and Kabsch-RMSD it against the protein's ground-truth relaxed backbone). Reports
-the mean +/- standard deviation (over proteins) for each metric and logs everything to
-Weights & Biases.
+every protein in the held-out split one at a time, and computes per-protein perplexity
+and top-1/top-5/top-10 sequence recovery. Reports the mean +/- standard deviation (over
+proteins) for each metric and logs everything to Weights & Biases.
 
 Both shared datasets are supported and evaluated separately (`--ds-name`), the same splits
 scripts/train_residue_classifier.py uses. The default is the **test** split -- ATLAS's
 `cross_val` fold `--test-fold`, or mdCATH's `test` rows -- which training never saw and never
-selected on; pass `--split val` to score the validation split instead. Each protein is
+selected on; pass `--split val` to score the validation split instead.
+`--structure-source traj` scores each protein by averaging its logits across every MD frame,
+featurizing each frame on the fly in `--featurize-workers` DataLoader workers (nothing written to
+disk), or -- with `--graph-root` -- from data/graphs_from_traj.py's saved graphs, featurizing
+missing ones there first. Otherwise each protein is
 featurized on the fly from its *relaxed* (deposited)
 structure -- `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset id
 names and crops it to the residues the trajectory covers -- then run through
@@ -18,7 +20,7 @@ names and crops it to the residues the trajectory covers -- then run through
 does. No precomputed graph directory is needed.
 
 Must be run in an environment with MapDiff's full dependencies (torch, torch_geometric,
-torch_scatter/torch_cluster, biopython, DSSP, wandb, transformers) -- e.g. the training
+torch_scatter/torch_cluster, biopython, DSSP, wandb) -- e.g. the training
 Docker image. See eval.sub / eval.sh to run this on CHTC.
 
 Usage:
@@ -39,6 +41,8 @@ from tqdm import tqdm
 
 from data.generate_graph_cath import pdb2graph, get_processed_graph
 from dataloader.collator import CollatorDiff
+from dataloader.traj_dataset import (EnsembleCollator, OnlineTrajEnsembles, OnlineTrajFrames, TrajEnsembles,
+                                     average_frame_logits)
 from dataloader.pyg_inspector_compat import patch_inspector_distribute
 from dataloader.pyg_safe_globals import allow_pyg_data_pickles
 from model.egnn_pytorch.egnn_net import EGNN_NET
@@ -46,7 +50,7 @@ from model.ipa.ipa_net import IPANetPredictor
 from model.prior_diff import Prior_Diff
 from utils import enable_dropout
 
-# lib/{stats_utils,scrmsd,relaxed_pdb,dataset_splits}.py are copied in flat next to this file
+# lib/{stats_utils,relaxed_pdb,dataset_splits}.py are copied in flat next to this file
 # (see README.md and eval.sh) -- fall back to walking up to a lib/ directory for local/dev
 # runs from inside the source tree.
 try:
@@ -54,7 +58,6 @@ try:
     import relaxed_pdb
     import stats_utils
     import traj_frames
-    from scrmsd import load_esmfold, evaluate_scrmsd
 except ImportError:
     for _up in ('.', '..', '../..', '../../..'):
         _cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), _up, 'lib')
@@ -65,19 +68,16 @@ except ImportError:
     import relaxed_pdb
     import stats_utils
     import traj_frames
-    from scrmsd import load_esmfold, evaluate_scrmsd
 
 allow_pyg_data_pickles()
 patch_inspector_distribute()
 
-METRIC_KEYS = stats_utils.METRIC_KEYS + ('scrmsd',)
+METRIC_KEYS = stats_utils.METRIC_KEYS
 
 # Fixed one-letter amino-acid order MapDiff's 20-dim one-hot (`data.x[:, :20]`)
 # is built in -- see (upstream) data/generate_graph_cath.py's `amino_acids_type`.
 AMINO_ACIDS = ['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I',
                'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V']
-# `atom_pos` stacks [N, CA, C, CB, O] -- reorder to lib/scrmsd.py's expected CA, N, C, O.
-ATOM_POS_TO_BACKBONE_IDX = [1, 0, 2, 4]
 
 
 def create_parser():
@@ -100,10 +100,25 @@ def create_parser():
                          help="Trajectory store, read only for each protein's reference residue "
                               "sequence (default: the dataset's standard file name)")
     parser.add_argument('--pdb-cache', default='./pdb_cache', help="Where downloaded RCSB entries are cached")
-    parser.add_argument('--structure-source', default='relaxed', choices=('relaxed', 'frame'),
+    parser.add_argument('--structure-source', default='relaxed', choices=('relaxed', 'frame', 'traj'),
                          help="What each protein's coordinates come from: its deposited RCSB entry "
-                              "('relaxed', the default) or one frame of its MD trajectory ('frame'). "
+                              "('relaxed', the default), one frame of its MD trajectory ('frame'), or "
+                              "every frame ('traj': logits averaged across each protein's frames). "
                               "Match whatever the checkpoint was trained on.")
+    parser.add_argument('--graph-root', default=None,
+                         help="--structure-source traj only: read saved graphs from data/graphs_from_traj.py's "
+                              "--save-root, featurizing frames of the scored split that are not there yet "
+                              "into it first. Default: featurize every frame on the fly, nothing saved")
+    parser.add_argument('--frame-stride', type=int, default=1,
+                         help="--structure-source traj only: featurize every N-th frame")
+    parser.add_argument('--max-frames', type=int, default=None,
+                         help="--structure-source traj only: at most this many evenly spaced frames per "
+                              "protein are averaged")
+    parser.add_argument('--frame-chunk', type=int, default=8,
+                         help="--structure-source traj only: frames per forward pass")
+    parser.add_argument('--featurize-workers', type=int, default=8,
+                         help="--structure-source traj only: featurizing workers (frame chunks on the "
+                              "fly, or proteins with --graph-root)")
     parser.add_argument('--frame-seed', type=int, default=dataset_splits.SEED,
                          help="--structure-source frame only: seeds the per-protein frame draw. Use "
                               "the same seed training used to score the same frames.")
@@ -124,12 +139,6 @@ def create_parser():
                               "per protein)")
     parser.add_argument('--ddim_steps', default=None, type=int, help="Override cfg.diffusion.ddim_steps")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--esmfold_device', default=None,
-                         help="Where to run ESMFold for self-consistency RMSD. Its fp32 weights are "
-                              "~11GB and stay resident for the whole run, so on a 2-GPU node put it "
-                              "on the other card (e.g. --device cuda:0 --esmfold_device cuda:1), as "
-                              "train.py does via conf/train.yaml's `compute` block. Defaults to "
-                              "--device.")
     parser.add_argument('--wandb_key_file', default='./wandb_api.txt')
     parser.add_argument('--wandb_entity', default='jenslundsgaard7-uw-madison')
     parser.add_argument('--wandb_project', default='SheafProtein')
@@ -200,9 +209,81 @@ def load_split_entries(ds_name, index_csv, traj_h5, pdb_cache, val_fold, test_fo
     return entries
 
 
+def load_traj_ensembles(args, split):
+    """Per-protein frame ensembles of the scored split: featurized on the fly
+    (`OnlineTrajEnsembles`), or -- with ``--graph-root`` -- a `TrajEnsembles` over saved graphs,
+    featurizing missing frames there first."""
+    _, val_ids, test_ids = dataset_splits.get_splits(
+        args.ds_name, args.index_csv, val_fold=args.val_fold, test_fold=args.test_fold)
+    split_ids = test_ids if split == 'test' else val_ids
+    traj_h5 = args.traj_h5 or dataset_splits.default_h5(args.ds_name)
+    if args.graph_root is None:
+        frames = OnlineTrajFrames(traj_h5, split_ids, args.ds_name, max_length=args.max_length or None,
+                                  max_frames=args.max_frames, stride=args.frame_stride, fallback=False)
+        return OnlineTrajEnsembles(frames, args.frame_chunk, args.featurize_workers)
+
+    from data import graphs_from_traj
+    split_dir_name = 'test' if split == 'test' else 'validation'
+    split_dir = os.path.join(args.graph_root, split_dir_name)
+
+    store = traj_frames.TrajectoryStore(traj_h5)
+    entries, failures = store.index(split_ids, args.ds_name, stride=args.frame_stride, max_frames=args.max_frames,
+                                    max_length=args.max_length or None)
+    store.close()
+    if failures:
+        print(f'{len(failures)}/{len(split_ids)} {split} proteins had no usable trajectory: {failures}')
+    # Resumable: frames already featurized are skipped.
+    graphs_from_traj.process_split(entries, split_dir_name, split_dir, args.featurize_workers, traj_h5)
+
+    return TrajEnsembles(split_dir, [p for p in split_ids if p in entries],
+                         max_length=args.max_length or None, max_frames=args.max_frames)
+
+
 @torch.no_grad()
-def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold_tokenizer,
-              esmfold_model, esmfold_device=None):
+def mc_logits(model, g_batch, ipa_batch, ensemble_num, ddim_steps, device):
+    g_batch, ipa_batch = g_batch.to(device), ipa_batch.to(device)
+    samples = [model.mc_ddim_sample(g_batch, ipa_batch, diverse=True, step=ddim_steps)[0]
+               for _ in range(ensemble_num)]
+    return torch.stack(samples).mean(dim=0).cpu()
+
+
+def protein_metrics(title, mean_logits, target):
+    target_onehot = F.one_hot(target, num_classes=mean_logits.shape[1]).float()
+    return {
+        'title': title,
+        'length': target.shape[0],
+        'design': ''.join(AMINO_ACIDS[i.item()] for i in mean_logits.argmax(dim=1)),
+        'perplexity': stats_utils.perplexity_from_nll(F.cross_entropy(mean_logits, target_onehot, reduction='mean')),
+        'recovery_top1': stats_utils.top_k_acc(mean_logits, target, 1),
+        'recovery_top5': stats_utils.top_k_acc(mean_logits, target, 5),
+        'recovery_top10': stats_utils.top_k_acc(mean_logits, target, 10),
+    }
+
+
+@torch.no_grad()
+def evaluate_traj(model, ensembles, frame_chunk, ensemble_num, ddim_steps, device):
+    """Per protein: MC-sample mean on every frame, then the mean across frames."""
+    per_protein = []
+    if isinstance(ensembles, OnlineTrajEnsembles):
+        loader = ensembles  # already yields per-protein items, featurizing in its own workers
+    else:
+        loader = torch.utils.data.DataLoader(ensembles, batch_size=1, shuffle=False, num_workers=4,
+                                             collate_fn=EnsembleCollator(chunk_size=frame_chunk))
+    for item in tqdm(loader, desc='evaluating held-out split (frame-averaged)'):
+        # Consume every chunk before reading num_frames/target (filled in as chunks are featurized).
+        frame_logits = [mc_logits(model, g, ipa, ensemble_num, ddim_steps, device) for g, ipa in item['chunks']]
+        if not frame_logits:
+            print(f"{item['name']}: no frame could be featurized, skipping")
+            continue
+        mean_logits = average_frame_logits(torch.cat(frame_logits), item['num_frames'])
+        record = protein_metrics(item['name'], mean_logits, item['target'])
+        record['num_frames'] = item['num_frames']
+        per_protein.append(record)
+    return per_protein
+
+
+@torch.no_grad()
+def evaluate(model, entries, collator, ensemble_num, ddim_steps, device):
     per_protein = []
     for entry in tqdm(entries, desc='evaluating held-out split'):
         g_batch, ipa_batch = collator([entry['graph']])
@@ -218,20 +299,15 @@ def evaluate(model, entries, collator, ensemble_num, ddim_steps, device, esmfold
         target = target_onehot.argmax(dim=1)
 
         pred_seq = ''.join(AMINO_ACIDS[i.item()] for i in mean_logits.argmax(dim=1))
-        # The graph was featurized from the deposited structure, so `atom_pos` is the relaxed
-        # reference, residue-for-residue aligned with the prediction.
-        gt_backbone = entry['graph'].atom_pos[:, ATOM_POS_TO_BACKBONE_IDX, :]  # (R, 4, 3)
-        scrmsd = evaluate_scrmsd([pred_seq], [gt_backbone], esmfold_tokenizer, esmfold_model,
-                                  device=esmfold_device or device).item()
 
         per_protein.append({
             'title': entry['title'],
             'length': target.shape[0],
+            'design': pred_seq,
             'perplexity': stats_utils.perplexity_from_nll(F.cross_entropy(mean_logits, target_onehot, reduction='mean')),
             'recovery_top1': stats_utils.top_k_acc(mean_logits, target, 1),
             'recovery_top5': stats_utils.top_k_acc(mean_logits, target, 5),
             'recovery_top10': stats_utils.top_k_acc(mean_logits, target, 10),
-            'scrmsd': scrmsd,
         })
     return per_protein
 
@@ -244,7 +320,6 @@ def main():
 
     cfg = OmegaConf.load(config_path)
     device = torch.device(args.device)
-    esmfold_device = torch.device(args.esmfold_device) if args.esmfold_device else device
 
     egnn = EGNN_NET(input_feat_dim=cfg.model.input_feat_dim, hidden_channels=cfg.model.hidden_dim,
                      edge_attr_dim=cfg.model.edge_attr_dim, dropout=cfg.model.drop_out, n_layers=cfg.model.depth,
@@ -268,19 +343,21 @@ def main():
     ensemble_num = args.ensemble_num or cfg.diffusion.ensemble_num
     ddim_steps = args.ddim_steps or cfg.diffusion.ddim_steps
 
-    entries = load_split_entries(args.ds_name, args.index_csv, args.traj_h5, args.pdb_cache,
-                                  args.val_fold, args.test_fold, args.max_length, split=args.split,
-                                  structure_source=args.structure_source,
-                                  frame_seed=args.frame_seed, frame_index=args.frame_index)
+    if args.structure_source == 'traj':
+        entries = load_traj_ensembles(args, args.split)
+    else:
+        entries = load_split_entries(args.ds_name, args.index_csv, args.traj_h5, args.pdb_cache,
+                                      args.val_fold, args.test_fold, args.max_length, split=args.split,
+                                      structure_source=args.structure_source,
+                                      frame_seed=args.frame_seed, frame_index=args.frame_index)
     if len(entries) == 0:
         raise RuntimeError("No usable {} proteins found for dataset {}".format(args.split, args.ds_name))
     print("Loaded {} {} {} proteins".format(len(entries), args.ds_name, args.split))
 
-    esmfold_tokenizer, esmfold_model = load_esmfold(device=str(esmfold_device))
-
-    collator = CollatorDiff()
-    per_protein = evaluate(model, entries, collator, ensemble_num, ddim_steps, device,
-                            esmfold_tokenizer, esmfold_model, esmfold_device)
+    if args.structure_source == 'traj':
+        per_protein = evaluate_traj(model, entries, args.frame_chunk, ensemble_num, ddim_steps, device)
+    else:
+        per_protein = evaluate(model, entries, CollatorDiff(), ensemble_num, ddim_steps, device)
     # ddof=1 (sample std) matches this script's previous hand-rolled aggregation.
     summary = stats_utils.summarize_per_protein(per_protein, METRIC_KEYS, ddof=1)
 
@@ -302,10 +379,17 @@ def main():
             'ensemble_num': ensemble_num,
             'ddim_steps': ddim_steps,
             'n_eval_proteins': len(entries),
+            'structure_source': args.structure_source,
+            'max_frames': args.max_frames if args.structure_source == 'traj' else None,
         },
     )
     run.log(summary)
     stats_utils.log_per_protein_table(per_protein, METRIC_KEYS)
+    # The designs, in the same table trainer.py logs via ResidueMetrics.to_log_dict:
+    # `test_pred_seqs` (bare `pred_seqs` for val), columns pdb / seq.
+    import wandb
+    run.log({'pred_seqs' if args.split == 'val' else '{}_pred_seqs'.format(args.split): wandb.Table(
+        columns=['pdb', 'seq'], data=[[p['title'], p['design']] for p in per_protein])})
     run.finish()
 
 

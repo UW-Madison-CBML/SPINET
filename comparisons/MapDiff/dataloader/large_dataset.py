@@ -6,6 +6,30 @@ from tqdm import tqdm
 import random
 
 
+def to_model_graph(data, name):
+    """A featurized graph (`data.generate_graph_cath.pdb2graph`'s output) -> the `Data` the
+    collators and models consume. Shared with dataloader/traj_dataset.py."""
+    del data['distances']
+    del data['edge_dist']
+    mu_r_norm = data.mu_r_norm
+    extra_x_feature = torch.cat([data.x[:, 20:], mu_r_norm], dim=1)
+    return Data(
+        x=data.x[:, :20],
+        extra_x=extra_x_feature,
+        pos=data.pos,
+        atom_pos=data.atom_pos,
+        edge_index=data.edge_index,
+        edge_attr=data.edge_attr,
+        ss=data.ss[:data.x.shape[0], :],
+        sasa=data.x[:, 20],
+        # The protein id (``<pdb>_<chain>`` for ATLAS, the CATH domain for mdCATH), carried
+        # through `Batch.from_data_list` as a per-graph list so trainer.py can label each
+        # design in its `pred_seqs` W&B table -- matching what
+        # scripts/train_residue_classifier.py logs from `Data.traj_id`.
+        name=name,
+    )
+
+
 class Cath(Dataset):
     'Characterizes a dataset for PyTorch'
 
@@ -34,24 +58,4 @@ class Cath(Dataset):
         'Generates one sample of data'
         # Select sample
         ID = self.list_IDs[index]
-        data = torch.load(self.baseDIR + ID)
-        del data['distances']
-        del data['edge_dist']
-        mu_r_norm = data.mu_r_norm
-        extra_x_feature = torch.cat([data.x[:, 20:], mu_r_norm], dim=1)
-        graph = Data(
-            x=data.x[:, :20],
-            extra_x=extra_x_feature,
-            pos=data.pos,
-            atom_pos=data.atom_pos,
-            edge_index=data.edge_index,
-            edge_attr=data.edge_attr,
-            ss=data.ss[:data.x.shape[0], :],
-            sasa=data.x[:, 20],
-            # The protein id (``<pdb>_<chain>`` for ATLAS, the CATH domain for mdCATH), carried
-            # through `Batch.from_data_list` as a per-graph list so trainer.py can label each
-            # design in its `pred_seqs` W&B table -- matching what
-            # scripts/train_residue_classifier.py logs from `Data.traj_id`.
-            name=ID[:-3] if ID.endswith('.pt') else ID,
-        )
-        return graph
+        return to_model_graph(torch.load(self.baseDIR + ID), ID[:-3] if ID.endswith('.pt') else ID)

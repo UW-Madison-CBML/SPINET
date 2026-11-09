@@ -1,5 +1,5 @@
-gvp-seq_pred_df
-nosheaves_atlas_seq_pred
-spinet_mdcath_seq_pred
-nosheaves_mdcath_seq_pred
-spinet_atlas_seq_pred
+gvp-seq_pred_df, atlas_data.h5
+nosheaves_atlas_seq_pred, atlas_data.h5
+spinet_mdcath_seq_pred, mdcath_spinet_320_0.h5
+nosheaves_mdcath_seq_pred, mdcath_spinet_320_0.h5
+spinet_atlas_seq_pred, atlas_data.h5

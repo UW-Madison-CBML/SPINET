@@ -5,10 +5,12 @@ sampled from the MD trajectory**, and that ensemble input is precisely the thing
 benchmarked. So the input pipeline below deliberately stays on the trajectory store.
 
 Pipeline (see README.md for the full reasoning):
-  1. For every protein in the dataset's split index, pull its trajectory out of the hdf5
-     store, compute a pairwise TM-score matrix with DynamicMPNN's own
-     `dynamicmpnn.eval.scoring.compute_tm_score`, and farthest-point-sample a small pool of
-     structurally distinct frames off its dissimilarity (1 - TM).
+  1. For every protein in the dataset's split index, pull *every* trajectory it has out of the
+     hdf5 store (all replicas, pooled -- as the sheaf model, MapDiff and PiFold do), compute a
+     pairwise TM-score matrix over their coarse-grained frames with DynamicMPNN's own TM-score
+     (`dynamicmpnn.eval.scoring.compute_tm_score`, vectorised), and farthest-point-sample a
+     small pool of structurally distinct frames off its dissimilarity (1 - TM). The pool can
+     therefore mix replicas.
   2. Repack that pool into DynamicMPNN's `.pt` schema (`pyg_dict` + `cluster_members` +
      `tm_scores` / `tm_score_representatives`), which is exactly what
      `ProteinGraphFeaturiserSingleChain` / `PTFileDataset` expect -- the TM matrix is what
@@ -41,6 +43,7 @@ import argparse
 import os
 import random
 import sys
+import zlib
 from pathlib import Path
 
 import h5py
@@ -73,7 +76,6 @@ from residue_classifier_dataset import ResidueClassifierDataset
 from stats_utils import ResidueMetrics, three_letter_codes
 
 from dynamicmpnn import constants
-from dynamicmpnn.datamodules.pt_dataset import PTFileDataset
 from dynamicmpnn.eval.scoring import compute_tm_score
 from dynamicmpnn.datamodules.sampler import safe_collate
 from dynamicmpnn.types import (
@@ -119,10 +121,12 @@ NM_TO_ANGSTROM = 10.0
 #
 # ATLAS stays at 25 so the completed k = 2..20 sweep remains reproducible from this script;
 # lowering it would silently re-pool ATLAS and make new points incomparable with the old CSV.
-# The cost of mdCATH's cg=4 is preprocessing: compute_pairwise_tm is a serial O(n_coarse^2)
-# Kabsch loop, measured at 0.21 s/protein at cg=25 and 1.38 s/protein at cg=4, i.e. ~19 min
-# vs ~2 h for 5327 proteins. It is paid once per pool directory, but job scratch does not
-# survive, so every chunked mdCATH submission pays it again.
+# Those counts are per trajectory: every replica of a protein is now pooled, so the candidate
+# set is (replicas x T/cg) -- e.g. ~5 x 125 for mdCATH, 3 x 41 for ATLAS. compute_pairwise_tm
+# is O(n_candidates^2) but vectorised (~3.7 s for 625 candidates), and build_processed_dataset
+# runs proteins in parallel, so mdCATH preprocessing is roughly 5327 x 3.7 s / workers
+# (~40 min on 8 CPUs). It is paid once per pool directory, but job scratch does not survive,
+# so every mdCATH submission pays it again.
 DEFAULT_COURSE_GRAIN = {"atlas": 25, "mdcath": 4}
 
 CA_CA_ANGSTROM = 3.80
@@ -159,13 +163,14 @@ UNKNOWN_TOKEN = len(BASE_AMINO_ACIDS) + 1  # 21
 # --------------------------------------------------------------------------------------
 
 def index_h5_groups(h5_file: h5py.File) -> dict:
-    """Map pdb_code -> hdf5 group path for every trajectory group in the file."""
+    """Map pdb_code -> list of hdf5 group paths, one per trajectory group under that protein
+    (e.g. each mdCATH replica), in store order."""
     required = ResidueClassifierDataset.REQUIRED_DATASETS
     lookup = {}
 
     def visit(name, obj):
         if isinstance(obj, h5py.Group) and all(ds in obj for ds in required):
-            lookup.setdefault(name.split("/")[0], name)
+            lookup.setdefault(name.split("/")[0], []).append(name)
 
     h5_file.visititems(visit)
     return lookup
@@ -176,6 +181,23 @@ def resolve_group(pdb_id: str, group_lookup: dict):
         if candidate in group_lookup:
             return group_lookup[candidate]
     return None
+
+
+def _batched_tm(reference: np.ndarray, mobiles: np.ndarray) -> np.ndarray:
+    """`compute_tm_score(reference, mobile)` for every mobile in ``mobiles`` (M, R, 3) at once:
+    the same Kabsch superposition (incl. its reflection correction) and the same d0, batched."""
+    ref_c = reference - reference.mean(axis=0)
+    mob_c = mobiles - mobiles.mean(axis=1, keepdims=True)
+    covariance = np.einsum("mra,rb->mab", mob_c, ref_c)
+    v_matrix, _, w_transpose = np.linalg.svd(covariance)
+    correction = np.broadcast_to(np.eye(3), covariance.shape).copy()
+    correction[np.linalg.det(v_matrix @ w_transpose) < 0, -1, -1] = -1.0
+    rotation = v_matrix @ correction @ w_transpose
+    aligned = mob_c @ rotation
+    distances = np.linalg.norm(ref_c[None] - aligned, axis=-1)  # M, R
+    length = reference.shape[0]
+    d0 = max(1.24 * max(length - 15, 1) ** (1.0 / 3.0) - 1.8, 0.5)
+    return np.mean(1.0 / (1.0 + np.square(distances / d0)), axis=1)
 
 
 def compute_pairwise_tm(coords: torch.Tensor) -> torch.Tensor:
@@ -202,12 +224,18 @@ def compute_pairwise_tm(coords: torch.Tensor) -> torch.Tensor:
     ca = coords[:, :, CA_ATOM_IDX, :].double().numpy()  # T, num_res, 3
     T = ca.shape[0]
 
+    # One row at a time, vectorised over the partner frames (`_batched_tm` is
+    # `compute_tm_score` batched): pooling every replica makes T several hundred frames, and
+    # the serial pair loop that used to be here is O(T^2) Python calls.
     tm_matrix = np.eye(T, dtype=np.float32)
-    for i in range(T):
-        for j in range(i + 1, T):
-            tm = compute_tm_score(ca[i], ca[j])
-            tm_matrix[i, j] = tm
-            tm_matrix[j, i] = tm
+    for i in range(T - 1):
+        row = _batched_tm(ca[i], ca[i + 1:]).astype(np.float32)
+        tm_matrix[i, i + 1:] = row
+        tm_matrix[i + 1:, i] = row
+    if T > 1:  # the batched path must reproduce DynamicMPNN's own scorer exactly
+        reference = compute_tm_score(ca[0], ca[T - 1])
+        if abs(reference - float(tm_matrix[0, T - 1])) > 1e-4:
+            raise RuntimeError(f"batched TM {tm_matrix[0, T - 1]:.6f} != compute_tm_score {reference:.6f}")
     return torch.from_numpy(tm_matrix)
 
 
@@ -268,56 +296,152 @@ def frame_to_pyg_data(frame_coords: np.ndarray, residue_type: torch.Tensor) -> D
     return Data(coords=coords, residue_type=residue_type, residue_index=residue_index)
 
 
+FRAME_SELECTIONS = ("fps", "uniform")
+
+
+def _read_replicas(h5_file, group_names, pdb_id):
+    """``(residues, [(group name, coords dataset, unit scale)])`` for the replicas that agree
+    with the first one on the residue sequence (the others are left out with a warning)."""
+    residues = h5_file[group_names[0] + "/residues"][:]
+    replicas = []
+    for group_name in group_names:
+        group_residues = h5_file[group_name + "/residues"][:]
+        if len(group_residues) != len(residues) or not np.array_equal(group_residues, residues):
+            logger.warning(f"{pdb_id}: {group_name} disagrees with {group_names[0]} on the residue "
+                           f"sequence -- left out of the conformer pool.")
+            continue
+        coords_ds = h5_file[group_name + "/coordinates"]  # num_res, T, num_atoms, 3
+        # Units are read off the store rather than assumed: ATLAS is nm, mdCATH is already A.
+        replicas.append((group_name, coords_ds, detect_coord_scale(coords_ds)))
+    return residues, replicas
+
+
 def build_ensemble(
     h5_file: h5py.File,
-    group_name: str,
+    group_names: list,
     pdb_id: str,
     pool_size: int,
     course_grain: int,
+    selection: str = "fps",
+    seed: int = dataset_splits.SEED,
 ) -> tuple:
-    """Build one pdb's `.pt` contents: a pool of farthest-point-sampled conformers.
+    """Build one pdb's `.pt` contents: a pool of `pool_size` conformers drawn from *every*
+    trajectory in ``group_names`` (replicas pooled, the whole trajectory -- not restricted to the
+    sheaf model's frame windows), so the pool may mix replicas. A replica whose residue sequence
+    differs from the first one is left out with a warning rather than mixed in.
 
-    Rather than committing to exactly `k` conformers here, we save a slightly larger pool and
-    let `ProteinGraphFeaturiserSingleChain.get_entries` (already implemented in DynamicMPNN)
+    ``selection`` picks the pool:
+
+    * ``"fps"`` -- farthest-point sampling on 1 - TM over every `course_grain`-th frame: the
+      most structurally distinct frames. The pool's TM matrix is saved, so the featuriser also
+      draws its k-of-pool by TM dissimilarity.
+    * ``"uniform"`` -- `pool_size` frames drawn uniformly at random (without replacement) from
+      *all* frames of all replicas, seeded per protein from ``(seed, pdb_id)`` so the pool is
+      reproducible. No TM-score is computed (`course_grain` is unused) and none is saved, so
+      the featuriser's k-of-pool draw falls back to `random.sample` -- uniform at both stages.
+      This is the control for what the structure-aware selection itself is worth.
+
+    Rather than committing to exactly `k` conformers here, we save a larger pool and let
+    `ProteinGraphFeaturiserSingleChain.get_entries` (already implemented in DynamicMPNN)
     subsample `k` of them at train/val time -- exactly how the multi-chain codnas pipeline
     defers pair/subset selection to the featurizer instead of preprocessing.
+
+    Returns ``(ensemble, is_flat)``; ``is_flat`` needs the TM matrix, so it is always False
+    for ``"uniform"``.
     """
-    coords_ds = h5_file[group_name + "/coordinates"]  # num_res, T, num_atoms, 3
-    # Units are read off the store rather than assumed: ATLAS is nm, mdCATH is already A.
-    to_angstrom = detect_coord_scale(coords_ds)
+    if selection not in FRAME_SELECTIONS:
+        raise ValueError(f"selection must be one of {FRAME_SELECTIONS}, got {selection!r}")
+    residues, replicas = _read_replicas(h5_file, group_names, pdb_id)
+    used_groups = [g for g, _, _ in replicas]
 
-    coarse_coords = (torch.from_numpy(coords_ds[:, ::course_grain]).permute(1, 0, 2, 3).float()
-                     * to_angstrom)
+    if selection == "fps":
+        candidates, coarse_blocks = [], []
+        for g, (_, coords_ds, to_angstrom) in enumerate(replicas):
+            candidates.extend((g, f) for f in range(0, coords_ds.shape[1], course_grain))
+            coarse_blocks.append(torch.from_numpy(coords_ds[:, ::course_grain]).permute(1, 0, 2, 3).float()
+                                 * to_angstrom)
+        coarse_coords = torch.cat(coarse_blocks)  # candidates, num_res, num_atoms, 3
 
-    tm_matrix = compute_pairwise_tm(coarse_coords)
-    off_diagonal = ~torch.eye(tm_matrix.shape[0], dtype=torch.bool)
-    # TM >= 0.9 between every pair of frames means the trajectory never left its starting fold.
-    is_flat = bool(off_diagonal.any() and tm_matrix[off_diagonal].min().item() >= 0.9)
+        tm_matrix = compute_pairwise_tm(coarse_coords)
+        off_diagonal = ~torch.eye(tm_matrix.shape[0], dtype=torch.bool)
+        # TM >= 0.9 between every pair of frames means the trajectory never left its starting fold.
+        is_flat = bool(off_diagonal.any() and tm_matrix[off_diagonal].min().item() >= 0.9)
 
-    coarse_states = farthest_point_sample(1.0 - tm_matrix, pool_size)
-    # `farthest_point_sample` returns the pool in selection (most-distinct-first) order; sort
-    # for a stable, chronological pool, and carry the same permutation into the TM sub-matrix
-    # so `tm_scores[i, j]` still refers to `cluster_members[i]` / `cluster_members[j]`.
-    pool_order = sorted(int(c) for c in coarse_states)
-    real_frame_idx = [c * course_grain for c in pool_order]
-    pool_tm = tm_matrix[torch.tensor(pool_order)][:, torch.tensor(pool_order)]
+        coarse_states = farthest_point_sample(1.0 - tm_matrix, pool_size)
+        # `farthest_point_sample` returns the pool in selection (most-distinct-first) order; sort
+        # for a stable pool in (replica, time) order -- candidates are laid out replica by
+        # replica, frame by frame -- and carry the same permutation into the TM sub-matrix so
+        # `tm_scores[i, j]` still refers to `cluster_members[i]` / `cluster_members[j]`.
+        pool_order = sorted(int(c) for c in coarse_states)
+        pool_tm = tm_matrix[torch.tensor(pool_order)][:, torch.tensor(pool_order)]
+        # Already read (and unit-scaled) for the TM pass: candidate c is row c of coarse_coords.
+        pool = [(candidates[c], coarse_coords[c].numpy()) for c in pool_order]
+    else:
+        candidates = [(g, f) for g, (_, coords_ds, _) in enumerate(replicas) for f in range(coords_ds.shape[1])]
+        rng = np.random.default_rng([seed, zlib.crc32(pdb_id.encode())])
+        picks = sorted(rng.choice(len(candidates), size=min(pool_size, len(candidates)), replace=False).tolist())
+        chosen = [candidates[c] for c in picks]  # (replica, time) order
+        pool = []
+        for g, (_, coords_ds, to_angstrom) in enumerate(replicas):
+            frames = [f for gg, f in chosen if gg == g]
+            if frames:  # h5py fancy indexing wants increasing indices -- `chosen` is sorted
+                block = np.asarray(coords_ds[:, frames], dtype=np.float32) * np.float32(to_angstrom)
+                pool.extend(((g, f), block[:, i]) for i, f in enumerate(frames))
+        pool_tm, is_flat = None, False
 
-    residue_type = residues_to_type_ids(h5_file[group_name + "/residues"][:])
-    pool_frames = coords_ds[:, real_frame_idx] * to_angstrom  # num_res, pool, num_atoms, 3
-
-    pyg_dict = {}
-    for pool_pos, frame_idx in enumerate(real_frame_idx):
-        pyg_dict[f"{pdb_id}_frame{frame_idx}"] = frame_to_pyg_data(pool_frames[:, pool_pos], residue_type)
+    residue_type = residues_to_type_ids(residues)
+    pyg_dict, pool_sources = {}, []
+    for (g, frame_idx), frame in pool:
+        pyg_dict[f"{pdb_id}_r{g}_frame{frame_idx}"] = frame_to_pyg_data(frame, residue_type)
+        pool_sources.append((used_groups[g], frame_idx))
 
     # `tm_scores` + `tm_score_representatives` are the two fields
     # `ProteinGraphFeaturiserSingleChain.get_entries` looks for: with them present it draws
     # the k conformers it trains on by TM dissimilarity (its own
-    # `compute_sequential_probabilities`), and without them it falls back to `random.sample`.
-    # Saving them here is what puts the final k-of-pool selection on DynamicMPNN's own TM
-    # machinery instead of an RMSD proxy.
-    ensemble = Data(pyg_dict=pyg_dict, cluster_members=list(pyg_dict.keys()),
-                    tm_scores=pool_tm, tm_score_representatives=list(pyg_dict.keys()))
-    return ensemble, is_flat
+    # `compute_sequential_probabilities`), and without them (uniform selection) it falls back
+    # to `random.sample`.
+    # `source_groups` / `pool_sources` record where each pool frame came from; `selection`,
+    # `pool_size` and `course_grain` are what build_processed_dataset's `needs_rebuild` checks
+    # a cached pool against.
+    fields = dict(pyg_dict=pyg_dict, cluster_members=list(pyg_dict.keys()),
+                  source_groups=used_groups, pool_sources=pool_sources,
+                  selection=selection, pool_size=int(pool_size),
+                  course_grain=int(course_grain) if selection == "fps" else None)
+    if pool_tm is not None:
+        fields.update(tm_scores=pool_tm, tm_score_representatives=list(pyg_dict.keys()))
+    return Data(**fields), is_flat
+
+
+def _default_prep_workers() -> int:
+    """CPUs this job may use: HTCondor's request_cpus (exported as OMP_NUM_THREADS), else the
+    affinity mask -- never the whole machine's core count."""
+    try:
+        return max(1, int(os.environ["OMP_NUM_THREADS"]))
+    except (KeyError, ValueError):
+        return max(1, min(len(os.sched_getaffinity(0)), 8))
+
+
+# Per-worker state for `_build_one` (one h5 handle per process).
+_PREP = {}
+
+
+def _init_prep_worker(traj_h5_path, processed_dir, pool_size, course_grain, selection):
+    _PREP.update(h5=h5py.File(traj_h5_path, "r"), processed_dir=processed_dir,
+                 pool_size=pool_size, course_grain=course_grain, selection=selection)
+
+
+def _build_one(job):
+    """Build and save one protein's pool. Returns ``(pdb_id, is_flat, error)``."""
+    pdb_id, group_names = job
+    try:
+        ensemble, is_flat = build_ensemble(_PREP["h5"], group_names, pdb_id, _PREP["pool_size"],
+                                           _PREP["course_grain"], _PREP["selection"])
+        path = _PREP["processed_dir"] / f"{pdb_id}.pt"
+        torch.save(ensemble, str(path) + ".tmp")
+        os.replace(str(path) + ".tmp", path)
+        return pdb_id, is_flat, None
+    except Exception as exc:  # noqa: BLE001 -- reported by the caller, the protein is skipped
+        return pdb_id, False, str(exc)
 
 
 def build_processed_dataset(
@@ -327,15 +451,26 @@ def build_processed_dataset(
     pool_size: int,
     course_grain: int,
     force_rebuild: bool,
+    workers: int = None,
+    selection: str = "fps",
 ) -> None:
+    """Build the conformer pool of every protein in ``pdb_ids`` that does not have a current
+    one in ``processed_dir`` -- ``workers`` proteins in parallel (default: the job's CPUs).
+    ``selection`` is `build_ensemble`'s ("fps" or "uniform"). A cached pool built with a
+    different selection, pool size or (fps) course grain is rebuilt."""
     processed_dir.mkdir(parents=True, exist_ok=True)
+    workers = workers or _default_prep_workers()
 
     def needs_rebuild(pdb_id):
         path = processed_dir / f"{pdb_id}.pt"
         if force_rebuild or not path.exists():
             return True
         try:
-            return getattr(torch.load(path, weights_only=False), "tm_scores", None) is None
+            ensemble = torch.load(path, weights_only=False)
+            built_with = (getattr(ensemble, "selection", None), getattr(ensemble, "pool_size", None),
+                          getattr(ensemble, "course_grain", None))
+            wanted = (selection, int(pool_size), int(course_grain) if selection == "fps" else None)
+            return built_with != wanted
         except Exception:
             return True
 
@@ -345,20 +480,42 @@ def build_processed_dataset(
         return
     logger.info(f"Building {len(pending)}/{len(pdb_ids)} ensembles into {processed_dir}")
 
-    flat_trajectories = []
     with h5py.File(traj_h5_path, "r") as h5_file:
         group_lookup = index_h5_groups(h5_file)
+    jobs = []
+    for pdb_id in pending:
+        group_names = resolve_group(pdb_id, group_lookup)
+        if not group_names:
+            logger.warning(f"{pdb_id}: no matching trajectory group in {traj_h5_path}, skipping.")
+            continue
+        jobs.append((pdb_id, group_names))
 
-        for pdb_id in tqdm(pending, desc="Building conformer ensembles"):
-            group_name = resolve_group(pdb_id, group_lookup)
-            if group_name is None:
-                logger.warning(f"{pdb_id}: no matching trajectory group in {traj_h5_path}, skipping.")
-                continue
-
-            ensemble, is_flat = build_ensemble(h5_file, group_name, pdb_id, pool_size, course_grain)
-            torch.save(ensemble, processed_dir / f"{pdb_id}.pt")
-            if is_flat:
+    init_args = (traj_h5_path, processed_dir, pool_size, course_grain, selection)
+    flat_trajectories, failed = [], {}
+    if workers > 1:
+        import multiprocessing
+        pool = multiprocessing.get_context("fork").Pool(workers, initializer=_init_prep_worker,
+                                                        initargs=init_args)
+        results = pool.imap_unordered(_build_one, jobs, chunksize=4)
+    else:
+        pool = None
+        _init_prep_worker(*init_args)
+        results = map(_build_one, jobs)
+    try:
+        for pdb_id, is_flat, error in tqdm(results, total=len(jobs),
+                                           desc=f"Building conformer ensembles ({workers} workers)"):
+            if error is not None:
+                failed[pdb_id] = error
+            elif is_flat:
                 flat_trajectories.append(pdb_id)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+        elif "h5" in _PREP:
+            _PREP.pop("h5").close()
+    for pdb_id, error in failed.items():
+        logger.warning(f"{pdb_id}: building its conformer pool failed ({error}), skipping.")
 
     if flat_trajectories:
         logger.warning(
@@ -437,9 +594,9 @@ def filter_by_length(pdb_ids: list, traj_h5_path: Path, max_length: int) -> list
         group_lookup = index_h5_groups(h5_file)
         lengths = {}
         for pdb_id in pdb_ids:
-            group_name = resolve_group(pdb_id, group_lookup)
-            if group_name is not None:
-                lengths[pdb_id] = h5_file[group_name + "/residues"].shape[0]
+            group_names = resolve_group(pdb_id, group_lookup)
+            if group_names:
+                lengths[pdb_id] = h5_file[group_names[0] + "/residues"].shape[0]
 
     # Ids with no trajectory group keep a length of 0 and pass here; `build_processed_dataset`
     # is the one that warns about and skips them.
@@ -526,6 +683,50 @@ class PdbTrackingFeaturiser:
 
 
 
+def _protein_seed(seed: int, pdb_code: str) -> int:
+    """A fixed per-protein seed: independent of split order, batch layout and worker."""
+    return (int(seed) * 1_000_003 + zlib.crc32(pdb_code.encode())) % (2 ** 31)
+
+
+def _featurise_seeded(featuriser, protein, pdb_code, seed):
+    """``featuriser(protein)`` with python/numpy/torch RNGs seeded by ``seed`` -- the featuriser
+    draws its k-of-pool with `random` / `np.random` -- then restored, so the caller's RNG
+    streams (e.g. training in the main process) are left exactly where they were."""
+    states = random.getstate(), np.random.get_state(), torch.get_rng_state()
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    try:
+        return featuriser(protein, pdb_code=pdb_code)
+    finally:
+        random.setstate(states[0])
+        np.random.set_state(states[1])
+        torch.set_rng_state(states[2])
+
+
+def _load_featurisable(pdb_codes, featuriser, processed_dir, desc, seed=None):
+    """Load each protein's raw conformer pool and keep the ones the featuriser accepts.
+
+    Only the raw pools are kept (small: coordinates of `--pool-size` frames). The featurised
+    graph is NOT kept -- with k conformers stacked on every edge it is tens of MB per protein,
+    which over a whole mdCATH split runs past 100 GB of RAM -- so this featurises once just to
+    find rejections and throws the result away."""
+    proteins, kept = [], []
+    for pdb_code in tqdm(pdb_codes, desc=desc):
+        path = processed_dir / f"{pdb_code}.pt"
+        if not path.exists():
+            continue  # build_processed_dataset already warned about it
+        protein = torch.load(path, weights_only=False)
+        featurised = (featuriser(protein, pdb_code=pdb_code) if seed is None else
+                      _featurise_seeded(featuriser, protein, pdb_code, _protein_seed(seed, pdb_code)))
+        if featurised is None:
+            logger.warning(f"Skipping {pdb_code}: featuriser rejected it.")
+            continue
+        proteins.append(protein)
+        kept.append(pdb_code)
+    return proteins, kept
+
+
 class ResamplingDataset(torch.utils.data.Dataset):
     """Training split that re-featurises each protein on every `__getitem__`.
 
@@ -541,32 +742,60 @@ class ResamplingDataset(torch.utils.data.Dataset):
     Proteins the featuriser rejects are dropped once, up front: `safe_collate` hard-errors on
     a `None` sample, so one must never reach the loader. A rejection is a property of the
     protein (too short / no valid coordinates), not of which conformers were drawn, so a
-    protein that survives the up-front pass survives later draws too; if one ever does not, it
-    falls back to its up-front featurisation rather than taking down the job.
+    protein that survives the up-front pass survives later draws too; if one ever does not,
+    the draw is retried a few times before the job is stopped. (No featurised copy is kept
+    as a fallback: at k=20 those copies alone exceeded the job's 128 GB on mdCATH.)
     """
+
+    MAX_REDRAWS = 5
 
     def __init__(self, pdb_codes, featuriser, processed_dir):
         self.featuriser = featuriser
-        self.proteins, self.fallback, self.pdb_codes = [], [], []
-        for pdb_code in tqdm(pdb_codes, desc="Loading train ensembles"):
-            path = processed_dir / f"{pdb_code}.pt"
-            if not path.exists():
-                continue  # build_processed_dataset already warned about it
-            protein = torch.load(path, weights_only=False)
-            featurised = self.featuriser(protein, pdb_code=pdb_code)
-            if featurised is None:
-                logger.warning(f"Skipping train protein {pdb_code}: featuriser rejected it.")
-                continue
-            self.proteins.append(protein)
-            self.fallback.append(featurised)
-            self.pdb_codes.append(pdb_code)
+        self.proteins, self.pdb_codes = _load_featurisable(
+            pdb_codes, featuriser, processed_dir, "Loading train ensembles")
 
     def __len__(self):
         return len(self.proteins)
 
     def __getitem__(self, idx):
-        featurised = self.featuriser(self.proteins[idx], pdb_code=self.pdb_codes[idx])
-        return featurised if featurised is not None else self.fallback[idx]
+        for _ in range(self.MAX_REDRAWS):
+            featurised = self.featuriser(self.proteins[idx], pdb_code=self.pdb_codes[idx])
+            if featurised is not None:
+                return featurised
+        raise RuntimeError(f"{self.pdb_codes[idx]}: featuriser rejected {self.MAX_REDRAWS} "
+                           f"draws in a row after accepting it up front")
+
+
+class FixedDrawDataset(torch.utils.data.Dataset):
+    """Val/test split featurised on demand, but always to the same input.
+
+    Replaces `PTFileDataset(in_memory=True)`, which featurised every protein once and kept the
+    result -- the same inputs every epoch, but tens of MB per protein at k=20. Here only the
+    raw pools are kept, and each `__getitem__` re-featurises with the RNGs seeded from
+    ``(seed, pdb_code)`` (`_featurise_seeded`), so a protein's k-of-pool draw is identical in
+    every epoch, every worker and every run with the same seed. Val/test featurisers add no
+    coordinate noise, so the draw is the only randomness.
+
+    ``pdb_codes`` (after construction) lists the kept proteins in dataset order -- what
+    `run_validation` labels each batch's samples with.
+    """
+
+    def __init__(self, pdb_codes, featuriser, processed_dir, seed, desc):
+        self.featuriser = featuriser
+        self.seed = seed
+        self.proteins, self.pdb_codes = _load_featurisable(
+            pdb_codes, featuriser, processed_dir, desc, seed=seed)
+
+    def __len__(self):
+        return len(self.proteins)
+
+    def __getitem__(self, idx):
+        pdb_code = self.pdb_codes[idx]
+        featurised = _featurise_seeded(self.featuriser, self.proteins[idx], pdb_code,
+                                       _protein_seed(self.seed, pdb_code))
+        if featurised is None:
+            raise RuntimeError(f"{pdb_code}: featuriser rejected the same seeded draw it accepted up front")
+        return featurised
 
 
 class EarlyStopping:
@@ -696,7 +925,14 @@ def parse_args():
                          help="Drop proteins longer than this many residues, the cutoff MapDiff and "
                               "PiFold also apply (lib/dataset_splits.MAX_LENGTH). Pass 0 to disable.")
     parser.add_argument("--k", type=int, default=2, help="conformers sampled per protein at train/val time")
-    parser.add_argument("--pool-size", type=int, default=10, help="conformer pool saved per protein's .pt file")
+    parser.add_argument("--pool-size", type=int, default=64,
+                        help="conformer pool saved per protein's .pt file; keep it well above --k so "
+                             "each training draw of k is a genuinely different subset")
+    parser.add_argument("--frame-selection", choices=FRAME_SELECTIONS, default="fps",
+                        help="how the pool is chosen: 'fps' = farthest-point sampling on TM-score "
+                             "(the most structurally distinct frames; k-of-pool also drawn by TM "
+                             "dissimilarity), 'uniform' = frames drawn uniformly at random from every "
+                             "frame of every replica, no TM-score (the control for 'fps')")
     parser.add_argument("--course-grain", type=int, default=None,
                         help="time subsampling for the pairwise-TM matrix (default: "
                              f"{DEFAULT_COURSE_GRAIN}, keyed on --ds-name)")
@@ -753,8 +989,10 @@ def main():
     # Keyed by the dataset build (mdcath320 vs mdcath450, ...), not just ds_name: the cached
     # ensembles come from the trajectory store, so builds must not share a cache.
     ds_tag = dataset_splits.dataset_tag(args.ds_name, traj_h5)
-    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{ds_tag}")
-    run_name = args.run_name or f"DynamicMPNN_{ds_tag}"
+    # One directory per selection mode, so switching modes never mixes (or rebuilds) pools.
+    selection_suffix = "" if args.frame_selection == "fps" else f"_{args.frame_selection}"
+    processed_dir = args.processed_dir or (THIS_DIR / f"processed_data_{ds_tag}{selection_suffix}")
+    run_name = args.run_name or f"DynamicMPNN_{ds_tag}{selection_suffix}"
 
     # set up wandb
     wandb.login(key=os.getenv("WANDB_KEY"))
@@ -770,6 +1008,7 @@ def main():
             "max_length": args.max_length,
             "k": args.k,
             "pool_size": args.pool_size,
+            "frame_selection": args.frame_selection,
             "course_grain": args.course_grain,
             "batch_size": args.batch_size,
             "effective_batch_size": args.effective_batch_size,
@@ -809,6 +1048,7 @@ def main():
         pool_size=args.pool_size,
         course_grain=args.course_grain,
         force_rebuild=args.force_rebuild,
+        selection=args.frame_selection,
     )
     # A pool shorter than k is padded with duplicated frames, silently -- fail instead.
     check_pool_sizes(processed_dir, train_pdbs + val_pdbs + test_pdbs, args.k, args.course_grain)
@@ -848,8 +1088,8 @@ def main():
 
     # Re-featurised on every draw: a fresh TM-weighted draw of k conformers from the pool and
     # fresh train-time coordinate noise each time a protein comes up, as upstream trained.
-    # Val/test below stay in_memory=True -- featurised once (seeded), no noise -- so every
-    # epoch is scored on the same inputs.
+    # Val/test below are also featurised on demand (nothing featurised is held in RAM), but
+    # with a fixed per-protein seed and no noise -- so every epoch is scored on the same inputs.
     train_dataset = ResamplingDataset(
         train_pdbs,
         hydra.utils.instantiate(features_cfg, split="train", device="cpu", distance_eps=DISTANCE_EPS),
@@ -857,29 +1097,17 @@ def main():
     )
     if len(train_dataset) == 0:
         raise RuntimeError("No training protein survived featurisation.")
-    # Wrapped in PdbTrackingFeaturiser so run_validation can label each batch's samples with
-    # the pdb_code they came from.
-    val_tracker = PdbTrackingFeaturiser(
-        hydra.utils.instantiate(features_cfg, split="val", device="cpu", distance_eps=DISTANCE_EPS))
-    val_dataset = PTFileDataset(
-        pdb_codes=val_pdbs,
-        cfg_features=val_tracker,
-        processed_dir=processed_dir,
-        split="val",
-        in_memory=True,
-    )
-    val_pdb_order = val_tracker.kept_pdb_codes
+    # `pdb_codes` of each is the kept proteins in dataset order, which run_validation labels
+    # each batch's samples with (the loaders below do not shuffle).
+    val_dataset = FixedDrawDataset(
+        val_pdbs, hydra.utils.instantiate(features_cfg, split="val", device="cpu", distance_eps=DISTANCE_EPS),
+        processed_dir, args.seed, "Loading val ensembles")
+    val_pdb_order = val_dataset.pdb_codes
 
-    test_tracker = PdbTrackingFeaturiser(
-        hydra.utils.instantiate(features_cfg, split="test", device="cpu", distance_eps=DISTANCE_EPS))
-    test_dataset = PTFileDataset(
-        pdb_codes=test_pdbs,
-        cfg_features=test_tracker,
-        processed_dir=processed_dir,
-        split="test",
-        in_memory=True,
-    )
-    test_pdb_order = test_tracker.kept_pdb_codes
+    test_dataset = FixedDrawDataset(
+        test_pdbs, hydra.utils.instantiate(features_cfg, split="test", device="cpu", distance_eps=DISTANCE_EPS),
+        processed_dir, args.seed, "Loading test ensembles")
+    test_pdb_order = test_dataset.pdb_codes
 
     # The proteins actually scored, after the featurizer dropped whatever it could not use.
     # MapDiff and PiFold log the same summary key, so the three held-out sets can be diffed

@@ -254,14 +254,33 @@ class DecoderNodeBatching(torch.nn.Module):
     `num_decoder_nodes` (set per protein by the featuriser) is the pooled count, so rewrite
     `batch.batch` from it after the forward pass. run_validation re-reads the attribute, so it
     sees the corrected segmentation.
+
+    It also decides WHICH pass produces the logits. The released checkpoints record no
+    `pooling_strategy`, so the model runs its pair `forward()`, which is teacher-forced: the
+    decoder embeds the TRUE sequence (`h_S = W_s(seq)`, causally masked), so the logits at
+    residue i are conditioned on the native residues before it. That is the right pass for
+    the training loss, but scored as-is it leaks the native sequence into every "design" --
+    inflated recovery, and `pred_seqs` that are not designs at all (refolding them would
+    flatter scRMSD / the AF3 pullback). In eval mode the logits therefore come from the
+    model's own autoregressive decoder (`sample_v3`), conditioned only on residues the model
+    itself chose. Decoding is greedy (see EVAL_TEMPERATURE), so the design run_validation
+    takes as the argmax of these logits is exactly the sequence the decoder conditioned on.
     """
+
+    # `sample_v3` draws `Categorical(logits / temperature)`; at this temperature the draw is the
+    # argmax (logits are clamped to +-1e4 first, so nothing overflows), making the design
+    # deterministic and identical to argmax(logits), like every other model's design.
+    EVAL_TEMPERATURE = 1e-6
 
     def __init__(self, model):
         super().__init__()
         self.model = model
 
     def forward(self, batch):
-        logits, valid_mask = self.model(batch)
+        if self.training:
+            logits, valid_mask = self.model(batch)
+        else:
+            logits, valid_mask = self.sample_logits(batch)
 
         counts = batch.num_decoder_nodes
         if not torch.is_tensor(counts):
@@ -273,6 +292,33 @@ class DecoderNodeBatching(torch.nn.Module):
             raise RuntimeError(
                 f"num_decoder_nodes sums to {batch.batch.numel()} but the model returned "
                 f"{logits.shape[0]} logits; the per-protein grouping would be wrong.")
+        return logits, valid_mask
+
+    @torch.no_grad()
+    def sample_logits(self, batch):
+        """Greedy autoregressive decode -> (logits, valid_mask) laid out like `forward()`'s.
+
+        One sample per protein. `sample_v3` hands back the pooled decoder nodes with their
+        index into `batch.seq`, so the logits are scattered back onto that indexing rather than
+        assumed to be in order.
+        """
+        model = self.model
+        saved = (model.n_samples, model.temperature)
+        model.n_samples, model.temperature = 1, self.EVAL_TEMPERATURE
+        try:
+            _, sampled_logits, indices, _ = model.sample_v3(batch, return_logits=True)
+        finally:
+            model.n_samples, model.temperature = saved
+
+        num_nodes = batch.seq.shape[0]
+        logits = sampled_logits.new_zeros(num_nodes, sampled_logits.shape[-1])
+        logits[indices] = sampled_logits[0]
+        valid_mask = torch.zeros(num_nodes, dtype=torch.bool, device=logits.device)
+        valid_mask[indices] = True
+        if not valid_mask.all():
+            raise RuntimeError(
+                f"sample_v3 decoded {int(valid_mask.sum())}/{num_nodes} residues; the rest would "
+                "be scored on zero logits.")
         return logits, valid_mask
 
 

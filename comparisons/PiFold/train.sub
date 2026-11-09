@@ -8,10 +8,10 @@
 #      and parser.py on top of it at run time, so upstream is never modified.)
 #
 # Dataset: PiFold is a static-structure model, so it trains and evaluates on each
-# protein's *relaxed* structure (API/relaxed_dataset.py). For ATLAS that is the deposited PDB
-# entry, downloaded from RCSB by lib/relaxed_pdb.py and cropped to the residues its MD
-# trajectory covers. For mdCATH it is the CATH domain file itself, from CATH_PDBS below, used
-# whole with no cropping. The split index csv gives the partition.
+# protein's *relaxed* (deposited) PDB entry, downloaded from RCSB by lib/relaxed_pdb.py
+# and cropped to the residues its MD trajectory covers (API/relaxed_dataset.py). The
+# trajectory store is transferred in only to supply those reference residue sequences;
+# the split index csv gives the partition.
 #
 # ATLAS and mdCATH are trained and evaluated SEPARATELY -- one job each, matching
 # scripts/train_residue_classifier.py's --ds-name. ATLAS is the default; for mdCATH:
@@ -32,16 +32,13 @@ ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/s
 # DS_H5                   = $(ResearchDrive)/atlas_data.h5
 # DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 
-DS_NAME                 = MDCATH
-DS_H5                   = $(ResearchDrive)/mdcath_spinet_450_0.h5
-DS_CSV                  = $(ResearchDrive)/mdcath_450_0_top_split.csv
-#
 # DS_NAME                 = MDCATH
-# DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
-#DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topology_split.csv
+# DS_H5                   = $(ResearchDrive)/mdcath_spinet_450_0_v2.h5
+# DS_CSV                  = $(ResearchDrive)/mdcath_450_0_topo_split.csv
 
-# CATH domain structures for mdCATH's relaxed source (train.sh extracts them into pdbs/).
-CATH_PDBS               = $(ResearchDrive)/mdcath_pdbs.tar.gz
+DS_NAME                 = MDCATH
+DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0_v2.h5
+DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topo_split.csv
 
 executable              = train.sh
 # The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
@@ -52,16 +49,18 @@ environment             = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
 # to main.py (see parser.py).
 #
 # $(STRUCTURE_SOURCE) picks what PiFold trains on: 'relaxed' (each protein's deposited RCSB
-# entry, the default) or 'frame' (one random frame of its MD trajectory, lib/traj_frames.py).
-# Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
-STRUCTURE_SOURCE        = frame
-arguments               = --data_name $(DS_NAME) --data_root ./ --structure_source $(STRUCTURE_SOURCE) --batch_size 8 --epoch 100 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt
+# entry, the default), 'frame' (one random frame of its MD trajectory, lib/traj_frames.py), or
+# 'traj' (every frame; valid/test scored by averaging logits across frames, API/traj_dataset.py
+# -- consider adding --frames_per_protein N so an epoch is not num_frames x longer).
+# Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=traj
+STRUCTURE_SOURCE        = traj
+arguments               = --data_name $(DS_NAME) --data_root ./ --structure_source $(STRUCTURE_SOURCE) --batch_size 8 --epoch 200 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt --frames_per_protein 4
 
 # The pristine PiFold tarball, this folder's overlay, the API-key file (train.sh
 # splits the W&B key out of it into wandb_api.txt), lib/{relaxed_pdb,traj_frames,dataset_splits,
 # stats_utils}.py (shared across all models -- see ../../lib), and the dataset's trajectory
 # store + split index.
-transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV), $(CATH_PDBS)
+transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
@@ -80,7 +79,8 @@ request_disk            = 200GB
 # lib/relaxed_pdb.py downloads from files.rcsb.org, so this needs a machine with internet
 # access -- the same one scripts/train_residue_classifier.sub uses. Also only match GPU
 # nodes with a modern-enough driver/CUDA for the cu118 image.
-Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
+#Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
+Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu" || TARGET.GPUs_DeviceName == "NVIDIA H100 80GB HBM3" || TARGET.GPUs_DeviceName == "NVIDIA A100-SXM4-80GB" || TARGET.GPUs_DeviceName == "NVIDIA H200" || TARGET.GPUs_DeviceName == "NVIDIA H200 NVL")
 +WantGPULab             = true
 +GPUJobLength           = "medium"
 

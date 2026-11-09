@@ -29,6 +29,8 @@ from tqdm import tqdm
 from evaluator import Evaluator
 from utils import inf_iterator, enable_dropout, cal_stats_metric
 
+from dataloader.traj_dataset import average_frame_logits
+
 # lib/stats_utils.py is copied in flat next to this file (see ../README.md and
 # train.sh) -- fall back to walking up to a lib/ directory for local/dev runs
 # from inside the source tree.
@@ -151,6 +153,42 @@ class MapDiffTrainer:
         if isinstance(names, str):
             names = [names]
         return list(names)
+
+    def _mc_logits(self, model, g_batch, ipa_batch):
+        """Mean over `ensemble_num` MC-dropout DDIM samples, on CPU (node-major rows)."""
+        g_batch = g_batch.to(self.device)
+        ipa_batch = ipa_batch.to(self.device) if ipa_batch is not None else None
+        ens_logits = []
+        if self.sample_method == 'ddim':
+            for _ in range(self.ensemble_num):
+                logits, _ = model.mc_ddim_sample(g_batch, ipa_batch, diverse=True, step=self.ddim_steps)
+                ens_logits.append(logits)
+        return torch.stack(ens_logits).mean(dim=0).cpu()
+
+    def _eval_batches(self, loader, model, desc):
+        """Yield ``(logits, seq_onehot, batch_idx, names)`` per eval batch, all on CPU.
+
+        A plain loader yields ``(g_batch, ipa_batch)`` (one structure per protein). A
+        frame-ensemble loader (dataloader/traj_dataset.TrajEnsembles + EnsembleCollator, used
+        when ``dataset.all_frames``) yields one protein's frames per step; its logits are the
+        MC-sample mean on every frame, then averaged across frames -- so the metrics below
+        score one frame-averaged prediction per protein either way.
+        """
+        for batch in tqdm(loader, desc=desc, leave=False):
+            if isinstance(batch, dict):
+                # Consume every chunk before reading num_frames/target: OnlineTrajEnsembles fills
+                # them in as its frames are featurized.
+                frame_logits = [self._mc_logits(model, g, ipa) for g, ipa in batch['chunks']]
+                if not frame_logits:
+                    print(f"{batch['name']}: no frame could be featurized, skipping")
+                    continue
+                logits = average_frame_logits(torch.cat(frame_logits), batch['num_frames'])
+                seq = torch.nn.functional.one_hot(batch['target'], num_classes=logits.shape[1]).float()
+                yield logits, seq, np.zeros(seq.shape[0], dtype=np.int64), [batch['name']]
+            else:
+                g_batch, ipa_batch = batch
+                logits = self._mc_logits(model, g_batch, ipa_batch)
+                yield logits, g_batch.x.cpu(), g_batch.batch.cpu().numpy(), self._batch_names(g_batch)
 
     # ------------------------------------------------------------------
     # Stage 1: mask-prior IPA pretraining
@@ -281,26 +319,15 @@ class MapDiffTrainer:
             # confusion matrix and the `pred_seqs` table (see lib/stats_utils.py).
             metrics = ResidueMetrics(three_letter_codes(AMINO_ACIDS), val_name='val')
 
-            for g_batch, ipa_batch in tqdm(self.val_dataloader, desc=f"Epoch {self.epoch} [Val]", leave=False):
-                g_batch = g_batch.to(self.device)
-                ipa_batch = ipa_batch.to(self.device) if ipa_batch is not None else None
-                ens_logits = []
-                if self.sample_method == 'ddim':
-                    for _ in range(self.ensemble_num):
-                        logits, sample_graph = self.model.mc_ddim_sample(g_batch, ipa_batch, diverse=True,
-                                                                          step=self.ddim_steps)
-                        ens_logits.append(logits)
-                ens_logits_tensor = torch.stack(ens_logits)
-                batch_logits = ens_logits_tensor.mean(dim=0).cpu()
+            for batch_logits, batch_seq, batch_idx, batch_names in self._eval_batches(
+                    self.val_dataloader, self.model, f"Epoch {self.epoch} [Val]"):
                 all_logits = torch.cat([all_logits, batch_logits])
-                all_seq = torch.cat([all_seq, g_batch.x.cpu()])
+                all_seq = torch.cat([all_seq, batch_seq])
 
-                batch_idx = g_batch.batch.cpu().numpy()
-                batch_names = self._batch_names(g_batch)
                 for i in range(batch_idx.max() + 1):
                     idx = np.where(batch_idx == i)
                     sample_logits = batch_logits[idx].argmax(dim=1)
-                    sample_seq = g_batch.x.cpu()[idx].argmax(dim=1)
+                    sample_seq = batch_seq[idx].argmax(dim=1)
                     recovery.append(self.evaluator.cal_recovery(sample_logits, sample_seq))
                     metrics.add_protein(batch_logits[idx], sample_seq, pdb_id=batch_names[i],
                                         sequence=''.join(AMINO_ACIDS[j] for j in sample_logits.tolist()))
@@ -405,26 +432,15 @@ class MapDiffTrainer:
             nssr42, nssr62, nssr80, nssr90 = [], [], [], []
             metrics = ResidueMetrics(three_letter_codes(AMINO_ACIDS), val_name='test')
 
-            for g_batch, ipa_batch in tqdm(self.test_dataloader, desc="[Test]"):
-                g_batch = g_batch.to(self.device)
-                ipa_batch = ipa_batch.to(self.device) if ipa_batch is not None else None
-                ens_logits = []
-                if self.sample_method == 'ddim':
-                    for _ in range(self.ensemble_num):
-                        logits, sample_graph = model.mc_ddim_sample(g_batch, ipa_batch, diverse=True,
-                                                                     step=self.ddim_steps)
-                        ens_logits.append(logits)
-                ens_logits_tensor = torch.stack(ens_logits)
-                batch_logits = ens_logits_tensor.mean(dim=0).cpu()
+            for batch_logits, batch_seq, batch_idx, batch_names in self._eval_batches(
+                    self.test_dataloader, model, "[Test]"):
                 all_logits = torch.cat([all_logits, batch_logits])
-                all_seq = torch.cat([all_seq, g_batch.x.cpu()])
+                all_seq = torch.cat([all_seq, batch_seq])
 
-                batch_idx = g_batch.batch.cpu().numpy()
-                batch_names = self._batch_names(g_batch)
                 for i in range(batch_idx.max() + 1):
                     idx = np.where(batch_idx == i)
                     sample_logits = batch_logits[idx].argmax(dim=1)
-                    sample_seq = g_batch.x.cpu()[idx].argmax(dim=1)
+                    sample_seq = batch_seq[idx].argmax(dim=1)
                     sample_nssr42, sample_nssr62, sample_nssr80, sample_nssr90 = self.evaluator.cal_all_blosum_nssr(
                         sample_logits, sample_seq)
                     nssr42.append(sample_nssr42)

@@ -274,6 +274,7 @@ def evaluate_scrmsd(
     pred_indices: List = None,
     ref_indices: List = None,
     device="cpu",
+    save_pdbs=None,
 ):
     """Self-consistency RMSD of each designed sequence against a single reference structure.
 
@@ -289,6 +290,7 @@ def evaluate_scrmsd(
         trajectory's residues, whose deposited structure resolves a different (aligned)
         subset. Default (None) pairs residue i with residue i, which requires the sequence
         and the reference to have the same length.
+    save_pdbs: optional length-B list of paths to write each ESMFold prediction to.
 
     Returns a (B,) cpu tensor of RMSDs, in whatever units `reference_coords` is in
     (Angstroms for lib/relaxed_pdb records, since deposited PDBs are in Angstroms).
@@ -297,7 +299,8 @@ def evaluate_scrmsd(
         raise ValueError("{} sequences vs {} reference structures".format(
             len(sequences), len(reference_coords)))
 
-    pred_coords, _ = fold_sequences(sequences, tokenizer, model, device=device)  # (B, L_max, A, 3)
+    pred_coords, _ = fold_sequences(sequences, tokenizer, model, device=device,
+                                    save_pdbs=save_pdbs)  # (B, L_max, A, 3)
     B, _, num_atoms, _ = pred_coords.shape
 
     selected_pred, selected_ref = [], []

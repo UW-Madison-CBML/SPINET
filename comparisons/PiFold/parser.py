@@ -49,12 +49,23 @@ def create_parser():
                               "whole deposited chains uncropped.")
     parser.add_argument('--pdb_cache', default='', type=str,
                          help='Where downloaded RCSB entries are cached (default: <data_root>/pdb_cache)')
-    parser.add_argument('--cath_dir', default='', type=str,
-                         help='MDCATH relaxed only: directory holding the extracted CATH domain files '
-                              '(mdcath_pdbs.tar.gz), used whole with no cropping (default: <data_root>/pdbs)')
-    parser.add_argument('--structure_source', default='relaxed', choices=['relaxed', 'frame'],
+    parser.add_argument('--structure_source', default='relaxed', choices=['relaxed', 'frame', 'traj'],
                          help="What each protein's coordinates come from: its deposited RCSB entry "
-                              "('relaxed', the default) or one frame of its MD trajectory ('frame')")
+                              "('relaxed', the default), one frame of its MD trajectory ('frame'), or "
+                              "every frame the sheaf model trains on ('traj': train on all of them, score "
+                              "valid/test by averaging logits across each protein's frames -- "
+                              "API/traj_dataset.py, lib/traj_frames.sheaf_frames)")
+    parser.add_argument('--frames_per_protein', default=None, type=int,
+                         help='--structure_source traj only: frames of each protein drawn per training '
+                              'epoch (default: every frame, so an epoch is ~num_frames x longer)')
+    parser.add_argument('--frame_stride', default=1, type=int,
+                         help='--structure_source traj only: use every N-th of the sheaf model\'s frames (1 = match it)')
+    parser.add_argument('--max_frames', default=None, type=int,
+                         help='--structure_source traj only: after striding, at most this many evenly '
+                              'spaced frames per protein (all splits)')
+    parser.add_argument('--eval_chunk_size', default=16, type=int,
+                         help='--structure_source traj only: frames per forward pass when averaging a '
+                              "protein's frame ensemble at valid/test time")
     parser.add_argument('--frame_seed', default=dataset_splits.SEED, type=int,
                          help='--structure_source frame only: seeds the per-protein frame draw')
     parser.add_argument('--frame_index', default=None, type=int,

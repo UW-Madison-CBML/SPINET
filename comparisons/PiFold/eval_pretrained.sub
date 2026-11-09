@@ -1,0 +1,74 @@
+# CHTC HTCondor submit file: zero-shot evaluation of PRE-TRAINED PiFold weights (CATH4.2,
+# from the ProteinInvBench model zoo) on our held-out split -- no training. See
+# eval_pretrained.py's docstring. train.sub is the other half of the comparison (PiFold
+# trained from scratch on our data).
+#
+# Same image and pristine PiFold.tar.gz as train.sub. Defaults to the mdCATH 320 K store with
+# the cleaned topology split; for ATLAS:
+#
+#   condor_submit eval_pretrained.sub DS_NAME=ATLAS \
+#       DS_H5='$(ResearchDrive)/atlas_data.h5' \
+#       DS_CSV='$(ResearchDrive)/atlas_cross_val_index.csv'
+#
+# Other knobs: SPLIT=valid, STRUCTURE_SOURCE=frame, WEIGHTS='$(ResearchDrive)/weights/...'.
+# (Each is set under `if ! defined` -- condor_submit applies command-line macros BEFORE
+# parsing this file, so a bare assignment here would silently win over the override.)
+#
+# Submit:
+#   mkdir -p logs && condor_submit eval_pretrained.sub
+
+universe                = docker
+docker_image            = cmikulski4/pifold:v5
+
+ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+if ! defined DS_NAME
+  DS_NAME               = MDCATH
+endif
+if ! defined DS_H5
+  DS_H5                 = $(ResearchDrive)/mdcath_spinet_320_0.h5
+endif
+if ! defined DS_CSV
+  DS_CSV                = $(ResearchDrive)/mdcath_clean_topo_split.csv
+endif
+if ! defined WEIGHTS
+  WEIGHTS               = $(ResearchDrive)/weights/model_zoom/CATH4.2/PiFold/checkpoint.pth
+endif
+if ! defined SPLIT
+  SPLIT                 = test
+endif
+if ! defined STRUCTURE_SOURCE
+  STRUCTURE_SOURCE      = relaxed
+endif
+
+executable              = eval_pretrained.sh
+# The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
+# mdCATH build / split DS_H5 / DS_CSV point at instead of its fallback names.
+environment             = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
+# HTCondor drops the weights flat into the scratch dir, and eval_pretrained.sh copies them
+# into PiFold/ next to the script.
+arguments               = --checkpoint ./$Fnx(WEIGHTS) --data_name $(DS_NAME) --data_root ./ --split $(SPLIT) --structure_source $(STRUCTURE_SOURCE) --res_dir ./results --wandb_key_file ./wandb_api.txt --scrmsd 0
+
+transfer_input_files    = eval_pretrained.sh, eval_pretrained.py, PiFold.tar.gz, API, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, ../../lib/scrmsd.py, $(WEIGHTS), $(DS_H5), $(DS_CSV)
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_output_files   = PiFold/results
+transfer_output_remaps  = "PiFold/results = ../results/pretrained_$(DS_NAME)_$(SPLIT)_$(STRUCTURE_SOURCE)_$(Cluster)_$(Process)"
+
+log                     = logs/eval_pretrained_$(DS_NAME)_$(Cluster)_$(Process).log
+output                  = logs/eval_pretrained_$(DS_NAME)_$(Cluster)_$(Process).out
+error                   = logs/eval_pretrained_$(DS_NAME)_$(Cluster)_$(Process).err
+
+request_gpus            = 1
+request_cpus            = 4
+request_memory          = 64GB
+request_disk            = 128GB
+
+# RCSB downloads, ESMFold weights from Hugging Face, and W&B all need internet -- same
+# machine train.sub uses.
+Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu")
++WantGPULab             = true
++GPUJobLength           = "short"
+
+queue 1

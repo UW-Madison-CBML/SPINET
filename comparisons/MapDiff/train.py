@@ -6,6 +6,11 @@ Replaces the old two-script pipeline (`mask_ipa_pretrain.py` + `main.py`,
 each with its own comet_ml/wandb run) -- pass `prior_model.path=<ckpt>` to
 skip stage 1 and load an already-trained mask-prior IPA checkpoint instead.
 
+`dataset.all_frames=true` trains on every MD frame instead (dataloader/traj_dataset.py) and
+validates/tests on each protein's frame ensemble with the logits averaged across frames. Frames
+are featurized on the fly from the trajectory store (`dataset.online_featurize`, the default)
+or read from data/graphs_from_traj.py's saved graphs (`dataset.online_featurize=false`).
+
 Usage:
     python train.py --config-name=train dataset=atlas wandb.use=True
 """
@@ -21,6 +26,8 @@ from torch.utils.data import DataLoader
 
 from dataloader.collator import CollatorDiff, CollatorIPAPretrain
 from dataloader.large_dataset import Cath
+from dataloader.traj_dataset import (EnsembleCollator, OnlineTrajEnsembles, OnlineTrajFrames, TrajEnsembles,
+                                     TrajFrames, compute_marginal)
 from dataloader.pyg_inspector_compat import patch_inspector_distribute
 from dataloader.pyg_safe_globals import allow_pyg_data_pickles
 from model.egnn_pytorch.egnn_net import EGNN_NET
@@ -135,7 +142,7 @@ def main(cfg: DictConfig):
             config=OmegaConf.to_container(cfg, resolve=True),
         )
         artifact = wandb.Artifact(name="scripts", type="model_file")
-        for dependency in (__file__, "trainer.py", "dataloader/large_dataset.py", "model/ipa/ipa_net.py"):
+        for dependency in (__file__, "trainer.py", "dataloader/large_dataset.py", "dataloader/traj_dataset.py", "model/ipa/ipa_net.py"):
             if os.path.exists(dependency):
                 artifact.add_file(os.path.abspath(dependency))
         wandb_run.log_artifact(artifact)
@@ -148,7 +155,54 @@ def main(cfg: DictConfig):
     if cfg.dataset.name not in ('CATH', 'ATLAS', 'MDCATH'):
         raise ValueError(f"unknown dataset {cfg.dataset.name}")
 
-    if cfg.dataset.name == 'CATH':
+    # `dataset.all_frames`: graphs from data/graphs_from_traj.py, one per MD frame. Train on
+    # every frame (`frames_per_protein` drawn per protein per epoch), and validate/test on each
+    # protein's frame ensemble with the logits averaged across frames (trainer._eval_batches).
+    all_frames = bool(cfg.dataset.get('all_frames', False))
+    if all_frames and cfg.dataset.name == 'CATH':
+        raise ValueError('dataset.all_frames needs an MD dataset (atlas or mdcath), not CATH')
+
+    online = all_frames and bool(cfg.dataset.get('online_featurize', True))
+    loader_workers = int(cfg.dataset.get('loader_workers') or 16)
+    if all_frames:
+        ds_name = SPLIT_DATASETS[cfg.dataset.name]
+        train_ids, val_ids, test_ids = dataset_splits.get_splits(
+            ds_name, cfg.dataset.get('index_csv') or None,
+            val_fold=cfg.dataset.get('val_fold', dataset_splits.DEFAULT_VAL_FOLD),
+            test_fold=cfg.dataset.get('test_fold', dataset_splits.DEFAULT_TEST_FOLD))
+        eval_max_frames = cfg.dataset.get('eval_max_frames')
+        # Validation runs every epoch, so it gets its own (smaller) cap; null = eval_max_frames.
+        val_max_frames = cfg.dataset.get('val_max_frames') or eval_max_frames
+        chunk_size = cfg.dataset.get('eval_chunk_size')
+        if online:
+            # Each frame is featurized in the DataLoader workers when drawn, then discarded.
+            traj_h5 = cfg.dataset.get('traj_h5') or dataset_splits.default_h5(ds_name)
+            max_length = cfg.dataset.max_length
+            train_dataset = OnlineTrajFrames(traj_h5, train_ids, ds_name, max_length=max_length)
+            val_dataset = OnlineTrajEnsembles(
+                OnlineTrajFrames(traj_h5, val_ids, ds_name, max_length=max_length, max_frames=val_max_frames,
+                                 fallback=False), chunk_size, loader_workers)
+            test_dataset = OnlineTrajEnsembles(
+                OnlineTrajFrames(traj_h5, test_ids, ds_name, max_length=max_length, max_frames=eval_max_frames,
+                                 fallback=False), chunk_size, loader_workers)
+            if not os.path.exists(cfg.dataset.marginal_train_dir):
+                compute_marginal(train_dataset, cfg.dataset.marginal_train_dir, loader_workers)
+        else:
+            train_dataset = TrajFrames(cfg.dataset.train_dir, train_ids, max_length=cfg.dataset.max_length)
+            val_dataset = TrajEnsembles(cfg.dataset.val_dir, val_ids, max_length=cfg.dataset.max_length,
+                                        max_frames=val_max_frames)
+            test_dataset = TrajEnsembles(cfg.dataset.test_dir, test_ids, max_length=cfg.dataset.max_length,
+                                         max_frames=eval_max_frames)
+        for name, ds in (('train', train_dataset), ('val', val_dataset), ('test', test_dataset)):
+            if len(ds) == 0:
+                raise FileNotFoundError(
+                    f'{name}: no usable frames -- ' + ('check the trajectory store' if online else
+                    f'run data/graphs_from_traj.py --ds-name {ds_name} first'))
+        train_sampler = train_dataset.sampler(cfg.dataset.get('frames_per_protein'), shuffle=True,
+                                              seed=dataset_splits.SEED)
+        print(f'All-frames training: {len(train_dataset.protein_ids)} train proteins / '
+              f'{len(train_dataset)} frames, {len(train_sampler)} drawn per epoch')
+    elif cfg.dataset.name == 'CATH':
         train_ID = sorted(os.listdir(cfg.dataset.train_dir))
         val_ID = sorted(os.listdir(cfg.dataset.val_dir))
         test_ID = sorted(os.listdir(cfg.dataset.test_dir))
@@ -160,9 +214,11 @@ def main(cfg: DictConfig):
             {'train': cfg.dataset.train_dir, 'val': cfg.dataset.val_dir, 'test': cfg.dataset.test_dir})
         train_ID, val_ID, test_ID = split_ids['train'], split_ids['val'], split_ids['test']
 
-    train_dataset = Cath(train_ID, cfg.dataset.train_dir, max_length=cfg.dataset.max_length)
-    val_dataset = Cath(val_ID, cfg.dataset.val_dir, max_length=cfg.dataset.max_length)
-    test_dataset = Cath(test_ID, cfg.dataset.test_dir, max_length=cfg.dataset.max_length)
+    if not all_frames:
+        train_dataset = Cath(train_ID, cfg.dataset.train_dir, max_length=cfg.dataset.max_length)
+        val_dataset = Cath(val_ID, cfg.dataset.val_dir, max_length=cfg.dataset.max_length)
+        test_dataset = Cath(test_ID, cfg.dataset.test_dir, max_length=cfg.dataset.max_length)
+        train_sampler = None
     print(f'Train on {cfg.dataset.name} dataset with {len(train_dataset)} training data, {len(val_dataset)} '
           f'val data, {len(test_dataset)} test data')
 
@@ -178,17 +234,34 @@ def main(cfg: DictConfig):
     # ---- stage 1: mask-prior IPA pretraining dataloader ----
     mask_collator = CollatorIPAPretrain(candi_rate=cfg.mask_train.candi_rate, mask_rate=cfg.mask_train.mask_rate,
                                         replace_rate=cfg.mask_train.replace_rate, keep_rate=cfg.mask_train.keep_rate)
-    mask_train_loader = DataLoader(train_dataset, batch_size=cfg.mask_train.batch_size, shuffle=True, num_workers=6,
-                                   collate_fn=mask_collator)
+    # With all_frames the sampler does the shuffling (and the per-epoch frame draw); a
+    # DataLoader cannot take both shuffle=True and a sampler.
+    shuffle_train = train_sampler is None
+    # Featurizing on the fly (DSSP per frame) needs more workers to keep the GPU fed.
+    mask_workers = loader_workers if online else 6
+    mask_train_loader = DataLoader(train_dataset, batch_size=cfg.mask_train.batch_size, shuffle=shuffle_train,
+                                   sampler=train_sampler, num_workers=mask_workers, collate_fn=mask_collator)
 
     # ---- stage 2: denoising diffusion dataloaders ----
     diff_collator = CollatorDiff()
-    train_loader = DataLoader(train_dataset, batch_size=cfg.train.batch_size, shuffle=True, num_workers=16,
+    train_loader = DataLoader(train_dataset, batch_size=cfg.train.batch_size, shuffle=shuffle_train,
+                              sampler=train_sampler, num_workers=loader_workers if online else 16,
                               collate_fn=diff_collator)
-    val_loader = DataLoader(val_dataset, batch_size=cfg.train.batch_size, shuffle=False, num_workers=16,
-                            collate_fn=diff_collator)
-    test_loader = DataLoader(test_dataset, batch_size=cfg.train.batch_size, shuffle=False, num_workers=16,
-                             collate_fn=diff_collator)
+    if online:
+        # Already iterables of per-protein ensembles, with their own featurizing workers.
+        val_loader, test_loader = val_dataset, test_dataset
+    elif all_frames:
+        # One protein (all its frames, in chunks of eval_chunk_size) per step.
+        ensemble_collator = EnsembleCollator(chunk_size=cfg.dataset.get('eval_chunk_size'))
+        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4,
+                                collate_fn=ensemble_collator)
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4,
+                                 collate_fn=ensemble_collator)
+    else:
+        val_loader = DataLoader(val_dataset, batch_size=cfg.train.batch_size, shuffle=False, num_workers=16,
+                                collate_fn=diff_collator)
+        test_loader = DataLoader(test_dataset, batch_size=cfg.train.batch_size, shuffle=False, num_workers=16,
+                                 collate_fn=diff_collator)
 
     train_num_steps = len(train_loader) * cfg.train.train_epochs + 1
 

@@ -2,11 +2,11 @@
 
 PiFold is a static-structure inverse-folding model, so by default it is trained and evaluated
 on each protein's deposited PDB entry rather than on a frame pulled out of the MD trajectory.
-For ATLAS, `lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset id
-names, and crops it to the residues the trajectory covers -- using the trajectory's own residue
-list as the reference sequence. For mdCATH, the structure is the CATH domain file itself
-(`relaxed_pdb.load_cath_structures`, read from the extracted `mdcath_pdbs.tar.gz` in
-`cath_dir`), used whole: no download and no cropping.
+`lib/relaxed_pdb.py` downloads the RCSB entry, picks the chain the dataset id names, and crops
+it to the residues the trajectory covers -- using the trajectory's own residue list as the
+reference sequence -- so PiFold sees the same residues as every other model in the comparison.
+For mdCATH, that cropping is also what reduces a deposited chain to the single CATH *domain*
+the `domain` id names (`12asA00` -> entry `12as`, chain `A`, domain 02).
 
 Pass ``structure_source='frame'`` (`--structure_source frame`) to feed it one random frame per
 protein's trajectory instead (`lib/traj_frames.py`), with splits, filtering and featurization
@@ -71,10 +71,11 @@ class RelaxedStructures(data.Dataset):
     """
 
     def __init__(self, path='./', mode='train', max_length=dataset_splits.MAX_LENGTH, data=None,
-                 ds_name='atlas', index_csv=None, traj_h5=None, pdb_cache=None, cath_dir=None,
+                 ds_name='atlas', index_csv=None, traj_h5=None, pdb_cache=None,
                  val_fold=dataset_splits.DEFAULT_VAL_FOLD,
                  test_fold=dataset_splits.DEFAULT_TEST_FOLD,
-                 structure_source='relaxed', frame_seed=dataset_splits.SEED, frame_index=None):
+                 structure_source='relaxed', frame_seed=dataset_splits.SEED, frame_index=None,
+                 splits=('train', 'valid', 'test')):
         self.path = path
         self.mode = mode
         self.max_length = max_length
@@ -85,8 +86,6 @@ class RelaxedStructures(data.Dataset):
         # chains uncropped; with 'frame' it is the coordinate source and is required.
         self.traj_h5 = os.path.join(path, dataset_splits.default_h5(self.ds_name)) if traj_h5 is None else traj_h5
         self.pdb_cache = pdb_cache or os.path.join(path, 'pdb_cache')
-        # mdCATH relaxed structures: the extracted CATH domain archive.
-        self.cath_dir = cath_dir or os.path.join(path, relaxed_pdb.DEFAULT_CATH_DIR)
         self.val_fold = val_fold
         self.test_fold = test_fold
         if structure_source not in ('relaxed', 'frame'):
@@ -95,6 +94,9 @@ class RelaxedStructures(data.Dataset):
         self.structure_source = structure_source
         self.frame_seed = frame_seed
         self.frame_index = frame_index
+        # Which splits to load at all -- eval_pretrained.py only needs 'test', and skipping the
+        # others avoids downloading every training protein's RCSB entry. Unloaded splits are empty.
+        self.splits = tuple(splits)
         if data is None:
             self.data = self.cache_data[mode]
         else:
@@ -108,7 +110,8 @@ class RelaxedStructures(data.Dataset):
         train_ids, val_ids, test_ids = dataset_splits.get_splits(
             self.ds_name, self.index_csv, val_fold=self.val_fold, test_fold=self.test_fold)
         split_ids = {'train': train_ids, 'valid': val_ids, 'test': test_ids}
-        all_split_ids = train_ids + val_ids + test_ids
+        split_ids = {mode: ids if mode in self.splits else [] for mode, ids in split_ids.items()}
+        all_split_ids = split_ids['train'] + split_ids['valid'] + split_ids['test']
 
         if self.structure_source == 'frame':
             if not self.traj_h5:
@@ -121,12 +124,6 @@ class RelaxedStructures(data.Dataset):
                 all_split_ids, self.traj_h5, seed=self.frame_seed, frame_index=self.frame_index)
             if failures:
                 print('{}: {} protein ids had no usable trajectory frame'.format(
-                    self.ds_name, len(failures)))
-        elif self.ds_name == 'mdcath':
-            # The CATH domain files, whole -- no RCSB download, no cropping.
-            records, failures = relaxed_pdb.load_cath_structures(all_split_ids, self.cath_dir)
-            if failures:
-                print('{}: {} protein ids had no usable CATH domain file'.format(
                     self.ds_name, len(failures)))
         else:
             reference_seqs = {}
