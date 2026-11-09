@@ -5,3 +5,5 @@ from .recorder import Recorder
 from .dataloader import load_data
 from .featurizer import featurize_GTrans
 from .relaxed_dataset import RelaxedStructures
+from .traj_dataset import (TrajectoryFrames, TrajectoryEnsembles, EnsembleFeaturizer,
+                           load_traj_data, average_frame_logits)

@@ -4,7 +4,13 @@ docker_image = jenslundsgaard/sheaf_training:v3.2
 
 universe = docker
 
-shell = ./get_kabsch_rmsd.sh $(file)
+# Each line of get_kabsch_rmsd.txt is `<designs csv stem>, <trajectory store>`. The store (e.g.
+# atlas_data.h5, mdcath_spinet_320_0.h5) supplies the native sequence of designs made over
+# trajectory residues (sheaf, DynamicMPNN), so they can be aligned to the reference. It is
+# harmless for designs that already span their reference (see get_kabsch_rmsd.py), so every
+# line names one.
+shell = ./get_kabsch_rmsd.sh $(file) $Fnx(traj_h5)
+ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
 log = get_kabsch_rmsd_$(Cluster)_$(Process).log
 error = get_kabsch_rmsd_$(Cluster)_$(Process).err
@@ -14,8 +20,8 @@ Requirements = (Target.HasCHTCStaging == true)
 
 +wantGPULab = true
 
-transfer_input_files = get_kabsch_rmsd.sh, get_kabsch_rmsd.py, ../lib/, load_dynamics.py, pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file).csv
-transfer_output_files = $(file)_pred_pdbs.tar.gz
+transfer_input_files = get_kabsch_rmsd.sh, get_kabsch_rmsd.py, ../lib/, load_dynamics.py, $(ResearchDrive)/$(file).csv, $(ResearchDrive)/mdcath_pdbs.tar.gz, $(ResearchDrive)/$(traj_h5)
+transfer_output_files = $(file)_pred_pdbs.tar.gz, $(file)_scrmsd.csv
 transfer_output_remaps = "$(file)_pred_pdbs.tar.gz = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics/$(file)_pred_pdbs.tar.gz"
 
 request_cpus = 16
@@ -23,4 +29,4 @@ request_memory = 128GB
 request_disk = 128GB
 request_gpus = 1
 
-queue file from get_kabsch_rmsd.txt
+queue file, traj_h5 from get_kabsch_rmsd.txt

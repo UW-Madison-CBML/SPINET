@@ -49,6 +49,18 @@ DEFAULT_H5 = {
     "atlas": "atlas_data.h5",
     "mdcath": "mdcath_spinet_320_0.h5",
 }
+# Which MD frames the sheaf model sees. scripts/train_residue_classifier.py builds
+# `ResidueClassifierDataset(fixed_length=128, step=32, traj_len=1000 if atlas else None)`: windows
+# of WINDOW_LEN frames starting every WINDOW_STEP frames, within the first TRAJ_LEN[ds] frames
+# (None = the whole trajectory). The all-frames comparison loaders (lib/traj_frames.sheaf_frames)
+# train on exactly the frames those windows cover, so these must move with that script.
+WINDOW_LEN = 128
+WINDOW_STEP = 32
+TRAJ_LEN = {"atlas": 1000, "mdcath": None}
+# Trajectory groups missing any of these are skipped by ResidueClassifierDataset.REQUIRED_DATASETS,
+# so the comparison loaders skip them too.
+SHEAF_REQUIRED_DATASETS = ("coordinates", "dihedrals", "spinet_features", "frame_maps", "residues")
+
 # `id_column` names the column holding the protein id; ATLAS trajectories are truncated to
 # 200 frames everywhere in this repo, mdCATH's are used whole.
 ID_COLUMN = {"atlas": "pdb", "mdcath": "domain"}

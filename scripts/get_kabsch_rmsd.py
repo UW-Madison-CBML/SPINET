@@ -1,141 +1,158 @@
-
 # get_kabsch_rmsd.py
-from scrmsd import evaluate_batch_rmsd, load_esmfold
-import sys
-import os
+"""Self-consistency RMSD of a table of designed sequences.
 
+Each row of ``<seq_csv>.csv`` (columns ``pdb``, ``seq``) is folded with ESMFold and
+Kabsch-superposed onto the protein's relaxed reference structure -- the same reference every
+comparison model trains on (lib/relaxed_pdb.py):
+
+* ATLAS ids (``1a0a_A``): the deposited RCSB chain.
+* mdCATH ids (``12asA00``): the CATH domain file, from the extracted ``mdcath_pdbs.tar.gz``
+  in ``--cath-dir``, used whole.
+
+A design and its reference are NOT assumed to be positionally identical. Models design over
+different residue frames -- the sheaf model and DynamicMPNN over the MD trajectory's residues,
+MapDiff/PiFold over the relaxed structure's -- and a deposited chain routinely has unresolved
+loops, tags, or (for mdCATH) residues outside the domain. So each design is paired with its
+reference through its *native* sequence:
+
+1. The design's native sequence is the csv's ``native`` column when it has one (e.g. a cropped
+   MapDiff/PiFold ATLAS design), else, with ``--traj-h5``, the trajectory's residue list. If the
+   design is exactly as long as that native sequence, the native is aligned to the reference's sequence
+   (`relaxed_pdb.align_sequences`, identity pairs only) and only the aligned residues are
+   superposed.
+2. Otherwise, if the design is exactly as long as the reference, residue i pairs with i.
+3. Otherwise the row is dropped and reported -- never silently truncated.
+
+Writes ``<seq_csv>_scrmsd.csv`` (one row per scored design, with how it was paired and how many
+residues were superposed) and prints the mean +- std.
+"""
 import argparse
-import io
-import urllib.request
-from pathlib import Path
-import torch.nn.functional as F
-from tqdm import tqdm
-import pandas as pd
-import numpy as np
-import torch
-from Bio.PDB import PDBParser
-from tqdm import tqdm
-
-from Bio.PDB.MMCIFParser import MMCIFParser
-
-from load_dynamics import BACKBONE_ATOMS
-
-import urllib.request
-import urllib.error
+import os
 import re
 
-RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.cif"
+import numpy as np
+import pandas as pd
+import torch
+from tqdm import tqdm
 
-def download_pdb(pdb_id: str, timeout: int = 10) -> str:
-    max_tries = 3
-    backoff = 1
-    for _ in range(max_tries):
-        try:
-            if not isinstance(pdb_id, str) or not re.fullmatch(r"[0-9A-Za-z]{4}", pdb_id):
-                raise ValueError(f"Invalid PDB ID '{pdb_id}'. Must be 4 alphanumeric characters.")
+import relaxed_pdb
+from scrmsd import evaluate_scrmsd, load_esmfold
 
-            url = RCSB_URL.format(pdb_id=pdb_id.upper())
+ATLAS_ID = re.compile(r"^[0-9][A-Za-z0-9]{3}_[A-Za-z0-9]$")
+CATH_ID = re.compile(r"^[0-9][A-Za-z0-9]{3}[A-Za-z0-9][0-9]{2}$")
 
-            try:
-                with urllib.request.urlopen(url, timeout=timeout) as response:
-                    if response.status != 200:
-                        raise urllib.error.HTTPError(url, response.status, "HTTP error", response.headers, None)
-                    data = response.read()
-            except urllib.error.HTTPError as e:
-                raise urllib.error.HTTPError(e.url, e.code, f"Failed to download PDB file: {e.reason}", e.headers, e.fp)
-            except urllib.error.URLError as e:
-                raise urllib.error.URLError(f"Network error while downloading PDB file: {e.reason}")
+# Aligned residues below this fraction of the design mean the native and the reference are
+# not the same protein region; the RMSD would be meaningless.
+MIN_COVERAGE = 0.5
 
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                raise ValueError("Downloaded file is not valid UTF-8 text.")
 
-            if not text.strip():
-                raise ValueError(f"PDB file for ID '{pdb_id}' is empty.")
+def load_references(pdb_ids, cath_dir, pdb_cache):
+    """``{id: record}`` from the loaders the comparison models use, plus ``{id: reason}``."""
+    atlas_ids = [p for p in pdb_ids if ATLAS_ID.match(p)]
+    cath_ids = [p for p in pdb_ids if CATH_ID.match(p)]
+    failures = {p: "id matches neither ATLAS (PPPP_C) nor mdCATH (PPPPCNN) format"
+                for p in pdb_ids if p not in set(atlas_ids) | set(cath_ids)}
+    records = {}
+    if atlas_ids:
+        found, failed = relaxed_pdb.load_relaxed_structures(atlas_ids, cache_dir=pdb_cache)
+        records.update(found)
+        failures.update(failed)
+    if cath_ids:
+        found, failed = relaxed_pdb.load_cath_structures(cath_ids, cath_dir)
+        records.update(found)
+        failures.update(failed)
+    return records, failures
 
-            return text
-        except ValueError:
-            sleep(backoff)
-            backoff *= 2
-    raise ValueError("reached max backoff")
 
-def extract_backbone(pdb_text: str, pdb_chain_id: str) -> torch.Tensor:
-    try:
-        pdb_id, chain_id = pdb_chain_id.split("_", 1)
-    except ValueError:
-        raise ValueError(f"Invalid format '{pdb_chain_id}'. Expected 'PPPP_C'.")
+def pair_residues(design, reference_seq, native_seq):
+    """``(design_idx, ref_idx, how)`` or ``(None, None, reason)`` -- see the module docstring."""
+    if native_seq is not None and len(native_seq) == len(design):
+        design_idx, ref_idx = relaxed_pdb.align_sequences(native_seq, reference_seq)
+        if len(design_idx) < MIN_COVERAGE * len(design):
+            return None, None, "native aligns to only {}/{} reference residues".format(
+                len(design_idx), len(design))
+        return design_idx, ref_idx, "native_alignment"
+    if len(design) == len(reference_seq):
+        idx = np.arange(len(design))
+        return idx, idx, "identity"
+    return None, None, "design length {} matches neither the reference ({}){}".format(
+        len(design), len(reference_seq),
+        "" if native_seq is None else " nor the trajectory ({})".format(len(native_seq)))
 
-    parser = MMCIFParser(QUIET=True)
-    structure = parser.get_structure(pdb_id, io.StringIO(pdb_text))
 
-    coords = []
-    model = next(structure.get_models())
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("seq_csv", help="designs table, with or without the .csv extension")
+    parser.add_argument("--traj-h5", default=None,
+                        help="trajectory store the designs' dataset came from; supplies the "
+                             "native sequence for designs made over trajectory residues")
+    parser.add_argument("--cath-dir", default=relaxed_pdb.DEFAULT_CATH_DIR,
+                        help="extracted mdcath_pdbs.tar.gz (mdCATH references)")
+    parser.add_argument("--pdb-cache", default="pdb_cache", help="RCSB download cache (ATLAS)")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--save-pdbs", default="pred_pdbs",
+                        help="directory for the ESMFold predictions ('' to skip)")
+    args = parser.parse_args()
 
-    if chain_id not in model:
-        return torch.empty((0, len(BACKBONE_ATOMS), 3), dtype=torch.float32)
+    stem = args.seq_csv[:-4] if args.seq_csv.endswith(".csv") else args.seq_csv
+    seq_df = pd.read_csv(os.path.abspath(stem + ".csv"))
+    seq_df["pdb"] = seq_df["pdb"].astype(str).str.strip()
+    seq_df["seq"] = seq_df["seq"].astype(str).str.strip().str.upper()
 
-    chain = model[chain_id]
+    pdb_ids = sorted(seq_df["pdb"].unique())
+    references, failures = load_references(pdb_ids, args.cath_dir, args.pdb_cache)
+    natives = relaxed_pdb.reference_seqs_from_h5(args.traj_h5, pdb_ids) if args.traj_h5 else {}
 
-    for residue in chain:
-        if residue.id[0] != " ":
+    rows, dropped = [], []
+    for row_idx, row in seq_df.iterrows():
+        pdb_id, design = row["pdb"], row["seq"]
+        if pdb_id not in references:
+            dropped.append((pdb_id, failures.get(pdb_id, "no reference structure")))
             continue
-
-        if not all(atom_name in residue for atom_name in BACKBONE_ATOMS):
+        reference = references[pdb_id]
+        native = natives.get(pdb_id)
+        if "native" in seq_df.columns and isinstance(row["native"], str) and row["native"].strip():
+            native = row["native"].strip().upper()
+        design_idx, ref_idx, how = pair_residues(design, reference["seq"], native)
+        if design_idx is None:
+            dropped.append((pdb_id, how))
             continue
+        rows.append({"row": row_idx, "pdb": pdb_id, "seq": design, "pairing": how,
+                     "n_superposed": len(design_idx), "design_idx": design_idx,
+                     "ref_idx": ref_idx, "coords": reference["coords"]})
 
-        atom_coords = [residue[atom_name].coord for atom_name in BACKBONE_ATOMS]
-        coords.append(atom_coords)
+    print("{} designs scorable, {} dropped".format(len(rows), len(dropped)))
+    for pdb_id, reason in dropped:
+        print("  dropped {}: {}".format(pdb_id, reason))
+    if not rows:
+        raise SystemExit("nothing to score")
 
-    if not coords:
-        return torch.empty((0, len(BACKBONE_ATOMS), 3), dtype=torch.float32)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer, model = load_esmfold(device=device)
+    if args.save_pdbs:
+        os.makedirs(args.save_pdbs, exist_ok=True)
 
-    return torch.tensor(coords, dtype=torch.float32)
-
-
-def main(seq_csv):
-    seq_df = pd.read_csv(os.path.abspath(seq_csv + ".csv"))
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    esmfold_model, esmfold_tokenizer = load_esmfold(device=DEVICE)
-    batch_size = 64
     rmsds = []
-    assert seq_df["pdb"].str.match("^[0-9][A-Za-z0-9]{3}_[A-Za-z0-9]$").all(), "pdb column must match PPPP_C exactly"
-
-    pdb_names = [name for name, group in seq_df.groupby("pdb")]
-
-    backbone_dict = {pdb : extract_backbone(download_pdb(pdb[:4]), pdb) for pdb in tqdm(pdb_names, desc="getting pdbs")} # in case there are duplicates
-    print([val.numel() for val in backbone_dict.values()])
-    backbone_dict = {key: item for key, item in backbone_dict.items() if item.numel() > 0}
-    in_dict = seq_df["pdb"].isin(backbone_dict.keys())
-    print(seq_df[~in_dict]["pdb"].unique())
-    seq_df = seq_df[in_dict]
-    os.makedirs("pred_pdbs", exist_ok=True)
-    for i in tqdm(range(0, len(seq_df), batch_size), desc="running eval"):
-        batch_df = seq_df.iloc[i:min(i+batch_size, len(seq_df)-1)]
-        if len(batch_df) == 0:
-            continue
-
-        backbone_tensors = [backbone_dict[pdb] for pdb in batch_df["pdb"]]
-        save_pdbs = [os.path.abspath(os.path.join("pred_pdbs", f"{pdb}.pdb")) for pdb in batch_df["pdb"]]
-
-        lengths = torch.tensor([bb_tensor.shape[0] for bb_tensor in backbone_tensors])
-
-        pad_size = lengths.max().item()
-
-        padded_tensors = [F.pad(bb_tensor, (0,0, 0,0, 0,pad_size-bb_tensor.shape[0]), mode="constant", value=0.0) for bb_tensor in backbone_tensors]
-
-        backbone_tensor = torch.stack(padded_tensors, dim=0) # B, num_res_padded, 4, 3
-        gt_seq_mask = (lengths[:,None] > torch.arange(pad_size)[None,:])
-
-        pred_seqs = batch_df["seq"].to_list()
-
-        rmsd = evaluate_batch_rmsd(pred_seqs, backbone_tensor, gt_seq_mask,esmfold_model, esmfold_tokenizer, device=DEVICE)
-        if rmsd.numel() == 0:
-            print("no rmsds returned somehow")
+    for start in tqdm(range(0, len(rows), args.batch_size), desc="running eval"):
+        batch = rows[start:start + args.batch_size]
+        save_pdbs = ([os.path.abspath(os.path.join(args.save_pdbs, "{}_{}.pdb".format(r["pdb"], r["row"])))
+                      for r in batch] if args.save_pdbs else None)
+        rmsd = evaluate_scrmsd([r["seq"] for r in batch], [r["coords"] for r in batch],
+                               tokenizer, model,
+                               pred_indices=[r["design_idx"] for r in batch],
+                               ref_indices=[r["ref_idx"] for r in batch],
+                               device=device, save_pdbs=save_pdbs)
         rmsds.extend(rmsd.tolist())
+
+    out = pd.DataFrame([{k: r[k] for k in ("row", "pdb", "seq", "pairing", "n_superposed")}
+                        for r in rows])
+    out["scrmsd"] = rmsds
+    out.to_csv(stem + "_scrmsd.csv", index=False)
     rmsds = np.array(rmsds)
+    print(out["pairing"].value_counts().to_string())
     print(f"${rmsds.mean().item():.3f} \\pm {rmsds.std().item():.3f}$")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main()

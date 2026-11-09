@@ -20,14 +20,18 @@
 #   mkdir -p logs && condor_submit eval.sub
 
 universe                = docker
-docker_image            = cmikulski4/dynamicmpnn:v8
+docker_image            = cmikulski4/mapdiff:v5
 
 ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
 # Override these three together to switch datasets (see the header).
-DS_NAME                 = atlas
-DS_H5                   = $(ResearchDrive)/atlas_data.h5
-DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
+#DS_NAME                 = atlas
+#DS_H5                   = $(ResearchDrive)/atlas_data.h5
+#DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
+
+DS_NAME                 = mdcath
+DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0.h5
+DS_CSV                  = $(ResearchDrive)/mdcath_clean_topo_split.csv
 
 executable              = eval.sh
 # The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
@@ -47,15 +51,15 @@ arguments               = --checkpoint ./$(CHECKPOINT) --config ./config.yaml --
 #   condor_submit eval.sub \
 #       RUN_DIR=./results/atlas_mapdiff_6200001_0/atlas_mapdiff_2026-09-12_10-00-00 \
 #       CHECKPOINT=atlas_mapdiff_best_8_epochs_10641_steps_2026-09-12_12-30-00.pt
-RUN_DIR                 = ./results/diffusion_6144182_0/atlas_diffusion_2026-09-01_20-11-39
-CHECKPOINT              = atlas_mapdiff_best.pt
+RUN_DIR                 = ./results/diffusion_pretrained/atlas_diffusion_pretrained_weights
+CHECKPOINT              = mapdiff_weight.pt
 
 # The pristine MapDiff tarball, this folder's dataset/wandb/scRMSD additions, the
 # eval script, the trained checkpoint + its resolved Hydra config, the API-key file
 # (eval.sh splits the W&B key out of it into wandb_api.txt),
 # lib/{scrmsd,stats_utils,relaxed_pdb,traj_frames,dataset_splits}.py, and the dataset's
 # trajectory store (reference residue sequences) + split index.
-transfer_input_files    = eval.sh, eval_relaxed.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(RUN_DIR)/model/$(CHECKPOINT), $(RUN_DIR)/configs/config.yaml, $(DS_H5), $(DS_CSV)
+transfer_input_files    = eval.sh, eval_relaxed.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/scrmsd.py, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(ResearchDrive)/mapdiff_weight.pt, $(RUN_DIR)/configs/config.yaml, $(DS_H5), $(DS_CSV)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT
@@ -66,8 +70,8 @@ error                   = logs/eval_$(DS_NAME)_$(Cluster)_$(Process).err
 
 request_gpus            = 1
 request_cpus            = 4
-request_memory          = 16GB
-request_disk            = 30GB
+request_memory          = 128GB
+request_disk            = 128GB
 
 # ESMFold + RCSB downloads need internet access -- pin to the same machine
 # scripts/train_residue_classifier.sub uses for that reason.

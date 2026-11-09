@@ -12,6 +12,11 @@ or `MDCATH`) -- matching scripts/train_residue_classifier.py's `--ds-name`. The 
 from early stopping; `valid` is what the recorder selects on: its per-protein mean
 perplexity (`val_perp_mean`) with patience 10 (`--patience`), the protocol every comparison
 model shares. Test is scored once, after training, with the best val epoch's weights.
+
+With `--structure_source traj` (API/traj_dataset.py) PiFold trains on every MD frame and the
+per-protein val/test metrics -- including the `val_perp_mean` early stopping selects on -- are
+computed from log-probs averaged across each protein's frames. Upstream's own valid/test loss
+loops still run, on one frame per protein.
 """
 import logging
 import json
@@ -27,6 +32,7 @@ from tqdm import tqdm
 from methods import ProDesign
 from methods.utils import cuda
 from API import Recorder
+from API.traj_dataset import EnsembleFeaturizer, average_frame_logits
 from utils import *
 
 try:
@@ -110,7 +116,10 @@ class Exp:
 
 
     def _build_method(self):
-        steps_per_epoch = 1000
+        # Upstream hardcodes 1000, which sizes OneCycleLR's total_steps; stepping past that raises.
+        # An all-frames epoch (--structure_source traj) can be far longer, so never go below the
+        # real epoch length. Relaxed/frame epochs are < 1000 steps, so they are unchanged.
+        steps_per_epoch = max(1000, len(self.train_loader))
         if self.args.method == 'ProDesign':
             self.method = ProDesign(self.args, self.device, steps_per_epoch)
 
@@ -152,7 +161,7 @@ class Exp:
                 with torch.no_grad():
                     valid_loss, valid_perplexity = self.valid()
                     self._log({'valid_loss': valid_loss, 'valid_perplexity': valid_perplexity, 'epoch': epoch})
-                    val_metrics = self.residue_metrics(self.valid_loader.dataset, self.valid_loader.featurizer,
+                    val_metrics = self.residue_metrics(*self._metric_source(self.valid_loader),
                                                        epoch=epoch, split_name='val')
                     self._log(val_metrics)
 
@@ -193,10 +202,19 @@ class Exp:
         for cat in test_subcat_recovery.keys():
             print_log('Category {0} Rec: {1:.4f}\n'.format(cat, test_subcat_recovery[cat]))
 
-        metrics.update(self.residue_metrics(self.test_loader.dataset, self.test_loader.featurizer, epoch=epoch))
+        metrics.update(self.residue_metrics(*self._metric_source(self.test_loader), epoch=epoch))
 
         self._log(metrics)
         return test_perplexity, test_recovery
+
+    @staticmethod
+    def _metric_source(loader):
+        """``(dataset, featurizer)`` the per-protein metrics run over: the loader's frame
+        ensembles under ``--structure_source traj`` (API/traj_dataset.load_traj_data), otherwise
+        the loader's own dataset."""
+        if getattr(loader, 'ensembles', None) is not None:
+            return loader.ensembles, loader.ensemble_featurizer
+        return loader.dataset, loader.featurizer
 
     @torch.no_grad()
     def residue_metrics(self, dataset, featurizer, epoch=None, split_name='test'):
@@ -215,6 +233,24 @@ class Exp:
         # ResidueMetrics re-softmax an already-normalised distribution.
         nll = torch.nn.NLLLoss()
         accumulator = ResidueMetrics(three_letter_codes(ALPHABET), val_name=split_name)
+
+        if isinstance(featurizer, EnsembleFeaturizer):
+            for index in tqdm(range(len(dataset)), desc='designing held-out split (frame-averaged)'):
+                item = featurizer([dataset[index]])
+                chunk_log_probs = []
+                for chunk in item['chunks']:
+                    X, S, score, mask, lengths = cuda(chunk, device=self.device)
+                    X, S, score, h_V, h_E, E_idx, batch_id, _, _, _ = \
+                        self.method.model._get_features(S, score, X=X, mask=mask)
+                    chunk_log_probs.append(self.method.model(h_V, h_E, E_idx, batch_id).cpu())
+                # Mean of the per-frame log-probs, renormalised so NLL/perplexity stay proper.
+                log_probs = torch.log_softmax(
+                    average_frame_logits(torch.cat(chunk_log_probs), item['num_frames']), dim=-1)
+                target = item['target']
+                design = ''.join(ALPHABET[i] for i in log_probs.argmax(dim=1).tolist())
+                accumulator.add_protein(log_probs, target, pdb_id=item['name'],
+                                         nll=nll(log_probs, target).item(), sequence=design)
+            dataset = ()  # handled above; skip the single-structure loop
 
         for entry in tqdm(dataset, desc='designing held-out split'):
             protein = featurizer([entry])

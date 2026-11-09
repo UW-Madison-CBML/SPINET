@@ -30,3 +30,27 @@ max_length: 1200
 #   dataset.marginal_train_dir=./surffold_data/train_marginal_x_atlas_frame.pt
 process_root: ./surffold_data/atlas_process
 marginal_train_dir: ./surffold_data/train_marginal_x_atlas.pt
+
+# All-frames mode (data/graphs_from_traj.py + dataloader/traj_dataset.py): train on every MD
+# frame the sheaf model trains on (lib/traj_frames.sheaf_frames) and score val/test by averaging
+# each protein's logits across those frames. train.sh sets
+# all_frames and process_root from STRUCTURE_SOURCE=traj.
+all_frames: false
+# Frames of each protein drawn per training epoch (fresh draw every epoch); null = every frame,
+# which makes an epoch ~num_frames x longer than a single-structure epoch.
+frames_per_protein: null
+# Featurize each frame on the fly from the trajectory store (DSSP + graph in the DataLoader
+# workers, then discarded) instead of reading data/graphs_from_traj.py's saved graphs, which run
+# to ~4 KB/residue/frame (terabytes for mdCATH). traj_h5 null = the dataset's standard file name.
+online_featurize: true
+traj_h5: null
+# DataLoader workers for training and for each val/test ensemble stream when online (each runs
+# DSSP, ~0.1 CPU-s per frame); keep request_cpus above this.
+loader_workers: 16
+# Frames per protein in each test ensemble (evenly spaced); null = every frame.
+eval_max_frames: null
+# The same for validation, which runs every epoch (ensemble_num DDIM samples on every frame,
+# plus featurizing it when online); null = eval_max_frames.
+val_max_frames: 16
+# Frames per forward pass when running a protein's ensemble.
+eval_chunk_size: 8
