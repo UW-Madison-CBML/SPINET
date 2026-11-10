@@ -152,7 +152,9 @@ class Exp:
             self.run.summary['dropped_proteins'] = getattr(datasets['test'], 'dropped', {})
 
     def train(self):
-        recorder = Recorder(self.args.patience, verbose=True)
+        # The recorder counts validations, which only run every `--log_step` epochs; convert so
+        # `--patience` stays in epochs, as in the other comparison models (MapDiff's trainer).
+        recorder = Recorder(-(-self.args.patience // self.args.log_step), verbose=True)
         for epoch in range(self.args.epoch):
             train_loss, train_perplexity = self.method.train_one_epoch(self.train_loader)
             self._log({'train_loss': train_loss, 'train_perplexity': train_perplexity, 'epoch': epoch})

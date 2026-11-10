@@ -226,7 +226,7 @@ class EnsembleFeaturizer:
 
 
 def load_traj_data(data_name, batch_size, data_root='./', num_workers=8, frames_per_protein=None,
-                   eval_chunk_size=None, seed=dataset_splits.SEED, **kwargs):
+                   eval_chunk_size=None, val_max_frames=None, seed=dataset_splits.SEED, **kwargs):
     """``(train_loader, valid_loader, test_loader)`` for all-frames training/evaluation.
 
     All three yield `featurize_GTrans` batches of single frames, so upstream's
@@ -237,7 +237,10 @@ def load_traj_data(data_name, batch_size, data_root='./', num_workers=8, frames_
 
     The frame-*averaged* evaluation lives on the valid/test loaders as ``.ensembles`` (a
     `TrajectoryEnsembles` over every selected frame) and ``.ensemble_featurizer`` (an
-    `EnsembleFeaturizer`); main.py's `residue_metrics` uses those when present. Remaining
+    `EnsembleFeaturizer`); main.py's `residue_metrics` uses those when present.
+    ``val_max_frames`` thins the *validation* ensembles to that many evenly spaced frames per
+    protein (``None`` = every frame) -- it only drives early stopping, and test always averages
+    every selected frame so reported numbers stay comparable across models. Remaining
     kwargs go to `_TrajectorySplits` (``index_csv``, ``traj_h5``, ``max_length``,
     ``frame_stride``, ``max_frames``, ``val_fold``, ``test_fold``, ``splits``).
     """
@@ -255,7 +258,8 @@ def load_traj_data(data_name, batch_size, data_root='./', num_workers=8, frames_
     for mode in ('valid', 'test'):
         loader = DataLoader_GTrans(TrajectoryFrames(index, mode, max_frames=1), batch_size=batch_size,
                                    shuffle=False, num_workers=num_workers, collate_fn=featurize_GTrans)
-        loader.ensembles = TrajectoryEnsembles(index, mode)
+        loader.ensembles = TrajectoryEnsembles(
+            index, mode, max_frames=val_max_frames if mode == 'valid' else None)
         loader.ensemble_featurizer = EnsembleFeaturizer(eval_chunk_size)
         eval_loaders.append(loader)
     return (train_loader, *eval_loaders)

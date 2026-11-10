@@ -79,11 +79,14 @@ def dataset_tag(ds_name, h5=None):
 
     Read off the trajectory store's file name (``h5``, default `default_h5`): an mdCATH store
     named ``mdcath_spinet_<temperature>_<replica>.h5`` gives ``mdcath<temperature>``, plus
-    ``_r<replica>`` for any replica but 0. Anything else is just the dataset name.
+    ``_r<replica>`` for any replica but 0. A build suffix on the file name (``_v2``, ...) is
+    matched but not carried into the tag, so ``mdcath_spinet_320_0_v2.h5`` is also
+    ``mdcath320`` -- every model names its run and its processed-data directory from this, so
+    the temperature has to survive a re-build of the store.  Anything else is just the dataset name.
     """
     ds_name = _check(ds_name)
     name = os.path.basename(str(h5 or default_h5(ds_name)))
-    match = re.fullmatch(r"mdcath_spinet_(\d+)_(\d+)\.h5", name)
+    match = re.fullmatch(r"mdcath_spinet_(\d+)_(\d+)(?:_[A-Za-z0-9]+)*\.h5", name)
     if ds_name != "mdcath" or match is None:
         return ds_name
     temperature, replica = match.groups()

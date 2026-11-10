@@ -63,6 +63,10 @@ def create_parser():
     parser.add_argument('--max_frames', default=None, type=int,
                          help='--structure_source traj only: after striding, at most this many evenly '
                               'spaced frames per protein (all splits)')
+    parser.add_argument('--val_max_frames', default=None, type=int,
+                         help='--structure_source traj only: at most this many evenly spaced frames per '
+                              'protein in the VALIDATION frame-averaged pass (early stopping) -- test '
+                              'always averages every frame (default: no cap; MapDiff uses 16)')
     parser.add_argument('--eval_chunk_size', default=16, type=int,
                          help='--structure_source traj only: frames per forward pass when averaging a '
                               "protein's frame ensemble at valid/test time")
@@ -95,7 +99,8 @@ def create_parser():
 
     # Training parameters
     parser.add_argument('--epoch', default=100, type=int, help='end epoch')
-    parser.add_argument('--log_step', default=1, type=int)
+    parser.add_argument('--log_step', default=1, type=int,
+                        help='Validate (and check early stopping) every N epochs; --patience stays in epochs')
     parser.add_argument('--lr', default=0.001, type=float, help='Learning rate')
     parser.add_argument('--patience', default=10, type=int,
                         help='Epochs without a new best val perplexity before stopping')
