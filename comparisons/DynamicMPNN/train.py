@@ -43,6 +43,7 @@ import argparse
 import os
 import random
 import sys
+import time
 import zlib
 from pathlib import Path
 
@@ -949,6 +950,11 @@ def parse_args():
     parser.add_argument("--early-stopping-patience", type=int, default=10,
                         help="Stop once val perplexity has not improved on its best for this many "
                              "epochs; 0 disables stopping (the best epoch is still restored)")
+    parser.add_argument("--max-hours", type=float, default=None,
+                        help="Wall-clock budget, counted from process start (pool building "
+                             "included). Training stops after the last epoch that still fits, "
+                             "judging the next epoch's length by the previous one; the best val "
+                             "epoch is then restored and scored on test as usual")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=dataset_splits.SEED)
@@ -961,6 +967,7 @@ def parse_args():
 
 
 def main():
+    start_time = time.monotonic()
     args = parse_args()
     if args.effective_batch_size % args.batch_size:
         raise ValueError(f"--effective-batch-size {args.effective_batch_size} is not a multiple "
@@ -1014,6 +1021,7 @@ def main():
             "effective_batch_size": args.effective_batch_size,
             "epochs": args.epochs,
             "early_stopping_patience": args.early_stopping_patience,
+            "max_hours": args.max_hours,
             "lr": args.lr,
             "seed": args.seed,
             "from_scratch": args.from_scratch,
@@ -1161,7 +1169,9 @@ def main():
     stopper = EarlyStopping(args.early_stopping_patience)
     stopped_epoch = args.epochs - 1
     step = 0
+    deadline = start_time + args.max_hours * 3600 if args.max_hours else None
     for epoch in range(args.epochs):
+        epoch_start = time.monotonic()
         model.train()
 
         total_loss, window_loss = 0.0, 0.0
@@ -1206,6 +1216,15 @@ def main():
             run.log({"early_stopped_epoch": epoch, "epoch": epoch})
             stopped_epoch = epoch
             break
+        if deadline is not None:
+            now = time.monotonic()
+            if now + (now - epoch_start) > deadline:
+                logger.info(f"Stopping at epoch {epoch}: another {(now - epoch_start) / 60:.1f}-min "
+                            f"epoch would pass --max-hours {args.max_hours} "
+                            f"({(now - start_time) / 3600:.2f} h elapsed)")
+                run.log({"time_stopped_epoch": epoch, "epoch": epoch})
+                stopped_epoch = epoch
+                break
 
     run.summary.update({"best_val_perp_mean": stopper.best_perplexity,
                         "best_val_epoch": stopper.best_epoch, "stopped_epoch": stopped_epoch})

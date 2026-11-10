@@ -28,6 +28,16 @@ def get_top_eigs(h5_file, group_name):
     df["pdb_id"] = group_name
     return df
 
+# restriction map doesn't make sense on graph.
+R_MAP_TYPES = ["first_sheaf", "last_sheaf", "shuffled_first_sheaf", "shuffled_last_sheaf"]
+def SVD(h5_file, group_name):
+    r_maps = {ds_name: h5_file[group_name][ds_name][:] for ds_name in R_MAP_TYPES}
+    for r_map in r_maps.values():
+        # matrix orthogonal... not necessarily true? Did not restrict this.
+        assert np.allclose(r_map, r_map.T)
+    singularvals = {key: np.linalg.}
+
+
 if __name__ == "__main__":
     eig_dfs = []
     num_top = 5

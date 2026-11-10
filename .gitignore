@@ -25,6 +25,7 @@ comparisons/scFold/ScFold.tar.gz
 comparisons/DynamicMPNN/DynamicMPNN.tar.gz
 comparisons/MapDiff/MapDiff.tar.gz
 comparisons/PiFold/PiFold.tar.gz
+comparisons/ADFLIP/ADFLIP.tar.gz
 *.yaml
 dynamicmpnn.modules.layers.*
 **/outputs/

@@ -1,0 +1,60 @@
+# Temperature sweep: one DynamicMPNN training job per mdCATH temperature, each on that
+# temperature's own topology split. Same recipe as train.sub except the ensemble:
+#   k = 5 conformers per protein, drawn each epoch from a pool of 32 per protein chosen by
+#   TM-score farthest-point sampling (--frame-selection fps).
+#
+#   condor_submit sweep_temp.sub
+#
+# Submits 3 jobs (320 K, 379 K, 450 K). To run a subset, edit the `queue` line.
+# k=5 at --batch-size 4 is 20 conformers per forward pass -- the same k * batch_size load
+# train.sub's k=20 x 1 already fits on an H200; --effective-batch-size 32 (train.py default)
+# accumulates 8 passes per optimizer step, so every temperature trains on 32 proteins/step.
+
+docker_image = cmikulski4/dynamicmpnn:v8
+universe = docker
+
+ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+K               = 5
+POOL_SIZE       = 32
+FRAME_SELECTION = fps
+BATCH_SIZE      = 4
+# Wall-clock training budget (train.py --max-hours, counted from process start). Leaves
+# ~0.4 h of a 3 h job for test scoring and file transfer.
+MAX_HOURS       = 2.6
+
+DS_NAME = mdcath
+DS_TAG  = mdcath$(TEMP)
+DS_H5   = $(ResearchDrive)/mdcath_spinet_$(TEMP)_0_v2.h5
+DS_CSV  = $(ResearchDrive)/mdcath_$(TEMP)_0_topo_split.csv
+
+# Explicit run name so these k=5 runs don't collide in W&B with train.sub's default
+# DynamicMPNN_<ds_tag> (k=20) runs.
+RUN_NAME = DynamicMPNN_$(DS_TAG)_k$(K)_pool$(POOL_SIZE)_$(FRAME_SELECTION)
+
+shell = ./train.sh --from-scratch --ds-name $(DS_NAME) --k $(K) --pool-size $(POOL_SIZE) --frame-selection $(FRAME_SELECTION) --batch-size $(BATCH_SIZE) --epochs 200 --max-hours $(MAX_HOURS) --run-name $(RUN_NAME)
+
+environment = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
+
+log    = logs/sweep_temp_$(DS_TAG)_k$(K)_$(Cluster)_$(Process).log
+error  = logs/sweep_temp_$(DS_TAG)_k$(K)_$(Cluster)_$(Process).err
+output = logs/sweep_temp_$(DS_TAG)_k$(K)_$(Cluster)_$(Process).out
+
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT_OR_EVICT
+transfer_output_files = weights, logs
+transfer_output_remaps = "weights = weights_$(DS_TAG)_k$(K)_pool$(POOL_SIZE)_$(FRAME_SELECTION)_$(Cluster)_$(Process)"
+
+Requirements = (Target.HasCHTCStaging == true) && (TARGET.GPUs_DeviceName == "NVIDIA H200" || TARGET.GPUs_DeviceName == "NVIDIA H200 NVL")
+
+transfer_input_files = train.sh, train.py, DynamicMPNN.tar.gz, ../../lib/stats_utils.py, ../../lib/residue_classifier_dataset.py, ../../lib/dataset_splits.py, ../../../api_keys.txt, ../../scripts/load_dynamics.py, $(DS_H5), $(DS_CSV)
+
+request_cpus = 8
+request_memory = 128GB
+request_disk = 200GB
+request_gpus = 1
+
++WantGPULab   = true
++GPUJobLength = "long"
+
+queue TEMP in (320, 379, 450)

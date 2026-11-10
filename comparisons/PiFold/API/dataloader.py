@@ -38,6 +38,7 @@ def load_data(data_name, method, batch_size, data_root, num_workers=8, **kwargs)
             max_length=kwargs.get('max_length', 500),
             frame_stride=kwargs.get('frame_stride', 1),
             max_frames=kwargs.get('max_frames'),
+            val_max_frames=kwargs.get('val_max_frames'),
             val_fold=kwargs.get('val_fold', 0),
             test_fold=kwargs.get('test_fold', 4),
         )
