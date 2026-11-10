@@ -7,6 +7,7 @@ from load_dynamics import BACKBONE_ATOMS
 from torch.utils.data import DataLoader
 import pandas as pd
 import numpy as np
+from Bio.SeqUtils import seq1
 
 
 def main(h5_name, args_dict):
@@ -31,16 +32,8 @@ def main(h5_name, args_dict):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load data
-    ds = ResidueClassifierDataset(h5_name, np.random.default_rng(seed=42), fixed_length=100, groups=None)
-    print(ds.index)
-    print(ds.groups)
-    dataloader = DataLoader(ds, batch_size=1)
-    motion = list(dataloader)[0]
-    #motion = next(iter(dataloader))
-
-    motion = motion.sort()
-    motion = motion.to(DEVICE)
-
+    ds = ResidueClassifierDataset(h5_name, np.random.default_rng(seed=42), fixed_length=128, groups=None, step=32)
+    dataloader = DataLoader(ds, batch_size=1, collate_fn = lambda batch:batch[0])
     # get model
     model = NodeSheafClassifier(
             atoms=BACKBONE_ATOMS,
@@ -61,13 +54,22 @@ def main(h5_name, args_dict):
     weights_path = hf_hub_download("JensLundsgaard/" + resume_model_name, "pytorch_model.bin", local_dir=os.path.abspath("./"))
     model.load_state_dict(torch.load(weights_path, weights_only=True))
 
+    for motion in dataloader:
+        #motion = next(iter(dataloader))
 
-    prediction = model(motion)
-    prediction = prediction.cpu()
-    logits = prediction.y
-    top_logits = logits.argmax(dim=-1)
-    output_string = "".join([ds.__class__.AMINO_ACIDS[l] for l in top_logits.tolist()])
-    print(output_string)
+        motion = motion.sort()
+        print(motion.edge_index.shape)
+        motion = motion.to(DEVICE)
+
+        prediction = model(motion)
+        prediction = prediction.cpu()
+        logits = prediction.x
+        print(logits.shape)
+        top_logits = logits.argmax(dim=-1)
+        assert top_logits.ndim == 1
+        output_string = "".join([seq1(ds.__class__.AMINO_ACIDS[l]) for l in top_logits.tolist()])
+        print(motion.index)
+        print(output_string)
 
 
 

@@ -444,10 +444,11 @@ def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
             """
             # turn seqs and batch into shape num_nodes and 256, num_nodes, 20
             #  
-            assert batch.seq.shape[0] % 256 == 0, f"batch.seq shape = {batch.seq.shape}"
-            assert logits.shape[0] % 256 == 0, f"logits.shape = {logits.shape}"
-            logits_avg = logits.reshape(256, -1, 20).mean(dim=0) # num_nodes, 20
-            seq = batch.seq[:256]
+            assert batch.seq.shape[0] % num_proteins_in_batch == 0, f"batch.seq shape = {batch.seq.shape}"
+            assert logits.shape[0] % num_proteins_in_batch == 0, f"logits.shape = {logits.shape}"
+            num_nodes = batch.seq.shape[0] // num_proteins_in_batch
+            logits_avg = logits.reshape(num_proteins_in_batch, num_nodes, 20).mean(dim=0) # num_nodes, 20
+            seq = batch.seq[:num_nodes] # first protein
             loss = crit(logits_avg, seq).item()
             batch_conf_mat = get_confusion_matrix(seq.cpu(), logits_avg.argmax(dim=-1).cpu(), num_classes)
             global_confusion_mat += batch_conf_mat
@@ -553,17 +554,25 @@ def load_raw_split(group_ids, h5_path, cache_dir=os.path.join("..", "cif_cache")
     return raw
 
 
-"""
-AVG LOGITS batch samples
-class AvgLogitsBatchSampler(data.BatchSampler):
-    def __init__(self, ):
-        super().__init__()
 
-"""
+class AvgLogitsBatchSampler(data.BatchSampler):
+    def __init__(self, raw_data):
+        super().__init__([], 1, False):
+        self.names = set([])
+        self.raw_data = [{}
+        self.batches = []
+
+    def __iter__(self):
+        return iter(self.batches)
+
+    def __len__(self):
+        return len(self.batches)
+
+
 
 
 def main(index_path, h5_path, use_pdbs=False):
-    step = 1
+    step = 16
 
     wandb.login(key=os.getenv("WANDB_KEY"))
     run = wandb.init(
@@ -575,7 +584,7 @@ def main(index_path, h5_path, use_pdbs=False):
         },
     )
 
-    h5_path = osp.join("..",h5_path)
+    h5_path = osp.join("..", h5_path)
 
     if(index_path == "atlas_cross_val_index.csv"):
         split_df = pd.read_csv(osp.join("..", index_path))
@@ -593,8 +602,8 @@ def main(index_path, h5_path, use_pdbs=False):
         index = pd.read_csv(osp.join("..",index_path))
 
         train_groups = index[index["split"] == "train"]["domain"].tolist()
-        test_groups = index[index["split"] == "test"]["domain"].tolist()
-        val_groups = index[index["split"] == "validation"]["domain"].tolist()
+        test_groups  = index[index["split"] == "test"]["domain"].tolist()
+        val_groups   = index[index["split"] == "validation"]["domain"].tolist()
 
         pdb_to_size = {}
         def visit(name, obj):
@@ -626,19 +635,18 @@ def main(index_path, h5_path, use_pdbs=False):
             # if single random frame
             # idx = index[index["pdb"] == pdb].iloc[0]["random_indices"]
             length = obj["coordinates"].shape[1]
-            if length >= 256:
-                for idx in range(0, 256, step): # fixing batch size
-                    atom_dict = {
-                        'name': (name, idx),
-                        'seq': "".join([seq1(RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in obj["residues"][:]]),
-                        'coords': obj["coordinates"][:, idx]
-                    }
-                    if(pdb in train_groups):
-                        train_raw.append(atom_dict)
-                    elif(pdb in val_groups):
-                        val_raw.append(atom_dict)
-                    else:
-                        test_raw.append(atom_dict)
+            for idx in range(0, length, step): # fixing batch size
+                atom_dict = {
+                    'name': (name, idx),
+                    'seq': "".join([seq1(RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in obj["residues"][:]]),
+                    'coords': obj["coordinates"][:, idx]
+                }
+                if(pdb in train_groups):
+                    train_raw.append(atom_dict)
+                elif(pdb in val_groups):
+                    val_raw.append(atom_dict)
+                else:
+                    test_raw.append(atom_dict)
     with h5py.File(h5_path, "r") as f:
         f.visititems(visit)
 
@@ -646,17 +654,17 @@ def main(index_path, h5_path, use_pdbs=False):
     val_node_counts = [len(s['seq']) for s in val_raw]
     test_node_counts = [len(s['seq']) for s in test_raw]
 
-    train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=64000)
-    #val_sampler = gvp.data.BatchSampler(val_node_counts, max_nodes=16000)
-    #test_sampler = gvp.data.BatchSampler(test_node_counts, max_nodes=16000)
+    train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=32000)
+    val_sampler = AvgLogitsBatchSampler(val_raw)
+    test_sampler = AvgLogitsBatchSampler(test_raw)
 
     train_dataset = gvp.data.ProteinGraphDataset(train_raw)
     val_dataset = gvp.data.ProteinGraphDataset(val_raw)
     test_dataset = gvp.data.ProteinGraphDataset(test_raw)
 
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=16)
-    val_loader = DataLoader(val_dataset, batch_size=256, num_workers=16) # batch_sampler=val_sampler, 
-    test_loader = DataLoader(test_dataset, batch_size=256, num_workers=16) # batch_sampler=test_sampler,
+    val_loader = DataLoader(val_dataset, batch_sampler=val_sampler, num_workers=16) # batch_sampler=val_sampler, 
+    test_loader = DataLoader(test_dataset, batch_size=test_sampler, num_workers=16) # batch_sampler=test_sampler,
 
     model = gvp.models.CPDModel(
         node_in_dim=(6, 3), node_h_dim=(100, 16),

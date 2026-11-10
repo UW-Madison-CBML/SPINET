@@ -315,14 +315,15 @@ class EdgeToNodeAgg(MessagePassing):
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
-
+"""
+OLD FILE!!! here
 # ----------------------------------------------------------------------------------------------
 # this initial dynamics embedding will be the main thing we change when editing the input data
 # it will be harder to not hard code some of this stuff
 # the same is true for atomic frame embeddings
 class InitDynamicsEmbedding(MessagePassing):
     EDGE_CHUNK = 50_000
-    """def step(self, x_t, edge_attr_t, edge_index, reverse_edge_indices):
+    "def step(self, x_t, edge_attr_t, edge_index, reverse_edge_indices):
         if not self.ablate_sheaves:
             maps_t = self.sheaf_learner(
                 torch.cat([x_t[edge_index[0]], edge_attr_t, x_t[edge_index[1]]], dim=-1)
@@ -335,7 +336,7 @@ class InitDynamicsEmbedding(MessagePassing):
         x_stalk = x_t.view(x_t.shape[0], self.num_channels, self.stalk_dim)
         edge_stalk = edge_attr_t.view(edge_attr_t.shape[0], self.num_channels, self.stalk_dim)
         return self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps_t)
-    """
+    "
     def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, frame_origin="CA", ablate_sheaves=False, ablate_edge_features=False, restriction_map_type="arbitrary"):
         super().__init__(aggr='sum', node_dim=0)
         self.input_dim = node_dim
@@ -489,6 +490,192 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
     def forward(self, data, return_sheaf=False):
         if self.node_slice is not None:
             data.x = data.x[:,:,self.node_slice]
+        data.x = self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
+
+        # run sheaf attention
+        if return_sheaf:
+            data, first_sheaf, last_sheaf = self.san(data, return_sheaf=return_sheaf)
+        else:
+            data = self.san(data)
+
+        data.x = self.classifier(data.x) # classify nodes
+
+        if return_sheaf:
+            return data, first_sheaf, last_sheaf
+        else:
+            return data
+"""
+# ----------------------------------------------------------------------------------------------
+# this initial dynamics embedding will be the main thing we change when editing the input data
+# it will be harder to not hard code some of this stuff
+# the same is true for atomic frame embeddings
+class InitDynamicsEmbedding(MessagePassing):
+    EDGE_CHUNK = 50_000
+    """def step(self, x_t, edge_attr_t, edge_index, reverse_edge_indices):
+        if not self.ablate_sheaves:
+            maps_t = self.sheaf_learner(
+                torch.cat([x_t[edge_index[0]], edge_attr_t, x_t[edge_index[1]]], dim=-1)
+            ).view(edge_index.shape[1], self.stalk_dim, self.stalk_dim)
+            neighbor_maps_t = maps_t[reverse_edge_indices]
+            maps_t = torch.stack([maps_t, neighbor_maps_t], dim=0)
+        else:
+            maps_t = torch.eye(self.stalk_dim, device=x_t.device)[None, None].expand(2, edge_index.shape[1], -1, -1)
+
+        x_stalk = x_t.view(x_t.shape[0], self.num_channels, self.stalk_dim)
+        edge_stalk = edge_attr_t.view(edge_attr_t.shape[0], self.num_channels, self.stalk_dim)
+        return self.propagate(edge_index, x=x_stalk, edge_attr=edge_stalk, maps=maps_t)
+    """
+    def __init__(self, node_dim, edge_dim, hidden_dim, stalk_dim, atoms, atom_indices, frame_origin="CA", ablate_sheaves=False, ablate_edge_features=False, restriction_map_type="arbitrary"):
+        super().__init__(aggr='sum', node_dim=0)
+        self.input_dim = node_dim
+        self.edge_dim = edge_dim
+        self.ablate_sheaves = ablate_sheaves
+        # test performance without explicitly encoding dist between residues, etc.
+        self.ablate_edge_features = ablate_edge_features
+        self.stalk_dim = stalk_dim
+        self.hidden_dim = hidden_dim
+        self.num_channels = self.hidden_dim // self.stalk_dim
+        self.atoms = atoms
+        self.atom_indices = atom_indices
+        assert set(self.atoms) == set(self.atom_indices.keys()), "atoms are not the keys of atom_indices"
+        assert frame_origin in self.atoms, f"frame origin: {frame_origin} is not in atoms"
+        self.frame_origin = frame_origin
+        self.register_buffer("not_frame_origin_mask", torch.tensor([atom != self.frame_origin for atom in self.atoms], dtype=torch.bool))
+
+        if not self.ablate_sheaves:
+            self.sheaf_learner = nn.Sequential(nn.Linear(2*self.input_dim + self.edge_dim, 2*self.input_dim + self.edge_dim), nn.ReLU(), nn.Linear(2*self.input_dim + self.edge_dim, self.stalk_dim**2))
+
+        self.project_nodes = nn.Linear(self.input_dim, self.hidden_dim)
+        self.project_edges = nn.Linear(self.edge_dim, self.hidden_dim)
+
+        self.mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim, self.hidden_dim))
+
+        self.node_temporal_product = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True)
+        self.temp_mlp = nn.Sequential(nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(), nn.Linear(self.hidden_dim,self.hidden_dim))
+
+
+    def forward(self, x, pos, frame_maps, edge_index, edge_attr):
+        # need to calc some edge features here, since we don't know the edges yet at
+        origin = pos[:, :, ~self.not_frame_origin_mask]
+        other_atoms = pos[:, :, self.not_frame_origin_mask]
+        in_frame_atoms = torch.matmul(other_atoms[edge_index[1]] - origin[edge_index[0]], frame_maps[edge_index[0]])
+        in_frame_atoms = in_frame_atoms.view(edge_index.shape[1], pos.shape[1], 9)
+        pairwise_matrices = F.cosine_similarity(frame_maps[edge_index[0]], frame_maps[edge_index[1]], dim=-1) # num_edges, num_times, 3; compare angles of frames
+        edge_attr = torch.cat([in_frame_atoms, edge_attr[:,None,:].expand(-1,x.shape[1], -1), pairwise_matrices], dim=2)
+
+        if self.ablate_edge_features:
+            edge_attr = torch.zeros_like(edge_attr)
+
+        # calculate restriction maps
+        _, reverse_edge_indices = sort_edge_index(torch.roll(edge_index,1,0), torch.arange(edge_index.shape[1], device=x.device, dtype=torch.int64))
+
+        if not self.ablate_sheaves:
+            maps = self.sheaf_learner(torch.cat([x[edge_index[0]], edge_attr, x[edge_index[1]]], dim = -1)).reshape(edge_index.shape[1], x.shape[1], self.stalk_dim, self.stalk_dim) # edge_attr
+        else:
+            maps = torch.eye(self.stalk_dim, device=x.device)[None, None, :, :].expand(edge_attr.shape[0], edge_attr.shape[1], -1, -1)
+        # reshape from h to c * d
+        x_stalk = self.project_nodes(x).view(x.shape[0], x.shape[1], self.num_channels, self.stalk_dim) # stalk dim to c,d
+        edge_stalk = self.project_edges(edge_attr).view(edge_attr.shape[0], edge_attr.shape[1], self.num_channels, self.stalk_dim)
+
+        # pass messages
+        agg = self.propagate(edge_index, x=x_stalk, maps=maps, edge_attr=edge_stalk, reverse_edge_indices=reverse_edge_indices)
+
+        # flatten
+        agg_flat = self.temp_mlp(agg.view(x.shape[0],x.shape[1], self.hidden_dim))
+
+        _, temp_agg = self.node_temporal_product(agg_flat)
+
+
+        # nonlinearity
+        return self.mlp(temp_agg.squeeze(0))
+
+    def message(self, x_i, x_j, maps, edge_attr, reverse_edge_indices):
+        if not self.ablate_sheaves:
+            i_to_edge = torch.matmul(maps, x_i.mT)
+            j_to_edge = torch.matmul(maps[reverse_edge_indices], x_j.mT)
+
+            edge_value = edge_attr.mT + (j_to_edge - i_to_edge)
+            transported = torch.matmul(maps.mT, edge_value).mT # last mT so that it's c,d not d,c
+        else:
+            transported = x_j + edge_attr
+
+        return transported
+
+
+class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
+    def __init__(self, config=None, atoms=["CA", "N", "C", "O"], frame_origin="CA", num_classes=22, hidden_dim=64, num_timesteps=16, stalk_dim=8, num_blocks=8, num_heads=8, ablate_sheaves = False, ablate_edge_features = False, gat_dropout=0.2, classifier_dropout=0.2,restriction_map_type="low_rank", use_attention=True, use_masking=True):
+        super(NodeSheafClassifier, self).__init__()
+
+        assert hidden_dim % stalk_dim == 0, "stalk dim must evenly divide hidden dim"
+
+        self.hidden_dim = hidden_dim
+        self.stalk_dim = stalk_dim
+        self.num_blocks=num_blocks
+        self.num_heads=num_heads
+        self.num_timesteps=num_timesteps
+        self.gat_dropout = gat_dropout
+        self.num_classes = num_classes
+        self.ablate_sheaves = ablate_sheaves
+        self.ablate_edge_features = ablate_edge_features
+        self.gat_dropout = gat_dropout
+        self.classifier_dropout = classifier_dropout
+        self.restriction_map_type = restriction_map_type
+        self.use_attention = use_attention
+        self.use_masking = use_masking
+        self.atoms = atoms
+        self.frame_origin = frame_origin
+        self.atom_indices = {atom: slice(3*i,3*(i+1)) for i, atom in enumerate(atoms)}
+        #TODO add atoms and frame origin to config
+
+
+        if(config != None):
+            if isinstance(config, dict):
+                self.hidden_dim = config.get("hidden_dim", hidden_dim)
+                self.stalk_dim = config.get("stalk_dim", stalk_dim)
+                self.num_blocks = config.get("num_blocks", num_blocks)
+                self.num_heads = config.get("num_heads", num_heads)
+                self.num_timesteps = config.get("num_timesteps", num_timesteps)
+                self.gat_dropout = config.get("gat_dropout", gat_dropout)
+                self.num_classes = config.get("num_classes", num_classes)
+                self.ablate_sheaves = config.get("ablate_sheaves", ablate_sheaves)
+                self.ablate_edge_features = config.get("ablate_edge_features", ablate_edge_features)
+                self.gat_dropout = config.get("gat_dropout", gat_dropout)
+                self.classifier_dropout = config.get("classifier_dropout", classifier_dropout)
+                self.restriction_map_type = config.get("restriction_map_type", restriction_map_type)
+                self.use_attention = config.get("use_attention", use_attention)
+                self.use_masking = config.get("use_masking", use_masking)
+
+            else:
+                self.hidden_dim = config.hidden_dim
+                self.stalk_dim = config.stalk_dim
+                self.num_blocks= config.num_blocks
+                self.num_heads= config.num_heads
+                self.num_timesteps= config.num_timesteps
+                self.gat_dropout = config.gat_dropout
+                self.num_classes = config.num_classes
+                self.ablate_sheaves = config.ablate_sheaves
+                self.ablate_edge_features = config.ablate_edge_features
+                self.gat_dropout = config.gat_dropout
+                self.classifier_dropout = config.classifier_dropout
+                self.restriction_map_type = config.restriction_map_type
+                self.use_attention = config.use_attention
+                self.use_masking = config.use_masking
+
+        self.init_dynamics_embedding = InitDynamicsEmbedding(15, 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves, ablate_edge_features=self.ablate_edge_features)
+
+        self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(self.hidden_dim, 2 * self.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(p=self.classifier_dropout),
+            nn.Linear(2 * self.hidden_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.num_classes)
+        )
+
+    def forward(self, data, return_sheaf=False):
+
         data.x = self.init_dynamics_embedding(data.x, data.pos, data.frame_maps, data.edge_index, data.edge_attr)
 
         # run sheaf attention
