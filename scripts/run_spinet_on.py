@@ -3,19 +3,20 @@ from huggingface_hub import login, HfApi, hf_hub_url, hf_hub_download, create_re
 from residue_classifier_dataset import ResidueClassifierDataset
 from invariant_features_sheaf_model import NodeSheafClassifier
 import os
+from load_dynamics import BACKBONE_ATOMS
+from torch.utils.data import DataLoader
+import pandas as pd
+import numpy as np
 
 
 def main(h5_name, args_dict):
     # hyperparameters
-    learning_rate = args_dict["lr"]
-    epochs = args_dict['epochs']
     hidden_dim = 128
     stalk_dim = 8
     num_blocks = 4
     ablate_sheaves=args_dict["ablate_sheaves"]
     ablate_edge_features=args_dict["ablate_edge_features"]
     use_attention = not args_dict["ablate_attention"]
-    num_heads = 4 if use_attention else 1
     restriction_map_type=args_dict["restriction_map_type"]
     resume_model_name = args_dict["resume"]
     ablate_order = args_dict["ablate_order"]
@@ -30,9 +31,13 @@ def main(h5_name, args_dict):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load data
-    ds = ResidueClassifierDataset(h5_name) 
+    ds = ResidueClassifierDataset(h5_name, np.random.default_rng(seed=42), fixed_length=100, groups=None)
+    print(ds.index)
+    print(ds.groups)
     dataloader = DataLoader(ds, batch_size=1)
-    motion = next(iter(dataloader))
+    motion = list(dataloader)[0]
+    #motion = next(iter(dataloader))
+
     motion = motion.sort()
     motion = motion.to(DEVICE)
 
@@ -40,17 +45,17 @@ def main(h5_name, args_dict):
     model = NodeSheafClassifier(
             atoms=BACKBONE_ATOMS,
             frame_origin="CA",
-            num_classes=num_classes,
+            num_classes=20,
             hidden_dim=hidden_dim,
             stalk_dim=stalk_dim,
             num_blocks=num_blocks,
-            num_heads=num_heads,
+            num_heads=1,
             ablate_sheaves=ablate_sheaves,
-            ablate_edge_features=ablate_edge_features,
-            num_timesteps=num_timesteps,
+            ablate_edge_features=False,
+            num_timesteps=100,
             restriction_map_type=restriction_map_type,
-            use_attention=use_attention,
-            use_masking=use_masking,
+            use_attention=False,
+            use_masking=False
         ).to(DEVICE)
 
     weights_path = hf_hub_download("JensLundsgaard/" + resume_model_name, "pytorch_model.bin", local_dir=os.path.abspath("./"))
@@ -84,5 +89,5 @@ if __name__ == "__main__":
     parser.add_argument("--ablate-order", action="store_true")
 
     args = parser.parse_args()
-    train_residue_classifier(args.h5_name, vars(args))
+    main(args.h5_name, vars(args))
     

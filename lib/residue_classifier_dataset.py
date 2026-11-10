@@ -129,6 +129,7 @@ class ResidueClassifierDataset(Dataset):
         def visit(name, obj):
             if (isinstance(obj, h5py.Group) and all(ds in obj for ds in self.__class__.REQUIRED_DATASETS) and ((not use_split) or (name.split("/")[0] in split))):
                 self.groups.append(name)
+                print(name)
         h5_file.visititems(visit)
 
 
