@@ -39,6 +39,7 @@ import numpy as np
 import requests
 from Bio import Align, PDB
 from Bio.Data import IUPACData
+from Bio.SeqUtils import seq1
 
 # Ground-truth order of the atom axis everywhere in this repo (scripts/load_dynamics.py's
 # BACKBONE_ATOMS). Duplicated rather than imported because `load_dynamics` pulls in mdtraj,

@@ -404,8 +404,6 @@ def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
             logits = model(nodes, batch.edge_index, edges, batch.seq)
 
             
-            if batch.mask.any().item():
-                print("mask is on for val; may cause issue with downstream residue sizes")
             num_proteins_in_batch = batch.batch.max().item() + 1
             """ 
             for p_idx in range(num_proteins_in_batch):
@@ -495,7 +493,7 @@ def run_val(model, loader, run, epoch, crit, dataset, val_name="val"):
     val_t5_mean, val_t5_std = np.mean(val_acc_top_5), np.std(val_acc_top_5)
     val_t10_mean, val_t10_std = np.mean(val_acc_top_10), np.std(val_acc_top_10)
 
-    print(f"${val_t1_mean} \\pm {val_t1_std} $ & $ {val_t5_mean} \\pm {val_t5_std}$ & $  {val_t10_mean} \\pm {val_t10_std} $ & $ {val_ppl_mean} \\pm {val_ppl_std} $")
+    print(f"${val_t1_mean:.3f} \\pm {val_t1_std:.3f} $ & $ {val_t5_mean:.3f} \\pm {val_t5_std:.3f}$ & $  {val_t10_mean:.3f} \\pm {val_t10_std:.3f} $ & $ {val_ppl_mean:.3f} \\pm {val_ppl_std:.3f} $")
 
 import os
 
@@ -556,20 +554,25 @@ def load_raw_split(group_ids, h5_path, cache_dir=os.path.join("..", "cif_cache")
 
 
 class AvgLogitsBatchSampler(data.BatchSampler):
+    """
+    return a bunch of frames from the same trajectory together
+
+    """
     def __init__(self, raw_data):
-        super().__init__([], 1, False):
+        super().__init__([], 1, False)
         list_names = [d["name"][0] for d in raw_data]
-        self.names = set(list_names)
-        self.index = list(enumerate(list_names)) #
-        self.index = sorted(self.index, key=lambda tup: tup[1], stable=True) # sort names so it's contiguous wrt to names, keep stable so order ig
+        self.names = list(set(list_names))
+        self.index = list(enumerate(list_names)) 
+        self.index = sorted(self.index, key=lambda tup: self.names.index(tup[1])) # sort names so it's in the right order and the for\while loop below is O(n)
         self.batches = []
         save_idx = 0
         for name in self.names:
             batch = []
-            while(self.index[save_idx][1] == name): # this is now O(n) for n = len(raw_data)
+            while(save_idx < len(self.index) and self.index[save_idx][1] == name): # this is now O(n) for n = len(raw_data)
                 batch.append(self.index[save_idx][0])
                 save_idx += 1
-            self.batches.append(batch)
+            if batch:
+                self.batches.append(batch)
 
 
     def __iter__(self):
@@ -671,7 +674,7 @@ def main(index_path, h5_path, use_pdbs=False):
     val_node_counts = [len(s['seq']) for s in val_raw]
     test_node_counts = [len(s['seq']) for s in test_raw]
 
-    train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=32000)
+    train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=3000)
     val_sampler = AvgLogitsBatchSampler(val_raw)
     test_sampler = AvgLogitsBatchSampler(test_raw)
 
@@ -681,7 +684,7 @@ def main(index_path, h5_path, use_pdbs=False):
 
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_sampler=val_sampler, num_workers=16) # batch_sampler=val_sampler, 
-    test_loader = DataLoader(test_dataset, batch_size=test_sampler, num_workers=16) # batch_sampler=test_sampler,
+    test_loader = DataLoader(test_dataset, batch_sampler=test_sampler, num_workers=16) # batch_sampler=test_sampler,
 
     model = gvp.models.CPDModel(
         node_in_dim=(6, 3), node_h_dim=(100, 16),
