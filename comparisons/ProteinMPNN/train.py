@@ -21,7 +21,7 @@ import random
 
 
 # ProteinMPNN: clone https://github.com/dauparas/ProteinMPNN and put ProteinMPNN/training on PYTHONPATH.
-sys.append("training")
+sys.path.append("training")
 
 from model_utils import ProteinMPNN, get_std_opt
 
@@ -233,10 +233,8 @@ class AvgLogitsBatchSampler(data.BatchSampler):
                 batches.append(batch)
         self.subsequence = subsequence
         self.step = step
-        # FIX: `for range(...)` was a SyntaxError (missing `i in`)
         self.batches = [[batch[i:i + self.subsequence] for i in range(0, len(batch) - self.subsequence + 1, self.step)]
                         for batch in batches]
-        # FIX: flatten self.batches (you flattened `batches`, which yields ints, not index lists)
         self.batches = [b for batch in self.batches for b in batch]
 
     def __iter__(self):

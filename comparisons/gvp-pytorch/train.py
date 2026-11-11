@@ -574,8 +574,8 @@ class AvgLogitsBatchSampler(data.BatchSampler):
                 batches.append(batch)
         self.subsequence = subsequence 
         self.step = step
-        self.batches = [[batch[i:i+self.subsequence] for range(0,len(batch)-self.subsequence+1, self.step)] for batch in batches]
-        self.batches = [b for batch in batches for b in batch]# flatten
+        self.batches = [[batch[i:i+self.subsequence] for i in range(0,len(batch)-self.subsequence+1, self.step)] for batch in batches]
+        self.batches = [b for batch in self.batches for b in batch]# flatten
 
 
     def __iter__(self):

@@ -6,6 +6,7 @@ export WANDB_KEY=$WANDB_KEY
 
 tar -xvf ProteinMPNN.tar.gz
 mv train.py ProteinMPNN/
+mv stats_utils.py ProteinMPNN/
 cd ProteinMPNN/
 
 python train.py "$@"
