@@ -556,23 +556,26 @@ def load_raw_split(group_ids, h5_path, cache_dir=os.path.join("..", "cif_cache")
 class AvgLogitsBatchSampler(data.BatchSampler):
     """
     return a bunch of frames from the same trajectory together
-
     """
-    def __init__(self, raw_data):
+    def __init__(self, raw_data, subsequence=128, step=32):
         super().__init__([], 1, False)
         list_names = [d["name"][0] for d in raw_data]
         self.names = list(set(list_names))
         self.index = list(enumerate(list_names)) 
-        self.index = sorted(self.index, key=lambda tup: self.names.index(tup[1])) # sort names so it's in the right order and the for\while loop below is O(n)
-        self.batches = []
+        self.index = sorted(self.index, key=lambda tup: self.names.index(tup[1]))
+        batches = []
         save_idx = 0
         for name in self.names:
             batch = []
-            while(save_idx < len(self.index) and self.index[save_idx][1] == name): # this is now O(n) for n = len(raw_data)
+            while(save_idx < len(self.index) and self.index[save_idx][1] == name): 
                 batch.append(self.index[save_idx][0])
                 save_idx += 1
             if batch:
-                self.batches.append(batch)
+                batches.append(batch)
+        self.subsequence = subsequence 
+        self.step = step
+        self.batches = [[batch[i:i+self.subsequence] for range(0,len(batch)-self.subsequence+1, self.step)] for batch in batches]
+        self.batches = [b for batch in batches for b in batch]# flatten
 
 
     def __iter__(self):
@@ -652,7 +655,7 @@ def main(index_path, h5_path, use_pdbs=False):
             length = obj["coordinates"].shape[1]
 
             seq = "".join([seq1(RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in obj["residues"][:]])
-            coords = obj["coordinates"][:, ::step]
+            coords = obj["coordinates"][:, ::(step if pdb in train_groups else 1)] # we can train on subset and eval on all 
                 
 
             for idx in range(coords.shape[1]): # fixing batch size
