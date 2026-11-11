@@ -467,3 +467,7 @@ def load_cath_structures(protein_ids, cath_dir=DEFAULT_CATH_DIR, verbose=True):
         print("CATH domains: loaded {}/{} from {} ({} files indexed)".format(
             len(records), len(protein_ids), cath_dir, len(index)))
     return records, failures
+
+if __name__ == "__main__":
+    for name in ["HSD", "HSE", "HSP", "HIE", "CYX", "MSE", "ASH"]:
+        print(seq1(name))
