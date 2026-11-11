@@ -18,11 +18,10 @@ from torch.utils import data
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import gvp.data  # only kept for gvp.data.BatchSampler (token-budget train batching)
 
 # ProteinMPNN: clone https://github.com/dauparas/ProteinMPNN and put ProteinMPNN/training on PYTHONPATH.
-# Use the *training* copy: it has the 6-arg forward (random decoding order drawn internally)
-# and get_std_opt. The root protein_mpnn_utils.py forward needs an extra `randn` arg.
+sys.append("training")
+
 from model_utils import ProteinMPNN, get_std_opt
 
 letter_to_num = {'C': 4, 'D': 3, 'S': 15, 'Q': 5, 'K': 11, 'I': 9,'P': 14, 'T': 16, 'F': 13, 'A': 0, 'G': 7, 'H': 8, 'E': 6, 'L': 10, 'R': 1, 'W': 17, 'V': 19,'N': 2, 'Y': 18, 'M': 12}
@@ -37,6 +36,50 @@ from stats_utils import get_confusion_matrix, top_k_acc
 
 MPNN_ALPHABET = "ACDEFGHIKLMNPQRSTVWYX"  # ProteinMPNN's order; X=20 is "unknown"
 ALPHA_IDX = {a: i for i, a in enumerate(MPNN_ALPHABET)}
+
+# AUTHOR: Bowen Jing from gvp-pytorch repo.
+class BatchSampler(data.Sampler):
+    '''
+    From https://github.com/jingraham/neurips19-graph-protein-design.
+
+    A `torch.utils.data.Sampler` which samples batches according to a
+    maximum number of graph nodes.
+
+    :param node_counts: array of node counts in the dataset to sample from
+    :param max_nodes: the maximum number of nodes in any batch,
+                      including batches of a single element
+    :param shuffle: if `True`, batches in shuffled order
+    '''
+    def __init__(self, node_counts, max_nodes=3000, shuffle=True):
+
+        self.node_counts = node_counts
+        self.idx = [i for i in range(len(node_counts))
+                        if node_counts[i] <= max_nodes]
+        self.shuffle = shuffle
+        self.max_nodes = max_nodes
+        self._form_batches()
+
+    def _form_batches(self):
+        self.batches = []
+        if self.shuffle: random.shuffle(self.idx)
+        idx = self.idx
+        while idx:
+            batch = []
+            n_nodes = 0
+            while idx and n_nodes + self.node_counts[idx[0]] <= self.max_nodes:
+                next_idx, idx = idx[0], idx[1:]
+                n_nodes += self.node_counts[next_idx]
+                batch.append(next_idx)
+            self.batches.append(batch)
+
+    def __len__(self):
+        if not self.batches: self._form_batches()
+        return len(self.batches)
+
+    def __iter__(self):
+        if not self.batches: self._form_batches()
+        for batch in self.batches: yield batch
+
 
 
 class MPNNDataset(data.Dataset):
@@ -271,7 +314,7 @@ def main(index_path, h5_path, use_pdbs=False):
 
     train_node_counts = [len(s['seq']) for s in train_raw]
 
-    train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=3000)
+    train_sampler = BatchSampler(train_node_counts, max_nodes=3000)
     val_sampler = AvgLogitsBatchSampler(val_raw)
     test_sampler = AvgLogitsBatchSampler(test_raw)
 
