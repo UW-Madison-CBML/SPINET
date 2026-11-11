@@ -17,6 +17,7 @@ from Bio.SeqUtils import seq1
 from torch.utils import data
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import random
 
 
 # ProteinMPNN: clone https://github.com/dauparas/ProteinMPNN and put ProteinMPNN/training on PYTHONPATH.
