@@ -558,9 +558,19 @@ def load_raw_split(group_ids, h5_path, cache_dir=os.path.join("..", "cif_cache")
 class AvgLogitsBatchSampler(data.BatchSampler):
     def __init__(self, raw_data):
         super().__init__([], 1, False):
-        self.names = set([])
-        self.raw_data = [{}
+        list_names = [d["name"][0] for d in raw_data]
+        self.names = set(list_names)
+        self.index = list(enumerate(list_names)) #
+        self.index = sorted(self.index, key=lambda tup: tup[1], stable=True) # sort names so it's contiguous wrt to names, keep stable so order ig
         self.batches = []
+        save_idx = 0
+        for name in self.names:
+            batch = []
+            while(self.index[save_idx][1] == name): # this is now O(n) for n = len(raw_data)
+                batch.append(self.index[save_idx][0])
+                save_idx += 1
+            self.batches.append(batch)
+
 
     def __iter__(self):
         return iter(self.batches)
@@ -614,7 +624,7 @@ def main(index_path, h5_path, use_pdbs=False):
 
         #index["random_indices"] = [pick_frame(pdb_to_size[pdb_id], pdb_id, 0) for pdb_id in index["pdb"].to_list()]
         index = index.rename(columns={"domain":"pdb"})
-        index["length"] = [pdb_to_size[pdb_id] for pdb_id in index["pdb"].to_list()]
+        #index["length"] = [pdb_to_size[pdb_id] for pdb_id in index["pdb"].to_list()]
 
 
     """
@@ -631,15 +641,22 @@ def main(index_path, h5_path, use_pdbs=False):
             pdb = name.split("/")[0].strip()
 
             #assert pdb in index["pdb"].to_list(), f"{pdb} not in column pdb, train: {pdb in train_groups}, test: {pdb in test_groups}, val: {pdb in val_groups}"
-
+            if not (pdb in train_groups or pdb in val_groups or pdb in test_raw):
+                return
             # if single random frame
             # idx = index[index["pdb"] == pdb].iloc[0]["random_indices"]
+
             length = obj["coordinates"].shape[1]
-            for idx in range(0, length, step): # fixing batch size
+
+            seq = "".join([seq1(RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in obj["residues"][:]])
+            coords = obj["coordinates"][:, ::step]
+                
+
+            for idx in range(coords.shape[1]): # fixing batch size
                 atom_dict = {
-                    'name': (name, idx),
-                    'seq': "".join([seq1(RESIDUE_ALIASES.get(res.decode()[:3], res.decode()[:3])) for res in obj["residues"][:]]),
-                    'coords': obj["coordinates"][:, idx]
+                    'name': (name, idx*step),
+                    'seq': seq,
+                    'coords': coords[:, idx]
                 }
                 if(pdb in train_groups):
                     train_raw.append(atom_dict)
