@@ -4,7 +4,7 @@ universe = docker
 #index = atlas_cross_val_index.csv
 #h5=atlas_data.h5
 
-temp=320
+temp=450
 index=mdcath_$(temp)_0_topo_split.csv
 h5=mdcath_spinet_$(temp)_0_v2.h5
 

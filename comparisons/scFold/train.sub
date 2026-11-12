@@ -12,7 +12,7 @@ temp=320
 index=mdcath_$(temp)_0_topo_split.csv
 h5=mdcath_spinet_$(temp)_0_v2.h5
 
-shell = ./train.sh --index-name $(index) --h5-name $(h5) --batch_size 32
+shell = ./train.sh --index-name $(index) --h5-name $(h5) --batch_size 32 --epoch 5
 
 #  queue number assigned to this set of jobs at the time of submission.
 log = train_$(Cluster)_$(Process).log

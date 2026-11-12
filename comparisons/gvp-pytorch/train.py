@@ -680,6 +680,11 @@ def main(index_path, h5_path, use_pdbs=False):
     train_sampler = gvp.data.BatchSampler(train_node_counts, max_nodes=3000)
     val_sampler = AvgLogitsBatchSampler(val_raw)
     test_sampler = AvgLogitsBatchSampler(test_raw)
+    print(len(val_sampler.batches))
+    print(len(test_sampler.batches))
+    assert all(len(b) > 0 for b in val_sampler.batches))
+    assert all(len(b) > 0 for b in test_sampler.batches))
+
 
     train_dataset = gvp.data.ProteinGraphDataset(train_raw)
     val_dataset = gvp.data.ProteinGraphDataset(val_raw)
