@@ -1,0 +1,61 @@
+# Temperature sweep: one PiFold job per mdCATH temperature, each on that temperature's own
+# topology split -- the PiFold side of ../DynamicMPNN/sweep_temp.sub (same temperatures,
+# same 2.6 h budget).
+#
+#   condor_submit sweep_temp.sub
+#
+# Submits 3 jobs (320 K, 379 K, 450 K). To run a subset, edit the `queue` line.
+#
+# PiFold is a static-structure model, so it has no ensemble k or TM-score pool. With
+# --structure_source traj each MD frame is a separate training example; the closest match
+# to DynamicMPNN's k=5 is drawing 5 random frames per protein per epoch
+# (--frames_per_protein 5). Validation (early stopping) averages logits over 16 evenly spaced
+# frames per protein; test averages over every frame. Otherwise as train.sub.
+#
+# MAX_HOURS: wall-clock training budget (main.py --max_hours, counted from process start),
+# leaving ~0.4 h of a 3 h job for the all-frames test pass and file transfer. Earlier mdCATH
+# traj runs early-stopped in 1.5-2 h, so this mainly guards against a slow node.
+
+universe                = docker
+docker_image            = cmikulski4/pifold:v5
+
+ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+STRUCTURE_SOURCE        = traj
+FRAMES_PER_PROTEIN      = 5
+VAL_MAX_FRAMES          = 16
+MAX_HOURS               = 2.6
+
+DS_NAME                 = MDCATH
+DS_TAG                  = mdcath$(TEMP)
+DS_H5                   = $(ResearchDrive)/mdcath_spinet_$(TEMP)_0_v2.h5
+DS_CSV                  = $(ResearchDrive)/mdcath_$(TEMP)_0_topo_split.csv
+
+# Explicit, so these runs don't share a W&B name with train.sub's PiFold_<ds_tag>_traj runs.
+RUN_NAME                = PiFold_$(DS_TAG)_$(STRUCTURE_SOURCE)_fpp$(FRAMES_PER_PROTEIN)
+
+executable              = train.sh
+environment             = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
+arguments               = --data_name $(DS_NAME) --data_root ./ --structure_source $(STRUCTURE_SOURCE) --batch_size 8 --epoch 200 --res_dir ./results --ex_name chtc_run --wandb_key_file ./wandb_api.txt --wandb_run_name $(RUN_NAME) --frames_per_protein $(FRAMES_PER_PROTEIN) --val_max_frames $(VAL_MAX_FRAMES) --log_step 2 --max_hours $(MAX_HOURS)
+
+transfer_input_files    = PiFold.tar.gz, API, main.py, parser.py, ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+transfer_output_files   = PiFold/results
+transfer_output_remaps  = "PiFold/results = ../results/sweep_temp_$(DS_TAG)_$(STRUCTURE_SOURCE)_fpp$(FRAMES_PER_PROTEIN)_$(Cluster)_$(Process)"
+
+log                     = logs/sweep_temp_$(DS_TAG)_$(STRUCTURE_SOURCE)_$(Cluster)_$(Process).log
+output                  = logs/sweep_temp_$(DS_TAG)_$(STRUCTURE_SOURCE)_$(Cluster)_$(Process).out
+error                   = logs/sweep_temp_$(DS_TAG)_$(STRUCTURE_SOURCE)_$(Cluster)_$(Process).err
+
+request_gpus            = 1
+request_cpus            = 8
+request_memory          = 128GB
+request_disk            = 200GB
+
+Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu" || TARGET.GPUs_DeviceName == "NVIDIA H100 80GB HBM3" || TARGET.GPUs_DeviceName == "NVIDIA A100-SXM4-80GB" || TARGET.GPUs_DeviceName == "NVIDIA H200" || TARGET.GPUs_DeviceName == "NVIDIA H200 NVL")
++WantGPULab             = true
++GPUJobLength           = "long"
+
+queue TEMP in (348, 379, 413)

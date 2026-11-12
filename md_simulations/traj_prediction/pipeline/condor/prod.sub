@@ -1,0 +1,24 @@
+# Step 3c: one production replica. Stops at the time budget.
+universe                = docker
+docker_image            = $(md_image)
+executable              = $(pipeline_dir)/condor/run.sh
+arguments               = python3 run_md.py prod --build-dir equil_$(who) --out-dir prod_$(who)_r$(replica) --temperature $(temperature) --n-frames $(n_frames) --frame-interval-ps $(frame_interval_ps) --budget-hours $(budget_hours) --seed $(seed)
+transfer_input_files    = $(pipeline_dir)/run_md.py, equil_$(who)
+transfer_output_files   = prod_$(who)_r$(replica)
+initialdir              = $(run_dir)
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+log                     = logs/prod_$(who)_r$(replica).log
+output                  = logs/prod_$(who)_r$(replica).out
+error                   = logs/prod_$(who)_r$(replica).err
+request_cpus            = 4
+request_memory          = 16GB
+request_disk            = 20GB
+request_gpus            = 1
++WantGPULab             = true
++GPUJobLength           = "short"
+if ! defined gpu_requirements
+  gpu_requirements      = (Machine == "bhaskargpu4000.chtc.wisc.edu" || TARGET.GPUs_DeviceName == "NVIDIA H200" || TARGET.GPUs_DeviceName == "NVIDIA H200 NVL" || TARGET.GPUs_DeviceName == "NVIDIA H100 80GB HBM3" || TARGET.GPUs_DeviceName == "NVIDIA A100-SXM4-80GB")
+endif
+Requirements            = (Target.HasCHTCStaging == true) && $(gpu_requirements)
+queue

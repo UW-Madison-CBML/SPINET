@@ -1,0 +1,21 @@
+# One short GPU job: prints the GPU and tests access to the ColabFold MSA server.
+#   mkdir -p logs && condor_submit condor/connectivity_test.sub
+universe                = docker
+docker_image            = ghcr.io/sokrypton/colabfold:1.5.5-cuda12.2.2
+executable              = condor/connectivity_test.sh
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+log                     = logs/connectivity_test.log
+output                  = logs/connectivity_test.out
+error                   = logs/connectivity_test.err
+request_cpus            = 1
+request_memory          = 8GB
+request_disk            = 20GB
+request_gpus            = 1
++WantGPULab             = true
++GPUJobLength           = "short"
+if ! defined gpu_requirements
+  gpu_requirements      = (Machine == "bhaskargpu4000.chtc.wisc.edu" || TARGET.GPUs_DeviceName == "NVIDIA H200" || TARGET.GPUs_DeviceName == "NVIDIA H200 NVL" || TARGET.GPUs_DeviceName == "NVIDIA H100 80GB HBM3" || TARGET.GPUs_DeviceName == "NVIDIA A100-SXM4-80GB")
+endif
+Requirements            = (Target.HasCHTCStaging == true) && $(gpu_requirements)
+queue

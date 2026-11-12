@@ -21,7 +21,11 @@ loops still run, on one frame per protein.
 import logging
 import json
 import sys
+import time
 import torch
+
+# --max_hours is counted from process start, so data loading / frame indexing counts too.
+_START_TIME = time.monotonic()
 import os.path as osp
 
 import warnings
@@ -155,6 +159,9 @@ class Exp:
         # The recorder counts validations, which only run every `--log_step` epochs; convert so
         # `--patience` stays in epochs, as in the other comparison models (MapDiff's trainer).
         recorder = Recorder(-(-self.args.patience // self.args.log_step), verbose=True)
+        max_hours = getattr(self.args, 'max_hours', None)
+        deadline = _START_TIME + max_hours * 3600 if max_hours else None
+        window_start = time.monotonic()  # start of the current train+validate window
         for epoch in range(self.args.epoch):
             train_loss, train_perplexity = self.method.train_one_epoch(self.train_loader)
             self._log({'train_loss': train_loss, 'train_perplexity': train_perplexity, 'epoch': epoch})
@@ -179,6 +186,21 @@ class Exp:
                     print("Early stopping")
                     logging.info("Early stopping")
                     break
+
+                # Checked only right after a validation (where the recorder saves the best
+                # weights): stop if another `--log_step`-epoch window, as long as the one just
+                # finished, would run past --max_hours. The best val epoch is restored below
+                # and scored on test as usual.
+                if deadline is not None:
+                    now = time.monotonic()
+                    if now + (now - window_start) > deadline:
+                        msg = ('Stopping at epoch {0}: another {1:.1f}-min window would pass '
+                               '--max_hours {2} ({3:.2f} h elapsed)').format(
+                                   epoch, (now - window_start) / 60, max_hours, (now - _START_TIME) / 3600)
+                        print_log(msg)
+                        self._log({'time_stopped_epoch': epoch, 'epoch': epoch})
+                        break
+                    window_start = now
 
         best_model_path = osp.join(self.path, 'checkpoint.pth')
         self.method.model.load_state_dict(torch.load(best_model_path))

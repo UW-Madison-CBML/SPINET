@@ -57,4 +57,4 @@ request_gpus = 1
 +WantGPULab   = true
 +GPUJobLength = "long"
 
-queue TEMP in (320, 379, 450)
+queue TEMP in (348, 415)

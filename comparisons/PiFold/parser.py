@@ -101,6 +101,10 @@ def create_parser():
     parser.add_argument('--epoch', default=100, type=int, help='end epoch')
     parser.add_argument('--log_step', default=1, type=int,
                         help='Validate (and check early stopping) every N epochs; --patience stays in epochs')
+    parser.add_argument('--max_hours', default=None, type=float,
+                        help='Wall-clock budget from process start (data loading included). Training '
+                             'stops after the last validation window that still fits, judging the next '
+                             'window by the previous one; the best val epoch is then tested as usual')
     parser.add_argument('--lr', default=0.001, type=float, help='Learning rate')
     parser.add_argument('--patience', default=10, type=int,
                         help='Epochs without a new best val perplexity before stopping')

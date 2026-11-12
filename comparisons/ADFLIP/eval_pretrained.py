@@ -192,6 +192,11 @@ def load_flow_model(ckpt_path, device):
         'adflip_design', osp.join(ADFLIP_ROOT, 'test', 'design.py'))
     design = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(design)
+    # The released checkpoint pickles its config as `__main__.Config` (upstream saved it from a
+    # script that defined Config at top level, and design.py works because it is run as
+    # __main__ itself). Here __main__ is this script, so expose upstream's class under that name
+    # or torch.load fails with "Can't get attribute 'Config' on <module '__main__'>".
+    sys.modules['__main__'].Config = design.Config
     return design.load_flow_model(ckpt_path, device)
 
 

@@ -1,0 +1,17 @@
+# Step 1: cut the reference window out of the mdCATH shard. Variables come from the DAG.
+universe                = docker
+docker_image            = $(md_image)
+executable              = $(pipeline_dir)/condor/run.sh
+arguments               = python3 prep_window.py --shard $(shard) --traj-id $(traj_id) --frame-start $(frame_start) --frame-end $(frame_end) --pred-seq $(pred_seq) --frame-interval-ns $(frame_interval_ns) $(prep_flags) --out-dir .
+transfer_input_files    = $(pipeline_dir)/prep_window.py, $(pipeline_dir)/common.py, $(shard_url)
+transfer_output_files   = ref_window.pdb, ref_window.xtc, seqs.fasta, prep.json
+initialdir              = $(run_dir)
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+log                     = logs/prep.log
+output                  = logs/prep.out
+error                   = logs/prep.err
+request_cpus            = 1
+request_memory          = 8GB
+request_disk            = $(shard_disk)
+queue
