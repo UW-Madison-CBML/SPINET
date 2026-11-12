@@ -31,10 +31,26 @@ mkdir -p fold/raw params "$XDG_CACHE_HOME" "$MPLCONFIGDIR"
 
 nvidia-smi --query-gpu=name,memory.total --format=csv || true
 if [ -f colabfold_params.tar.gz ]; then
-    tar -xzf colabfold_params.tar.gz -C params
+    tar -xf colabfold_params.tar.gz -C params      # -xf detects the compression (or none)
+fi
+# ColabFold reads the weights from <data>/params/*.npz. Find that folder wherever
+# the archive put it; without weights, <data> stays ./params and ColabFold downloads.
+DATA=$PWD/params
+NPZ=$(find "$PWD/params" -name 'params_model_*.npz' | head -n 1)
+if [ -n "$NPZ" ]; then
+    WEIGHTS=$(dirname "$NPZ")
+    if [ "$(basename "$WEIGHTS")" != params ]; then
+        mkdir -p "$PWD/af2_data"
+        ln -s "$WEIGHTS" "$PWD/af2_data/params"
+        WEIGHTS=$PWD/af2_data/params
+    fi
+    DATA=$(dirname "$WEIGHTS")
+    echo "AF2 weights: $(ls "$WEIGHTS" | wc -l) files in $WEIGHTS"
+    ls "$WEIGHTS"/download*finished.txt >/dev/null 2>&1 || \
+        echo "No download_finished.txt marker: ColabFold will download the weights again."
 fi
 
-colabfold_batch --data "$PWD/params" \
+colabfold_batch --data "$DATA" \
     --msa-mode mmseqs2_uniref_env \
     --num-models 5 --num-recycle 3 --rank plddt \
     --amber --num-relax 1 --use-gpu-relax \

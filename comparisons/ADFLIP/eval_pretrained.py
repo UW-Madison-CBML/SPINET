@@ -181,23 +181,43 @@ def create_parser():
     return parser.parse_args()
 
 
-def load_flow_model(ckpt_path, device):
-    """Upstream's checkpoint loader, taken from `test/design.py` without copying it.
+_DESIGN_MODULE = None
+
+
+def load_design_module():
+    """Upstream's `test/design.py` (its model builder and checkpoint loader), imported once.
 
     Loaded by path rather than imported: ADFLIP's package is called `test`, which would shadow
     the standard library's `test` module on `import test.design`.
+
+    Two registrations make checkpoints loadable, both of them about where pickle looks for the
+    `Config` class a checkpoint's config was saved as:
+
+    * ``sys.modules['adflip_design']`` -- train.py saves its config as this module's `Config`, so
+      the name has to resolve at `torch.load` time. Registered *before* `exec_module` so the
+      module object is findable even while it is still executing.
+    * ``__main__.Config`` -- the *released* checkpoint pickles its config as `__main__.Config`
+      (upstream saved it from a script that defined Config at top level, and design.py works
+      because it is itself run as __main__). Here __main__ is whichever script is running, so
+      without this `torch.load` fails with "Can't get attribute 'Config' on <module '__main__'>".
     """
+    global _DESIGN_MODULE
+    if _DESIGN_MODULE is not None:
+        return _DESIGN_MODULE
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         'adflip_design', osp.join(ADFLIP_ROOT, 'test', 'design.py'))
     design = importlib.util.module_from_spec(spec)
+    sys.modules['adflip_design'] = design
     spec.loader.exec_module(design)
-    # The released checkpoint pickles its config as `__main__.Config` (upstream saved it from a
-    # script that defined Config at top level, and design.py works because it is run as
-    # __main__ itself). Here __main__ is this script, so expose upstream's class under that name
-    # or torch.load fails with "Can't get attribute 'Config' on <module '__main__'>".
     sys.modules['__main__'].Config = design.Config
-    return design.load_flow_model(ckpt_path, device)
+    _DESIGN_MODULE = design
+    return design
+
+
+def load_flow_model(ckpt_path, device):
+    """``(ema_flow, config)`` for a checkpoint -- the released one, or one train.py saved."""
+    return load_design_module().load_flow_model(ckpt_path, device)
 
 
 def adflip_clusters():

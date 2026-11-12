@@ -46,7 +46,7 @@ def main():
     p.add_argument("--shard-disk", default="40GB", help="disk request of the prep job")
     p.add_argument("--allow-breaks", action="store_true",
                    help="accept domains with chain breaks")
-    p.add_argument("--af2-params", default="",
+    p.add_argument("--af2-params", default=f"{RESEARCH_DRIVE}/colabfold_params.tar.gz",
                    help="path or URL of colabfold_params.tar.gz (default: download per job)")
     p.add_argument("--md-image", default="cmikulski4/traj-md:v1")
     p.add_argument("--fold-image", default="ghcr.io/sokrypton/colabfold:1.5.5-cuda12.2.2")

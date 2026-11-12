@@ -39,17 +39,17 @@ docker_image            = cmikulski4/mapdiff:v5
 
 ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
 
-#DS_NAME                 = mdcath
-#DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0_v2.h5
-#DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topo_split.csv
+DS_NAME                 = mdcath
+DS_H5                   = $(ResearchDrive)/mdcath_spinet_320_0_v2.h5
+DS_CSV                  = $(ResearchDrive)/mdcath_320_0_topo_split.csv
 
 # DS_NAME                 = atlas
 # DS_H5                   = $(ResearchDrive)/atlas_data.h5
 # DS_CSV                  = $(ResearchDrive)/atlas_cross_val_index.csv
 
-DS_NAME                 = mdcath
-DS_H5                   = $(ResearchDrive)/mdcath_spinet_450_0_v2.h5
-DS_CSV                  = $(ResearchDrive)/mdcath_450_0_topo_split.csv
+# DS_NAME                 = mdcath
+# DS_H5                   = $(ResearchDrive)/mdcath_spinet_450_0_v2.h5
+# DS_CSV                  = $(ResearchDrive)/mdcath_450_0_topo_split.csv
 
 
 
@@ -59,21 +59,41 @@ DS_CSV                  = $(ResearchDrive)/mdcath_450_0_topo_split.csv
 # Override at submit time:  condor_submit train.sub STRUCTURE_SOURCE=frame
 STRUCTURE_SOURCE        = traj
 
+# Stage-1 (mask-prior IPA) checkpoint to start from. train.sh passes it as prior_model.path, so
+# stage 1 (~7.9 min/epoch, ~26 h for 200 epochs) is skipped and only stage 2 runs. It must come
+# from the same DS_H5 build:
+#   mdcath 450: outputs/mdcath_traj_mapdiff_2026-11-09_05-50-01/model/mdcath_traj_mapdiff_prior_curr_150_epochs_2026-11-10_01-47-13.pt  (150 epochs; job 8089088 was killed at 177)
+#   mdcath 320: outputs/mdcath_traj_mapdiff_2026-11-08_22-33-42/model/mdcath_traj_mapdiff_prior_last_200_epochs_2026-11-10_01-07-04.pt  (200 epochs, job 8087485)
+# To train stage 1 from scratch instead, drop $(PRIOR_CKPT) from transfer_input_files and
+# PRIOR_CKPT_FILE from environment.
+# Job 8417232 paired the 320 build with the 450 prior by mistake -- keep DS_H5 and this in sync.
+PRIOR_CKPT              = outputs/mdcath_traj_mapdiff_2026-11-08_22-33-42/model/mdcath_traj_mapdiff_prior_last_200_epochs_2026-11-10_01-07-04.pt
+
 executable              = train.sh
 # The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
 # mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.
-environment             = "DS_NAME=$(DS_NAME) STRUCTURE_SOURCE=$(STRUCTURE_SOURCE) DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
+environment             = "DS_NAME=$(DS_NAME) STRUCTURE_SOURCE=$(STRUCTURE_SOURCE) DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV) PRIOR_CKPT_FILE=$Fnx(PRIOR_CKPT)"
 # Forwarded verbatim to `python train.py ...` -- see conf/train.yaml. train.sh prepends the
 # dataset.process_root / dataset.marginal_train_dir that match $(STRUCTURE_SOURCE), so only
 # the run/wandb wiring needs setting here. Pass prior_model.path=<ckpt> to skip stage 1 and
 # load an already-trained mask-prior IPA checkpoint instead.
-arguments               = dataset=$(DS_NAME) wandb.use=True wandb.key_file=./wandb_api.txt experiment.name=$(DS_NAME)_$(STRUCTURE_SOURCE)_mapdiff
+#
+# Stage-2 schedule sized to finish in < 24 h on an H200 (timings from jobs 8087485/8089088):
+# ~9.3 min per diffusion epoch, and validation cost scales with
+# frames x ensemble_num x ddim_steps (~1.4 s/frame at ensemble_num=50, ddim_steps=100).
+# With 20 frames and ensemble_num=5, each validation and the final test take ~0.6 h, so
+# 80 epochs (12.4 h) + 8 validations (~5 h) + test (~0.6 h) comes to ~18 h. Patience is in epochs
+# and is only checked at a validation, so 30 means 3 validations without improvement.
+# train.lr is OneCycle's peak LR, lowered from MapDiff's 5e-4: job 8417232 broke within 10
+# epochs at 5e-4 (NaN/inf at its first validation) while jointly fine-tuning the prior.
+# eval_max_frames caps the test set; left null it scores every frame (~355k, days of sampling).
+arguments               = dataset=$(DS_NAME) wandb.use=True wandb.key_file=./wandb_api.txt experiment.name=$(DS_NAME)_$(STRUCTURE_SOURCE)_mapdiff train.train_epochs=80 train.save_and_sample_every=10 train.early_stopping_patience=30 diffusion.ensemble_num=5 dataset.val_max_frames=20 dataset.eval_max_frames=20
 
 # The pristine MapDiff tarball, this folder's dataset/wandb additions, the
 # API-key file (train.sh splits the W&B key out of it into wandb_api.txt),
 # lib/{stats_utils,relaxed_pdb,traj_frames,dataset_splits}.py (shared across all models --
 # see ../../lib), and the dataset's trajectory store + split index.
-transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(DS_H5), $(DS_CSV)
+transfer_input_files    = train.sh, train.py, trainer.py, conf, dataloader, model, data, ../../../api_keys.txt, ../../lib/stats_utils.py, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, MapDiff.tar.gz, $(DS_H5), $(DS_CSV), $(PRIOR_CKPT)
 
 should_transfer_files   = YES
 when_to_transfer_output = ON_EXIT

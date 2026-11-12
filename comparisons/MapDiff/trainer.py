@@ -122,6 +122,12 @@ class MapDiffTrainer:
         # `val_perp_mean`); `best_val_recovery` is just the median recovery at that epoch.
         self.best_val_recovery, self.best_val_perplexity = 0, float('inf')
         self.best_model = None
+        self._saved_paths = {}  # mode ('best'/'last') -> checkpoint path currently on disk
+        # Steps whose gradient norm was NaN/inf; the optimizer step is skipped for those. Too many
+        # in a row means training has diverged, so stop (and keep the last good checkpoint).
+        self.num_skipped_steps = 0
+        self.consecutive_skipped_steps = 0
+        self.max_consecutive_skipped_steps = 20
         # Early stopping on val perplexity -- the protocol every comparison model shares (see
         # comparisons/DynamicMPNN/train.py's EarlyStopping) -- with patience counted in epochs
         # (validation only runs every `save_and_sample_every` epochs, so patience is effectively
@@ -284,8 +290,13 @@ class MapDiffTrainer:
     # ------------------------------------------------------------------
 
     def save(self, save_epochs, save_steps, mode='best'):
+        """Write a `best` or `last` checkpoint, replacing the previous file of that mode so a
+        long run keeps one of each instead of one per validation."""
         config_dict = OmegaConf.to_container(self.config, resolve=True)
-        state = self.best_model.state_dict() if mode == 'best' else self.model.state_dict()
+        # No validation has run yet (or none improved): `best` falls back to the current model,
+        # the same fallback test() uses.
+        model = self.best_model if mode == 'best' and self.best_model is not None else self.model
+        state = model.state_dict()
         data = {
             'config': config_dict,
             'step': save_steps,
@@ -294,8 +305,13 @@ class MapDiffTrainer:
             'opt': self.optimizer.state_dict(),
         }
         save_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        torch.save(data, os.path.join(self.output_dir, 'model',
-                                      f'{self.config.experiment.name}_{mode}_{save_epochs}_epochs_{save_steps}_steps_{save_time}.pt'))
+        path = os.path.join(self.output_dir, 'model',
+                            f'{self.config.experiment.name}_{mode}_{save_epochs}_epochs_{save_steps}_steps_{save_time}.pt')
+        torch.save(data, path)
+        previous = self._saved_paths.get(mode)
+        if previous and previous != path and os.path.exists(previous):
+            os.remove(previous)
+        self._saved_paths[mode] = path
 
     def save_table_results(self):
         with open(os.path.join(self.output_dir, 'pretrain_markdowntable.txt'), 'w') as f:
@@ -347,6 +363,9 @@ class MapDiffTrainer:
                     cm_title='Validation Amino Acid Confusion Matrix', epoch=self.epoch) | {
                     'val_full_recovery': full_recovery, 'val_perplexity': perplexity,
                     'val_median_recovery': median_recovery, 'val_mean_recovery': mean_recovery,
+                    # Residues whose DDIM posterior was NaN/inf and fell back to the denoiser's
+                    # prediction (model/prior_diff.py); cumulative over the run.
+                    'sampler_nonfinite_rows': getattr(self.model, 'num_nonfinite_posterior_rows', 0),
                 })
 
             # Selected on the per-protein mean perplexity -- `val_perp_mean` in the dict logged
@@ -372,10 +391,31 @@ class MapDiffTrainer:
                 ipa_batch = ipa_batch.to(self.device) if ipa_batch is not None else None
                 base_loss, mask_loss = self.model(g_batch, ipa_batch)
                 loss = base_loss + mask_loss
+                if not torch.isfinite(loss):
+                    # Fail at the first bad step rather than training on NaN until validation
+                    # trips over it (job 8417232 lost 1.5 h that way). The weights are saved
+                    # under their own name so the last good `last` checkpoint is kept.
+                    self.save(self.epoch, self.step, mode='diverged')
+                    raise FloatingPointError(
+                        f'Non-finite training loss at step {self.step} (epoch {self.epoch}): '
+                        f'base_loss={base_loss.item()} mask_loss={mask_loss.item()}')
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-                self.optimizer.step()
+                if torch.isfinite(grad_norm):
+                    self.optimizer.step()
+                    self.consecutive_skipped_steps = 0
+                else:
+                    # One bad batch shouldn't poison the weights: skip its update. The LR
+                    # schedule still advances so the run keeps its planned length.
+                    self.num_skipped_steps += 1
+                    self.consecutive_skipped_steps += 1
+                    print(f'Step {self.step}: non-finite gradient norm, skipping update '
+                          f'({self.num_skipped_steps} skipped so far)')
+                    if self.consecutive_skipped_steps >= self.max_consecutive_skipped_steps:
+                        raise FloatingPointError(
+                            f'{self.consecutive_skipped_steps} consecutive non-finite gradients '
+                            f'at step {self.step} (epoch {self.epoch}): training has diverged')
                 if self.scheduler:
                     self.scheduler.step()
                 self.optimizer.zero_grad()
@@ -385,7 +425,9 @@ class MapDiffTrainer:
 
                 if self.wandb_run:
                     self.wandb_run.log({'train_base_loss': base_loss.item(), 'train_mask_loss': mask_loss.item(),
-                                         'train_loss': loss.item(), 'step': self.step, 'epoch': self.epoch})
+                                         'train_loss': loss.item(), 'train_grad_norm': grad_norm.item(),
+                                         'train_skipped_steps': self.num_skipped_steps,
+                                         'step': self.step, 'epoch': self.epoch})
 
                 if self.step % self.iter_one_epoch == 0 and self.step != 0:
                     self.epoch += 1
@@ -396,6 +438,11 @@ class MapDiffTrainer:
                 pbar.update(1)
                 if self.step != 0 and self.step % (self.save_and_sample_every * self.iter_one_epoch) == 0:
                     self._run_validation()
+                    # Checkpoint at every validation so a crash or a kill mid-run keeps the
+                    # weights (previously only written once training finished).
+                    self.save(self.epoch, self.step, mode='last')
+                    if self.best_val_step == self.step:
+                        self.save(self.best_val_epoch, self.best_val_step, mode='best')
                     if self._should_stop_early():
                         break
 

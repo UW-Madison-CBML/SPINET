@@ -1,0 +1,120 @@
+# CHTC HTCondor submit file: train ADFLIP on MD trajectory frames.
+#
+# The zero-shot row (eval_pretrained.sub) scores the released ICML checkpoint and does poorly:
+# with --structure-source frame the inputs are backbone-only single chains, while ADFLIP was
+# trained on all-atom entries with ligands. This job retrains it on the inputs it is scored on.
+#
+# Training is PER FRAME -- each (protein, frame) pair is one example, which is upstream's own
+# regime (trainer.py feeds one structure per item) and the same regime comparisons/PiFold's
+# `--structure_source traj` and MapDiff use, so the three rows stay comparable. ADFLIP's
+# multi-state path (Algorithm 1) is an inference-time procedure in the paper, not a training one.
+#
+# Which frames are trained on, and how they are scored, are taken from comparisons/ProteinMPNN:
+# training strides the sheaf frames by TRAIN_STRIDE, and evaluation scores 128-frame trajectory
+# windows (ProteinMPNN's AvgLogitsBatchSampler, the same windows scripts/train_residue_classifier.py
+# cuts for the sheaf model), averaging a window's frames and reporting one sample per window.
+# Conditioning stays one-shot -- every residue masked, t = 0 -- which is DynamicMPNN's and the
+# sheaf model's setting, NOT ProteinMPNN's, whose perplexity is teacher-forced on the true
+# sequence. Checkpoints are saved in upstream's own
+# layout, so to get the *sampled* multi-state row for the same weights, point eval_pretrained.py
+# at one (it takes --ckpt; eval_pretrained.sub has no macro for it, so add one or run it directly):
+#
+#   python eval_pretrained.py --ckpt weights_mdcath320_8331234_0/ADFLIP_mdcath320_best.pt \
+#       --data-name MDCATH --traj-h5 ... --n-states 20
+#
+# Submit (transfer_output_remaps writes into this directory, which HTCondor will not create for
+# you -- mkdir both first, as ../PiFold and ../DynamicMPNN do):
+#   mkdir -p logs && condor_submit train.sub
+#
+# ATLAS instead of the mdCATH 320 K default:
+#   condor_submit train.sub DS_NAME=ATLAS DS_TAG=atlas \
+#       DS_H5='$(ResearchDrive)/atlas_data.h5' \
+#       DS_CSV='$(ResearchDrive)/atlas_cross_val_index.csv'
+#
+# From a random init rather than the released weights (upstream's own lr, see train.py --lr):
+#   condor_submit train.sub EXTRA='--from-scratch --lr 1e-3'
+
+universe                = docker
+docker_image            = cmikulski4/adflip:v1
+
+ResearchDrive           = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
+
+# $(DS_TAG) names the dataset BUILD (mdcath320, mdcath450, atlas) and labels this job's logs and
+# weights directory. The W&B run name comes from lib/dataset_splits.dataset_tag(), which reads the
+# build off $(DS_H5)'s file name -- keep DS_TAG in step with DS_H5 when switching.
+# (Each is set under `if ! defined` -- condor_submit applies command-line macros BEFORE parsing
+# this file, so a bare assignment here would silently win over the override.)
+if ! defined DS_NAME
+  DS_NAME               = MDCATH
+endif
+if ! defined DS_TAG
+  DS_TAG                = mdcath320
+endif
+if ! defined DS_H5
+  DS_H5                 = $(ResearchDrive)/mdcath_spinet_320_0_v2.h5
+endif
+if ! defined DS_CSV
+  DS_CSV                = $(ResearchDrive)/mdcath_320_0_topo_split.csv
+endif
+# The checkout plus the released checkpoint, tarred together. Build with:
+#   tar -czf ADFLIP.tar.gz --exclude=.git -C comparisons/ADFLIP ADFLIP
+if ! defined ADFLIP_TARBALL
+  ADFLIP_TARBALL        = ./ADFLIP.tar.gz
+endif
+# Frame sampling and evaluation copy comparisons/ProteinMPNN (see train.py's docstring):
+# TRAIN_STRIDE keeps every Nth sheaf frame for training (16 is ProteinMPNN's own coords[:, ::16]),
+# and evaluation scores WINDOW_LEN=128-frame windows starting every WINDOW_STEP=32 frames, of
+# which WINDOW_STRIDE keeps every Nth. WINDOW_STRIDE=1 reproduces ProteinMPNN's sampler exactly
+# and costs ~30 min per validation pass; 4 is ~8 min and leaves each window's width untouched.
+if ! defined TRAIN_STRIDE
+  TRAIN_STRIDE          = 16
+endif
+if ! defined WINDOW_STRIDE
+  WINDOW_STRIDE         = 4
+endif
+# 8 frames per forward pass x 8 accumulated = upstream's batch of 64 per optimizer step.
+if ! defined BATCH_SIZE
+  BATCH_SIZE            = 8
+endif
+if ! defined EPOCHS
+  EPOCHS                = 200
+endif
+# Anything else forwarded to train.py, e.g. '--from-scratch --lr 1e-3' or '--limit 4' for a smoke
+# test. Keep the quotes: condor passes the whole macro through as one argument list.
+if ! defined EXTRA
+  EXTRA                 =
+endif
+
+executable              = train.sh
+# The staged trajectory store / split csv names, so lib/dataset_splits.py reads whichever
+# mdCATH build (320, 450, ...) DS_H5 / DS_CSV point at instead of its fallback names.
+environment             = "DS_H5_FILE=$Fnx(DS_H5) DS_CSV_FILE=$Fnx(DS_CSV)"
+# HTCondor drops the staged files flat into the scratch dir, which is where train.sh runs;
+# train.py resolves these paths before it chdirs into the checkout.
+arguments               = --data-name $(DS_NAME) --traj-h5 ./$Fnx(DS_H5) --index-csv ./$Fnx(DS_CSV) --train-frame-stride $(TRAIN_STRIDE) --eval-window-stride $(WINDOW_STRIDE) --batch-size $(BATCH_SIZE) --epochs $(EPOCHS) --save-dir ./weights --res-dir ./results --wandb-key-file ./wandb_api.txt $(EXTRA)
+
+transfer_input_files    = train.sh, train.py, eval_pretrained.py, multi_state.py, $(ADFLIP_TARBALL), ../../../api_keys.txt, ../../lib/relaxed_pdb.py, ../../lib/traj_frames.py, ../../lib/dataset_splits.py, ../../lib/stats_utils.py, $(DS_H5), $(DS_CSV)
+
+should_transfer_files   = YES
+# train.py rewrites weights/<run>.pt after every epoch and weights/<run>_best.pt whenever val
+# perplexity improves, so an evicted job still brings home its latest and best weights.
+when_to_transfer_output = ON_EXIT_OR_EVICT
+transfer_output_files   = weights, results
+transfer_output_remaps  = "weights = weights_$(DS_TAG)_$(Cluster)_$(Process) ; results = results_$(DS_TAG)_$(Cluster)_$(Process)"
+
+log                     = logs/train_$(DS_TAG)_$(Cluster)_$(Process).log
+output                  = logs/train_$(DS_TAG)_$(Cluster)_$(Process).out
+error                   = logs/train_$(DS_TAG)_$(Cluster)_$(Process).err
+
+request_gpus            = 1
+request_cpus            = 8
+request_memory          = 64GB
+request_disk            = 150GB
+
++WantGPULab             = true
++GPUJobLength           = "long"
+
+# W&B needs internet -- the same machines the other comparisons use.
+Requirements            = (Target.HasCHTCStaging == true) && (Machine == "bhaskargpu4000.chtc.wisc.edu" || TARGET.GPUs_DeviceName == "NVIDIA H200" || TARGET.GPUs_DeviceName == "NVIDIA H200 NVL")
+
+queue 1

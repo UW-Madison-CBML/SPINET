@@ -67,8 +67,18 @@ for f in api_keys.txt wandb_api.txt stats_utils.py relaxed_pdb.py traj_frames.py
     [[ -n "$f" && -f "$f" ]] && cp "$f" MapDiff/
 done
 
-cd MapDiff
 EXTRA_ARGS=()
+# $PRIOR_CKPT_FILE: a stage-1 checkpoint transferred in by train.sub. Loading it skips stage 1.
+# Resolved to an absolute path here, before the cd, so it is found from MapDiff/ too.
+if [[ -n "${PRIOR_CKPT_FILE:-}" ]]; then
+    if [[ ! -f "${PRIOR_CKPT_FILE}" ]]; then
+        echo "PRIOR_CKPT_FILE=${PRIOR_CKPT_FILE} was set but not transferred in" >&2
+        exit 1
+    fi
+    EXTRA_ARGS+=("prior_model.path=$(pwd)/${PRIOR_CKPT_FILE}")
+fi
+
+cd MapDiff
 if [[ "${STRUCTURE_SOURCE}" == "traj" ]]; then
     # Frames are featurized on the fly inside train.py's DataLoader workers (and discarded), so
     # nothing is precomputed here; train.py writes the amino-acid marginal itself if missing.
