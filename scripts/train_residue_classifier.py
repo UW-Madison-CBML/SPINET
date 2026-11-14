@@ -273,9 +273,9 @@ def train_residue_classifier(args_dict):
     val_ratio = 0.15
     test_ratio = 0.15
     num_nodes = 3000 # GRU's can't do more than a batch of 2**16
-    hidden_dim = 64
-    stalk_dim = 8
-    num_blocks = 4
+    hidden_dim = 128
+    stalk_dim = 16
+    num_blocks = 6
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
     ablate_sheaves=args_dict["ablate_sheaves"]
@@ -311,7 +311,7 @@ def train_residue_classifier(args_dict):
 
     torch.manual_seed(seed)
 
-    epsilon = (0.5 if ds_name=="atlas" else 5.0) # in Angstroms, atlas is in NM i.e. 10A
+    epsilon = (0.75 if ds_name=="atlas" else 7.5) # in Angstroms, atlas is in NM i.e. 10A
     torch_rng = torch.Generator(); torch_rng = torch_rng.manual_seed(seed)
     np_rng = np.random.default_rng(seed=seed)
 

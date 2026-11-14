@@ -316,7 +316,7 @@ class EdgeToNodeAgg(MessagePassing):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
 """
-OLD FILE!!! here
+OLD FILE!!! here # version 2
 # ----------------------------------------------------------------------------------------------
 # this initial dynamics embedding will be the main thing we change when editing the input data
 # it will be harder to not hard code some of this stuff
@@ -506,6 +506,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
             return data
 """
 # ----------------------------------------------------------------------------------------------
+# version 1
 # this initial dynamics embedding will be the main thing we change when editing the input data
 # it will be harder to not hard code some of this stuff
 # the same is true for atomic frame embeddings
