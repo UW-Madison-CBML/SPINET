@@ -28,7 +28,8 @@ from torch.profiler import profile, ProfilerActivity, record_function
 import h5py
 #from rgnn import RGNN
 from torch.utils.data import BatchSampler
-
+from datetime import datetime
+#datetime.today().strftime('%Y-%m-%d')
 
 class ProteinSampler(BatchSampler):
     def __init__(self, dataset, num_nodes, rng=None):
@@ -274,7 +275,7 @@ def train_residue_classifier(args_dict):
     test_ratio = 0.15
     num_nodes = 3000 # GRU's can't do more than a batch of 2**16
     hidden_dim = 128
-    stalk_dim = 16
+    stalk_dim = 8
     num_blocks = 6
     masking_ratio = 1.0
     use_masking = masking_ratio < 1.0
@@ -282,7 +283,9 @@ def train_residue_classifier(args_dict):
     ablate_edge_features=args_dict["ablate_edge_features"]
     use_attention = not args_dict["ablate_attention"]
     num_heads = 4 if use_attention else 1
-    run_name = args_dict["run_name"]
+    run_name = args_dict["run_name"] + "_" + datetime.today().strftime('%Y-%m-%d')
+
+
     restriction_map_type=args_dict["restriction_map_type"]
     seed=42
     num_timesteps = 128

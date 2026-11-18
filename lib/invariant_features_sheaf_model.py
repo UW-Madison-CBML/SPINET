@@ -439,7 +439,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
         self.atom_indices = {atom: slice(3*i,3*(i+1)) for i, atom in enumerate(atoms)}
         #TODO add atoms and frame origin to config
         self.node_slice = node_slice
-
+        self.ablate_rnn = ablate_rnn
 
         if(config != None):
             if isinstance(config, dict):
@@ -474,7 +474,7 @@ class NodeSheafClassifier(nn.Module, PyTorchModelHubMixin):
                 self.use_attention = config.use_attention
                 self.use_masking = config.use_masking
 
-        self.init_dynamics_embedding = InitDynamicsEmbedding(15 if self.node_slice is None else len(list(range(15))[self.node_slice]), 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves, ablate_edge_features=self.ablate_edge_features)
+        self.init_dynamics_embedding = InitDynamicsEmbedding(15 if self.node_slice is None else len(list(range(15))[self.node_slice]), 13, self.hidden_dim, self.stalk_dim, self.atoms, self.atom_indices, frame_origin=self.frame_origin, ablate_sheaves=self.ablate_sheaves, ablate_edge_features=self.ablate_edge_features, ablate_rnn = self.ablate_rnn)
 
         self.san = SheafResidualSAN(self.num_blocks, self.hidden_dim, self.stalk_dim, self.num_heads, dropout = self.gat_dropout, ablate_sheaves=self.ablate_sheaves, restriction_map_type=self.restriction_map_type, use_attention=self.use_attention)
 

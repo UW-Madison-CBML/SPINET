@@ -3,7 +3,7 @@
 universe = docker
 docker_image = jenslundsgaard/sheaf_training:v3.2
 executable = run_spinet_on.sh
-arguments  = $(file) --resume $(model)
+arguments  = $(h5_file) $(index) --resume $(model)
 
 log    = run_spinet_on_$(Cluster)_$(Process).log
 output = run_spinet_on_$(Cluster)_$(Process).out
@@ -13,7 +13,7 @@ should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 
 ResearchDrive = pelican://chtc.wisc.edu/researchdrive/dbhaskar3/CHTC/sheaf_protein_dynamics
-transfer_input_files = run_spinet_on.py, run_spinet_on.sh, load_dynamics.py, ../lib/, ../../api_keys.txt, $(ResearchDrive)/$(file)
+transfer_input_files = run_spinet_on.py, run_spinet_on.sh, load_dynamics.py, ../lib/, ../../api_keys.txt, $(ResearchDrive)/$(h5_file), $(ResearchDrive)/$(index)
 
 +wantGPULab = true
 request_cpus = 16
@@ -24,4 +24,4 @@ request_gpus = 1
 requirements = (Target.HasCHTCStaging == true)
 # && (Machine == "bhaskargpu4000.chtc.wisc.edu")
 
-queue model, file from run_spinet_on.txt
+queue model, h5_file, index from run_spinet_on.txt
